@@ -1,0 +1,138 @@
+use axum::{extract::{Path, State}, routing::{get, post}, Json, Router};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{
+    app_state::AppState,
+    auth::CurrentUser,
+    error::ApiError,
+    models::user::{Conversation, ConversationMessage},
+};
+
+#[derive(Debug, Deserialize)]
+struct SendMessageRequest {
+    conversation_id: Option<Uuid>,
+    text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SendMessageResponse {
+    conversation_id: Uuid,
+    user_text: String,
+    assistant_text: String,
+}
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/conversations", get(list_conversations))
+        .route("/api/conversations/:id/messages", get(list_messages))
+        .route("/api/assistant/send", post(send_message))
+}
+
+async fn list_messages(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<ConversationMessage>>, ApiError> {
+    let owner = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(1) FROM conversations WHERE id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_one(&state.db)
+    .await?;
+    if owner == 0 {
+        return Err(ApiError::Forbidden);
+    }
+
+    let messages = sqlx::query_as::<_, ConversationMessage>(
+        "SELECT id, conversation_id, role, content, created_at FROM conversation_messages WHERE conversation_id = $1 ORDER BY created_at ASC",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(messages))
+}
+
+async fn list_conversations(
+    State(state): State<AppState>,
+    user: CurrentUser,
+) -> Result<Json<Vec<Conversation>>, ApiError> {
+    let conversations = sqlx::query_as::<_, Conversation>(
+        "SELECT id, user_id, title, created_at, updated_at FROM conversations WHERE user_id = $1 ORDER BY updated_at DESC",
+    )
+    .bind(user.id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(conversations))
+}
+
+async fn send_message(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Json(req): Json<SendMessageRequest>,
+) -> Result<Json<SendMessageResponse>, ApiError> {
+    if req.text.trim().is_empty() {
+        return Err(ApiError::BadRequest("text 不能为空".to_string()));
+    }
+
+    let conversation_id = if let Some(cid) = req.conversation_id {
+        let owner = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(1) FROM conversations WHERE id = $1 AND user_id = $2",
+        )
+        .bind(cid)
+        .bind(user.id)
+        .fetch_one(&state.db)
+        .await?;
+        if owner == 0 {
+            return Err(ApiError::Forbidden);
+        }
+        cid
+    } else {
+        let title = req.text.chars().take(24).collect::<String>();
+        let rec: (Uuid,) = sqlx::query_as(
+            "INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES ($1, $2, $3, NOW(), NOW()) RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user.id)
+        .bind(title)
+        .fetch_one(&state.db)
+        .await?;
+        rec.0
+    };
+
+    let assistant_text = state.plugin_router.reply(req.text.trim()).await;
+
+    sqlx::query(
+        "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES ($1, $2, 'user', $3, NOW())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(conversation_id)
+    .bind(req.text.trim())
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES ($1, $2, 'assistant', $3, NOW())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(conversation_id)
+    .bind(&assistant_text)
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query("UPDATE conversations SET updated_at = $1 WHERE id = $2")
+        .bind(Utc::now())
+        .bind(conversation_id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(Json(SendMessageResponse {
+        conversation_id,
+        user_text: req.text,
+        assistant_text,
+    }))
+}

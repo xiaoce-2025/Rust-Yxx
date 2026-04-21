@@ -1,0 +1,223 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PKU Video 工作台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #13241d;
+      --line: rgba(19,36,29,.18);
+      --accent: #0c7a57;
+      --warn: #982a3d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Manrope", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(50rem 20rem at -10% -10%, rgba(181,91,35,.2), transparent 60%),
+        radial-gradient(60rem 26rem at 110% 110%, rgba(12,122,87,.2), transparent 60%),
+        #edf3ed;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.82);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 18px 38px rgba(0,0,0,.1);
+      padding: 20px;
+    }
+    h1 {
+      margin: 0;
+      font-family: "Noto Serif SC", serif;
+      font-size: 30px;
+    }
+    .sub { margin-top: 6px; color: #4f645b; font-size: 13px; }
+    .toolbar { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+      background: var(--accent);
+      color: #fff;
+    }
+    button.ghost {
+      color: var(--ink);
+      background: rgba(255,255,255,.8);
+      border: 1px solid var(--line);
+    }
+    .grid {
+      margin-top: 14px;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr 1fr;
+    }
+    .field label { font-size: 12px; display: block; margin-bottom: 4px; color: #4f635b; }
+    .field input {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      padding: 10px;
+      font: inherit;
+      background: #fff;
+    }
+    .full { grid-column: 1 / -1; }
+    .status { margin-top: 10px; color: var(--warn); min-height: 18px; font-size: 12px; }
+    .card {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,.7);
+      padding: 12px;
+    }
+    .steps { display: grid; gap: 8px; margin-top: 8px; }
+    .step {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      font-size: 13px;
+      background: #fff;
+    }
+    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+    @media (max-width: 760px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>PKU Video 工作台</h1>
+    <div class="sub">流程：下载视频 -> 抽离 mp3 -> 语音转文字 -> 大模型提取讲义。页面提交使用 cookie 登录态。</div>
+
+    <div class="toolbar">
+      <button id="goAppBtn" class="ghost">返回聊天主页</button>
+      <button id="submitBtn">提交处理任务</button>
+    </div>
+
+    <section class="grid">
+      <div class="field full">
+        <label for="videoUrl">视频下载链接</label>
+        <input id="videoUrl" placeholder="https://..." />
+      </div>
+      <div class="field">
+        <label for="pkuAuthOne">PKU 下载认证信息 1</label>
+        <input id="pkuAuthOne" placeholder="例如 token / cookie / key" />
+      </div>
+      <div class="field">
+        <label for="pkuAuthTwo">PKU 下载认证信息 2</label>
+        <input id="pkuAuthTwo" placeholder="例如 session / secret" />
+      </div>
+    </section>
+
+    <div id="status" class="status"></div>
+
+    <section class="card">
+      <strong>任务状态</strong>
+      <div class="mono" id="jobMeta">尚未提交任务</div>
+      <div class="steps" id="steps"></div>
+    </section>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const jobMetaEl = document.getElementById("jobMeta");
+    const stepsEl = document.getElementById("steps");
+    let activeJobId = "";
+    let pollTimer = null;
+
+    async function api(path, method = "GET", body) {
+      const res = await fetch(path, {
+        method,
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const txt = await res.text();
+      let payload = {};
+      try { payload = txt ? JSON.parse(txt) : {}; } catch { payload = { raw: txt }; }
+      if (!res.ok) throw new Error(payload.error || payload.raw || ("HTTP " + res.status));
+      return payload;
+    }
+
+    function esc(s) {
+      return String(s || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    }
+
+    function renderJob(job) {
+      jobMetaEl.textContent = "job_id=" + job.id + " | status=" + job.status + " | updated_at=" + job.updated_at;
+      stepsEl.innerHTML = (job.steps || []).map((s, i) => {
+        return '<div class="step">步骤' + (i + 1) + ' [' + esc(s.name) + '] : ' + esc(s.status) + '<br/>' + esc(s.message) + '</div>';
+      }).join("");
+
+      if (job.transcript_path) {
+        stepsEl.innerHTML += '<div class="step">转写文件: <span class="mono">' + esc(job.transcript_path) + '</span></div>';
+      }
+      if (job.notes_path) {
+        stepsEl.innerHTML += '<div class="step">讲义文件: <span class="mono">' + esc(job.notes_path) + '</span></div>';
+      }
+    }
+
+    async function checkLogin() {
+      try {
+        await api("/api/auth/me");
+      } catch {
+        location.href = "/auth?next=/pkuvideo";
+      }
+    }
+
+    async function submitJob() {
+      statusEl.textContent = "提交中...";
+      try {
+        const resp = await api("/api/pkuvideo/submit-web", "POST", {
+          video_url: document.getElementById("videoUrl").value.trim(),
+          pku_auth_one: document.getElementById("pkuAuthOne").value.trim(),
+          pku_auth_two: document.getElementById("pkuAuthTwo").value.trim()
+        });
+        activeJobId = resp.job_id;
+        statusEl.textContent = "提交成功，任务已入队。";
+        startPolling();
+      } catch (err) {
+        statusEl.textContent = "提交失败: " + err.message;
+      }
+    }
+
+    async function pollJob() {
+      if (!activeJobId) return;
+      try {
+        const job = await api("/api/pkuvideo/jobs/" + activeJobId);
+        renderJob(job);
+        if (job.status === "succeeded" || job.status === "failed") {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      } catch (err) {
+        statusEl.textContent = "查询任务失败: " + err.message;
+      }
+    }
+
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollJob();
+      pollTimer = setInterval(pollJob, 2000);
+    }
+
+    document.getElementById("goAppBtn").addEventListener("click", () => {
+      location.href = "/app";
+    });
+    document.getElementById("submitBtn").addEventListener("click", submitJob);
+
+    checkLogin();
+  </script>
+</body>
+</html>

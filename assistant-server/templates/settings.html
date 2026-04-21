@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>系统设置 | Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=ZCOOL+XiaoWei&family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-a: #f7f2e9;
+      --bg-b: #dbe7d3;
+      --ink: #1b2a1f;
+      --muted: #4f6356;
+      --card: rgba(255, 255, 255, 0.72);
+      --line: rgba(27, 42, 31, 0.18);
+      --brand: #286f4e;
+      --brand-2: #c26a36;
+      --danger: #a11f2d;
+      --ok: #2d7e3e;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Outfit", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 18% 10%, rgba(194,106,54,.2), transparent 35%),
+        radial-gradient(circle at 80% 85%, rgba(40,111,78,.18), transparent 38%),
+        linear-gradient(135deg, var(--bg-a), var(--bg-b));
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    .grain::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .08;
+      background-image: repeating-radial-gradient(circle at 0 0, #000, transparent 2px);
+      mix-blend-mode: multiply;
+    }
+
+    .wrap {
+      width: min(1160px, 92vw);
+      margin: 36px auto 48px;
+      display: grid;
+      gap: 18px;
+      animation: rise .7s ease-out both;
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(22px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 22px 24px;
+      background: linear-gradient(120deg, rgba(255,255,255,.8), rgba(255,255,255,.45));
+      backdrop-filter: blur(4px);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, .08);
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-family: "ZCOOL XiaoWei", serif;
+      font-size: clamp(26px, 3.8vw, 42px);
+      font-weight: 400;
+      letter-spacing: .02em;
+    }
+
+    .hero p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      max-width: 68ch;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      grid-column: span 6;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--card);
+      backdrop-filter: blur(6px);
+      padding: 18px;
+      box-shadow: 0 10px 22px rgba(0,0,0,.05);
+    }
+
+    .card.full { grid-column: 1 / -1; }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 20px;
+      letter-spacing: .02em;
+    }
+
+    label {
+      font-size: 13px;
+      color: var(--muted);
+      display: block;
+      margin: 10px 0 6px;
+    }
+
+    input, textarea {
+      width: 100%;
+      border: 1px solid rgba(27, 42, 31, .25);
+      border-radius: 12px;
+      background: rgba(255,255,255,.8);
+      color: var(--ink);
+      padding: 11px 12px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .2s, box-shadow .2s;
+    }
+
+    input:focus, textarea:focus {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 3px rgba(40,111,78,.17);
+    }
+
+    textarea { min-height: 88px; resize: vertical; }
+
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+    button {
+      border: 0;
+      border-radius: 11px;
+      padding: 10px 14px;
+      color: white;
+      background: var(--brand);
+      font-weight: 600;
+      letter-spacing: .01em;
+      cursor: pointer;
+      transition: transform .12s ease, opacity .2s;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button.secondary { background: var(--brand-2); }
+    button.danger { background: var(--danger); }
+    button.ghost {
+      background: rgba(255,255,255,.65);
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+
+    .status {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 13px;
+      background: rgba(255,255,255,.65);
+      border: 1px dashed rgba(27, 42, 31, .2);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .ok { color: var(--ok); }
+    .warn { color: var(--brand-2); }
+    .bad { color: var(--danger); }
+
+    .profile {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-top: 10px;
+    }
+
+    .avatar {
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 2px solid rgba(40,111,78,.35);
+      background: #f2f2f2;
+    }
+
+    .qr-box {
+      margin-top: 10px;
+      border: 1px dashed rgba(27,42,31,.35);
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(255,255,255,.7);
+    }
+
+    .qr-link {
+      font-size: 13px;
+      color: var(--muted);
+      word-break: break-all;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid rgba(27,42,31,.25);
+      padding: 4px 10px;
+      font-size: 12px;
+      margin-left: 6px;
+      background: rgba(255,255,255,.7);
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      color: #31463a;
+      background: rgba(255,255,255,.7);
+      border-radius: 8px;
+      padding: 2px 6px;
+    }
+
+    @media (max-width: 960px) {
+      .card { grid-column: 1 / -1; }
+      .wrap { margin-top: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="grain"></div>
+  <main class="wrap">
+    <section class="hero">
+      <h1>系统设置台</h1>
+      <p>
+        在这里管理你的身份令牌、微信绑定和微信互动通道。页面会直接调用后端 API，所有操作均按当前登录用户隔离。
+      </p>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>鉴权令牌 <span class="badge">Bearer</span></h2>
+        <label for="tokenInput">访问令牌</label>
+        <input id="tokenInput" placeholder="粘贴 /api/auth/login 返回的 token" />
+        <div class="row" style="margin-top:10px;">
+          <button id="saveTokenBtn" class="secondary">保存令牌</button>
+          <button id="clearTokenBtn" class="ghost">清空令牌</button>
+        </div>
+        <div id="tokenStatus" class="status">尚未保存令牌。</div>
+      </article>
+
+      <article class="card">
+        <h2>微信绑定状态</h2>
+        <div class="row">
+          <button id="refreshBindingBtn" class="ghost">刷新状态</button>
+          <button id="bindWechatBtn">绑定微信</button>
+          <button id="unbindWechatBtn" class="danger">解绑微信</button>
+        </div>
+        <div id="bindingStatus" class="status">点击“刷新状态”查看绑定信息。</div>
+        <div id="wechatProfile" class="profile" style="display:none;">
+          <img id="wechatAvatar" class="avatar" alt="wechat avatar" />
+          <div>
+            <div id="wechatNickname"></div>
+            <div id="wechatOpenid" class="mono"></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="card full">
+        <h2>微信互动通道</h2>
+        <label>步骤 1: 启动扫码登录</label>
+        <div class="row">
+          <button id="startChannelBtn">获取登录二维码</button>
+          <button id="confirmChannelBtn" class="secondary">确认扫码状态</button>
+        </div>
+        <div id="channelStatus" class="status">尚未启动通道登录。</div>
+        <div id="qrBox" class="qr-box" style="display:none;">
+          <div><strong>二维码内容：</strong></div>
+          <div id="qrCodeText" class="mono"></div>
+          <div style="height:6px"></div>
+          <div><strong>二维码链接：</strong></div>
+          <a id="qrCodeLink" class="qr-link" target="_blank" rel="noopener noreferrer"></a>
+        </div>
+
+        <label for="verifyTextInput" style="margin-top:14px;">步骤 2: 启动监听验证</label>
+        <input id="verifyTextInput" value="VERIFY-123456" />
+        <div class="row" style="margin-top:10px;">
+          <button id="startListenerBtn" class="secondary">启动监听</button>
+        </div>
+
+        <label for="sendTextInput" style="margin-top:14px;">步骤 3: 主动发送消息</label>
+        <textarea id="sendTextInput" placeholder="输入要发送给微信用户的文本"></textarea>
+        <div class="row" style="margin-top:10px;">
+          <button id="sendTextBtn">发送消息</button>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      token: localStorage.getItem("assistant_token") || "",
+      channelSessionId: "",
+      channelQrcode: "",
+      channelQrcodeLink: ""
+    };
+
+    const tokenInput = document.getElementById("tokenInput");
+    const tokenStatus = document.getElementById("tokenStatus");
+    const bindingStatus = document.getElementById("bindingStatus");
+    const wechatProfile = document.getElementById("wechatProfile");
+    const wechatAvatar = document.getElementById("wechatAvatar");
+    const wechatNickname = document.getElementById("wechatNickname");
+    const wechatOpenid = document.getElementById("wechatOpenid");
+    const channelStatus = document.getElementById("channelStatus");
+    const qrBox = document.getElementById("qrBox");
+    const qrCodeText = document.getElementById("qrCodeText");
+    const qrCodeLink = document.getElementById("qrCodeLink");
+
+    tokenInput.value = state.token;
+    renderTokenState();
+
+    function setStatus(el, msg, cls) {
+      el.className = "status" + (cls ? " " + cls : "");
+      el.textContent = msg;
+    }
+
+    function renderTokenState() {
+      if (state.token) {
+        setStatus(tokenStatus, "令牌已保存，可调用受保护接口。", "ok");
+      } else {
+        setStatus(tokenStatus, "尚未保存令牌。", "warn");
+      }
+    }
+
+    function authHeaders() {
+      const h = { "Content-Type": "application/json" };
+      if (state.token) {
+        h["Authorization"] = "Bearer " + state.token;
+      }
+      return h;
+    }
+
+    async function api(path, method = "GET", body) {
+      const res = await fetch(path, {
+        method,
+        headers: authHeaders(),
+        body: body ? JSON.stringify(body) : undefined,
+        credentials: "include"
+      });
+
+      const txt = await res.text();
+      let payload;
+      try {
+        payload = txt ? JSON.parse(txt) : {};
+      } catch {
+        payload = { raw: txt };
+      }
+
+      if (!res.ok) {
+        const err = payload.error || payload.raw || ("HTTP " + res.status);
+        throw new Error(err);
+      }
+      return payload;
+    }
+
+    document.getElementById("saveTokenBtn").addEventListener("click", () => {
+      state.token = tokenInput.value.trim();
+      localStorage.setItem("assistant_token", state.token);
+      renderTokenState();
+    });
+
+    document.getElementById("clearTokenBtn").addEventListener("click", () => {
+      state.token = "";
+      tokenInput.value = "";
+      localStorage.removeItem("assistant_token");
+      renderTokenState();
+    });
+
+    document.getElementById("refreshBindingBtn").addEventListener("click", refreshBindingStatus);
+    document.getElementById("bindWechatBtn").addEventListener("click", bindWechat);
+    document.getElementById("unbindWechatBtn").addEventListener("click", unbindWechat);
+
+    document.getElementById("startChannelBtn").addEventListener("click", startChannelLogin);
+    document.getElementById("confirmChannelBtn").addEventListener("click", confirmChannelLogin);
+    document.getElementById("startListenerBtn").addEventListener("click", startListener);
+    document.getElementById("sendTextBtn").addEventListener("click", sendMessage);
+
+    async function refreshBindingStatus() {
+      try {
+        const data = await api("/api/wechat/binding-status");
+        if (!data.bound) {
+          setStatus(bindingStatus, "当前账号未绑定微信。", "warn");
+          wechatProfile.style.display = "none";
+          return;
+        }
+        setStatus(bindingStatus, "已绑定微信账号。", "ok");
+        wechatNickname.textContent = data.nickname || "未设置昵称";
+        wechatOpenid.textContent = data.openid || "";
+        wechatAvatar.src = data.avatar_url || "";
+        wechatProfile.style.display = "flex";
+      } catch (err) {
+        setStatus(bindingStatus, "刷新失败: " + err.message, "bad");
+        wechatProfile.style.display = "none";
+      }
+    }
+
+    async function bindWechat() {
+      try {
+        const data = await api("/api/wechat/auth-url");
+        const width = 520;
+        const height = 680;
+        const left = (window.screen.width - width) / 2;
+        const top = (window.screen.height - height) / 2;
+        const popup = window.open(
+          data.auth_url,
+          "wechat-auth",
+          "width=" + width + ",height=" + height + ",left=" + left + ",top=" + top
+        );
+
+        if (!popup) {
+          setStatus(bindingStatus, "浏览器拦截了弹窗，请允许弹窗后重试。", "bad");
+          return;
+        }
+
+        setStatus(bindingStatus, "请在弹窗中扫码并确认，关闭后会自动刷新状态。", "warn");
+
+        const timer = setInterval(async () => {
+          if (popup.closed) {
+            clearInterval(timer);
+            await refreshBindingStatus();
+          }
+        }, 800);
+      } catch (err) {
+        setStatus(bindingStatus, "绑定失败: " + err.message, "bad");
+      }
+    }
+
+    async function unbindWechat() {
+      try {
+        await api("/api/wechat/unbind", "DELETE");
+        await refreshBindingStatus();
+      } catch (err) {
+        setStatus(bindingStatus, "解绑失败: " + err.message, "bad");
+      }
+    }
+
+    async function startChannelLogin() {
+      try {
+        const data = await api("/api/wechat/channel/login/start", "POST", {});
+        state.channelSessionId = data.session_id;
+        state.channelQrcode = data.qrcode;
+        state.channelQrcodeLink = data.qrcode_link;
+
+        qrCodeText.textContent = data.qrcode || "";
+        qrCodeLink.textContent = data.qrcode_link || "";
+        qrCodeLink.href = data.qrcode_link || "#";
+        qrBox.style.display = "block";
+
+        setStatus(channelStatus, "二维码已生成，请扫码后点击“确认扫码状态”。", "ok");
+      } catch (err) {
+        setStatus(channelStatus, "获取二维码失败: " + err.message, "bad");
+      }
+    }
+
+    async function confirmChannelLogin() {
+      if (!state.channelSessionId) {
+        setStatus(channelStatus, "请先获取登录二维码。", "warn");
+        return;
+      }
+
+      try {
+        const data = await api("/api/wechat/channel/login/confirm", "POST", {
+          session_id: state.channelSessionId
+        });
+
+        if (data.connected) {
+          setStatus(channelStatus, "微信通道登录成功。", "ok");
+        } else {
+          setStatus(channelStatus, "当前状态: " + data.status + "，请继续扫码确认。", "warn");
+        }
+      } catch (err) {
+        setStatus(channelStatus, "确认失败: " + err.message, "bad");
+      }
+    }
+
+    async function startListener() {
+      const verificationText = document.getElementById("verifyTextInput").value.trim();
+      if (!verificationText) {
+        setStatus(channelStatus, "验证文本不能为空。", "warn");
+        return;
+      }
+
+      try {
+        await api("/api/wechat/channel/listener/start", "POST", {
+          verification_text: verificationText
+        });
+        setStatus(channelStatus, "监听已启动，等待用户发送验证文本。", "ok");
+      } catch (err) {
+        setStatus(channelStatus, "启动监听失败: " + err.message, "bad");
+      }
+    }
+
+    async function sendMessage() {
+      const text = document.getElementById("sendTextInput").value.trim();
+      if (!text) {
+        setStatus(channelStatus, "发送文本不能为空。", "warn");
+        return;
+      }
+
+      try {
+        await api("/api/wechat/channel/send", "POST", { text });
+        setStatus(channelStatus, "消息发送成功。", "ok");
+      } catch (err) {
+        setStatus(channelStatus, "发送失败: " + err.message, "bad");
+      }
+    }
+
+    refreshBindingStatus();
+  </script>
+</body>
+</html>

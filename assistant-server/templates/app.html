@@ -1,0 +1,421 @@
+﻿<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Assistant Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Noto+Serif+SC:wght@500;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #eef0e8;
+      --bg2: #d8e7dd;
+      --ink: #1d2d28;
+      --muted: #5a6a62;
+      --panel: rgba(255,255,255,0.74);
+      --line: rgba(23,41,35,.18);
+      --accent: #0d7d58;
+      --accent2: #be5a2c;
+      --danger: #9f1e2d;
+      --bubble-user: #d6f4e7;
+      --bubble-ai: #ffffff;
+    }
+
+    html[data-theme="dark"] {
+      --bg: #18211d;
+      --bg2: #22352d;
+      --ink: #e9f0ec;
+      --muted: #b6c2bb;
+      --panel: rgba(20,30,26,0.72);
+      --line: rgba(224,236,228,.15);
+      --accent: #2fd196;
+      --accent2: #f18d5b;
+      --danger: #f15c7b;
+      --bubble-user: #1f4f3e;
+      --bubble-ai: #273930;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Manrope", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(70rem 32rem at -20% -10%, rgba(190,90,44,.18), transparent 52%),
+        radial-gradient(70rem 40rem at 130% 120%, rgba(13,125,88,.2), transparent 55%),
+        linear-gradient(145deg, var(--bg), var(--bg2));
+      min-height: 100vh;
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 290px 1fr;
+      min-height: 100vh;
+      gap: 12px;
+      padding: 12px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--panel);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 12px 34px rgba(0,0,0,.08);
+    }
+
+    .sidebar {
+      padding: 14px;
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      gap: 12px;
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 12px;
+      border: 1px dashed var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,.4);
+    }
+
+    .brand .title {
+      font-family: "Noto Serif SC", serif;
+      font-size: 24px;
+      letter-spacing: .02em;
+    }
+
+    .brand .sub { color: var(--muted); font-size: 13px; }
+
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 9px 12px;
+      font-weight: 700;
+      cursor: pointer;
+      color: #fff;
+      background: var(--accent);
+      transition: transform .12s ease, filter .2s;
+    }
+    button:hover { transform: translateY(-1px); filter: brightness(1.02); }
+    button:active { transform: translateY(0); }
+    button.alt { background: var(--accent2); }
+    button.ghost {
+      background: rgba(255,255,255,.65);
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+    button.danger { background: var(--danger); }
+
+    .conversation-list {
+      overflow: auto;
+      max-height: calc(100vh - 300px);
+      display: grid;
+      gap: 8px;
+      padding-right: 4px;
+    }
+
+    .conv-item {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.6);
+      border-radius: 12px;
+      padding: 10px;
+      cursor: pointer;
+      transition: border-color .2s, transform .12s;
+    }
+    .conv-item:hover { transform: translateX(1px); }
+    .conv-item.active { border-color: var(--accent); }
+    .conv-title { font-size: 13px; font-weight: 700; }
+    .conv-time { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+    .profile {
+      padding: 10px;
+      border-radius: 12px;
+      border: 1px dashed var(--line);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .main {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 0;
+    }
+
+    .main-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .chat-wrap {
+      padding: 18px;
+      overflow: auto;
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .msg {
+      max-width: min(72ch, 86%);
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      white-space: pre-wrap;
+      word-break: break-word;
+      animation: pop .18s ease-out;
+    }
+    @keyframes pop {
+      from { opacity: .2; transform: translateY(8px) scale(.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .msg.user { justify-self: end; background: var(--bubble-user); }
+    .msg.ai { justify-self: start; background: var(--bubble-ai); }
+
+    .composer {
+      border-top: 1px solid var(--line);
+      padding: 14px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+    }
+
+    textarea {
+      resize: none;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      min-height: 56px;
+      max-height: 180px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,.75);
+      color: var(--ink);
+      font: inherit;
+      outline: none;
+    }
+
+    .tiny { font-size: 12px; color: var(--muted); }
+
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar { max-height: 280px; grid-template-rows: auto auto 1fr; }
+      .conversation-list { max-height: 110px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="panel sidebar">
+      <div class="brand">
+        <div class="title">Assistant Studio</div>
+        <div class="sub">多用户隔离 · 微信通道 · 插件会话</div>
+      </div>
+
+      <div class="toolbar">
+        <button id="newChatBtn">新对话</button>
+        <button id="openPkuVideoBtn" class="ghost">PKU Video</button>
+      </div>
+
+      <div id="conversationList" class="conversation-list"></div>
+
+      <div class="profile" id="profileBox">加载中...</div>
+    </aside>
+
+    <section class="panel main">
+      <div class="main-head">
+        <div>
+          <strong id="currentConversationTitle">新会话</strong>
+          <div class="tiny" id="headHint">输入消息开始对话</div>
+        </div>
+        <div class="toolbar">
+          <button id="themeToggleBtn" class="ghost">切换主题</button>
+          <button id="logoutBtn" class="danger">退出</button>
+        </div>
+      </div>
+
+      <div id="chatWrap" class="chat-wrap"></div>
+
+      <div class="composer">
+        <textarea id="messageInput" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+        <button id="sendBtn">发送</button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const store = {
+      me: null,
+      conversations: [],
+      activeConversationId: null
+    };
+
+    const el = {
+      profileBox: document.getElementById("profileBox"),
+      conversationList: document.getElementById("conversationList"),
+      currentConversationTitle: document.getElementById("currentConversationTitle"),
+      chatWrap: document.getElementById("chatWrap"),
+      messageInput: document.getElementById("messageInput"),
+      headHint: document.getElementById("headHint")
+    };
+
+    async function api(path, method = "GET", body) {
+      const res = await fetch(path, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+        credentials: "include"
+      });
+
+      const txt = await res.text();
+      let payload = {};
+      try { payload = txt ? JSON.parse(txt) : {}; } catch { payload = { raw: txt }; }
+      if (!res.ok) throw new Error(payload.error || payload.raw || ("HTTP " + res.status));
+      return payload;
+    }
+
+    function esc(s) {
+      return String(s || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll("\"", "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function renderProfile() {
+      if (!store.me) {
+        el.profileBox.textContent = "未登录";
+        return;
+      }
+      el.profileBox.innerHTML = "<strong>" + esc(store.me.username) + "</strong><br/>" + esc(store.me.email);
+    }
+
+    function renderConversations() {
+      if (!store.conversations.length) {
+        el.conversationList.innerHTML = '<div class="tiny">暂无会话</div>';
+        return;
+      }
+
+      el.conversationList.innerHTML = store.conversations.map((c) => {
+        const active = c.id === store.activeConversationId ? "active" : "";
+        return '<div class="conv-item ' + active + '" data-id="' + c.id + '">' +
+          '<div class="conv-title">' + esc(c.title || "未命名会话") + '</div>' +
+          '<div class="conv-time">' + esc(c.updated_at || "") + '</div>' +
+          '</div>';
+      }).join("");
+
+      document.querySelectorAll(".conv-item").forEach((item) => {
+        item.addEventListener("click", async () => {
+          store.activeConversationId = item.getAttribute("data-id");
+          renderConversations();
+          await loadMessages(store.activeConversationId);
+        });
+      });
+    }
+
+    function renderMessage(role, content) {
+      const div = document.createElement("div");
+      div.className = "msg " + (role === "user" ? "user" : "ai");
+      div.textContent = content;
+      el.chatWrap.appendChild(div);
+      el.chatWrap.scrollTop = el.chatWrap.scrollHeight;
+    }
+
+    async function loadConversations() {
+      store.conversations = await api("/api/conversations");
+      renderConversations();
+      if (!store.activeConversationId && store.conversations.length) {
+        store.activeConversationId = store.conversations[0].id;
+        await loadMessages(store.activeConversationId);
+      }
+    }
+
+    async function loadMessages(id) {
+      if (!id) {
+        el.chatWrap.innerHTML = "";
+        return;
+      }
+      const msgs = await api("/api/conversations/" + id + "/messages");
+      el.chatWrap.innerHTML = "";
+      msgs.forEach((m) => renderMessage(m.role, m.content));
+      const target = store.conversations.find((v) => v.id === id);
+      el.currentConversationTitle.textContent = target ? target.title : "当前会话";
+      el.headHint.textContent = "共 " + msgs.length + " 条消息";
+    }
+
+    async function sendCurrentMessage() {
+      const text = el.messageInput.value.trim();
+      if (!text) return;
+      el.messageInput.value = "";
+      renderMessage("user", text);
+
+      try {
+        const resp = await api("/api/assistant/send", "POST", {
+          conversation_id: store.activeConversationId,
+          text
+        });
+        store.activeConversationId = resp.conversation_id;
+        renderMessage("assistant", resp.assistant_text);
+        await loadConversations();
+      } catch (e) {
+        renderMessage("assistant", "请求失败: " + e.message);
+      }
+    }
+
+    async function fetchMe() {
+      store.me = await api("/api/auth/me");
+      renderProfile();
+    }
+
+    async function logout() {
+      try { await api("/api/auth/logout", "POST", {}); } catch {}
+      location.href = "/auth?next=/app";
+    }
+
+    function toggleTheme() {
+      const root = document.documentElement;
+      const current = root.getAttribute("data-theme") || "light";
+      root.setAttribute("data-theme", current === "light" ? "dark" : "light");
+    }
+
+    async function bootstrap() {
+      try {
+        await fetchMe();
+      } catch {
+        location.href = "/auth?next=/app";
+        return;
+      }
+      await loadConversations();
+    }
+
+    document.getElementById("newChatBtn").addEventListener("click", () => {
+      store.activeConversationId = null;
+      el.currentConversationTitle.textContent = "新会话";
+      el.chatWrap.innerHTML = "";
+      el.headHint.textContent = "输入消息开始新会话";
+    });
+
+    document.getElementById("openPkuVideoBtn").addEventListener("click", () => {
+      location.href = "/pkuvideo";
+    });
+    document.getElementById("sendBtn").addEventListener("click", sendCurrentMessage);
+    document.getElementById("themeToggleBtn").addEventListener("click", toggleTheme);
+    document.getElementById("logoutBtn").addEventListener("click", logout);
+
+    el.messageInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendCurrentMessage();
+      }
+    });
+
+    bootstrap().catch(() => {});
+  </script>
+</body>
+</html>

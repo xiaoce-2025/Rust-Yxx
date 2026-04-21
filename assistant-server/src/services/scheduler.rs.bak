@@ -1,0 +1,195 @@
+use chrono::{Duration, Utc};
+use serde_json::Value;
+use sqlx::FromRow;
+use tracing::{error, info};
+use uuid::Uuid;
+
+use crate::{app_state::AppState, services::wechat::WeChatService};
+
+#[derive(Debug, Clone, FromRow)]
+struct ChannelRow {
+    user_id: Uuid,
+    bot_token: String,
+    active_user_id: Option<String>,
+    login_user_id: Option<String>,
+    get_updates_cursor: Option<String>,
+    listener_started: bool,
+    listener_verify_text: Option<String>,
+    listener_verify_status: Option<String>,
+    last_user_message_time_ms: Option<i64>,
+    token_expiry_reminder_sent: bool,
+}
+
+pub fn start_wechat_listener_scheduler(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+        loop {
+            interval.tick().await;
+            if let Err(e) = tick_once(&state).await {
+                error!("wechat scheduler tick error: {e}");
+            }
+        }
+    });
+}
+
+async fn tick_once(state: &AppState) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query_as::<_, ChannelRow>(
+        r#"
+        SELECT user_id, bot_token, active_user_id, login_user_id, get_updates_cursor,
+               listener_started, listener_verify_text, listener_verify_status,
+               last_user_message_time_ms, token_expiry_reminder_sent
+        FROM user_wechat_channels
+        WHERE listener_started = true AND bot_token IS NOT NULL
+        LIMIT 100
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    for row in rows {
+        if let Err(e) = process_channel(state, row).await {
+            error!("process channel failed: {e}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn process_channel(state: &AppState, mut row: ChannelRow) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    maybe_send_reminder(state, &row).await;
+
+    let cursor = row.get_updates_cursor.clone().unwrap_or_default();
+    let updates = state.wechat_service.get_updates(&row.bot_token, &cursor).await?;
+    if updates.ret != 0 {
+        return Ok(());
+    }
+
+    let mut latest_cursor = updates.get_updates_buf.clone();
+
+    for msg in updates.msgs {
+        if msg.message_type != Some(1) {
+            continue;
+        }
+        let Some(from_user_id) = msg.from_user_id.clone() else {
+            continue;
+        };
+
+        let text = WeChatService::extract_text(&msg);
+        if text.is_empty() {
+            continue;
+        }
+
+        let sender = WeChatService::normalize_weixin_user_id(&from_user_id);
+        if row.active_user_id.as_deref().unwrap_or("").is_empty() {
+            row.active_user_id = Some(sender.clone());
+            sqlx::query("UPDATE user_wechat_channels SET active_user_id = $1 WHERE user_id = $2")
+                .bind(&sender)
+                .bind(row.user_id)
+                .execute(&state.db)
+                .await?;
+            info!("bound active user for {} => {}", row.user_id, sender);
+        }
+
+        if row.active_user_id.as_deref() != Some(sender.as_str()) {
+            continue;
+        }
+
+        let now_ms = Utc::now().timestamp_millis();
+        row.last_user_message_time_ms = Some(now_ms);
+        row.token_expiry_reminder_sent = false;
+        sqlx::query(
+            "UPDATE user_wechat_channels SET last_user_message_time_ms = $1, token_expiry_reminder_sent = false WHERE user_id = $2",
+        )
+        .bind(now_ms)
+        .bind(row.user_id)
+        .execute(&state.db)
+        .await?;
+
+        let verify_text = row.listener_verify_text.clone().unwrap_or_default();
+        let verify_status = row.listener_verify_status.clone().unwrap_or_default();
+        if !verify_text.is_empty() && verify_status == "pending" && text.trim() == verify_text {
+            row.listener_verify_status = Some("success".to_string());
+            sqlx::query("UPDATE user_wechat_channels SET listener_verify_status = 'success' WHERE user_id = $1")
+                .bind(row.user_id)
+                .execute(&state.db)
+                .await?;
+            continue;
+        }
+
+        let Some(context_token) = msg.context_token.clone() else {
+            continue;
+        };
+        if context_token.is_empty() {
+            continue;
+        }
+
+        let reply = state.plugin_router.reply(&text).await;
+        let _ = state
+            .wechat_service
+            .send_text_message(&row.bot_token, &sender, &reply, &context_token)
+            .await;
+    }
+
+    if latest_cursor.is_empty() {
+        latest_cursor = cursor;
+    }
+
+    sqlx::query("UPDATE user_wechat_channels SET get_updates_cursor = $1, updated_at = NOW() WHERE user_id = $2")
+        .bind(latest_cursor)
+        .bind(row.user_id)
+        .execute(&state.db)
+        .await?;
+
+    Ok(())
+}
+
+async fn maybe_send_reminder(state: &AppState, row: &ChannelRow) {
+    let Some(last_ts) = row.last_user_message_time_ms else {
+        return;
+    };
+    if row.token_expiry_reminder_sent {
+        return;
+    }
+    let now_ms = Utc::now().timestamp_millis();
+    let threshold = Duration::hours(22).num_milliseconds();
+    if now_ms - last_ts <= threshold {
+        return;
+    }
+
+    let target = row
+        .active_user_id
+        .clone()
+        .or_else(|| row.login_user_id.clone())
+        .unwrap_or_default();
+    if target.is_empty() {
+        return;
+    }
+
+    let normalized = WeChatService::normalize_weixin_user_id(&target);
+    let send_res = state
+        .wechat_service
+        .send_text_message(
+            &row.bot_token,
+            &normalized,
+            "令牌即将过期，发送任意信息重新激活令牌",
+            "",
+        )
+        .await;
+
+    if send_res.is_ok() {
+        let _ = sqlx::query(
+            "UPDATE user_wechat_channels SET token_expiry_reminder_sent = true WHERE user_id = $1",
+        )
+        .bind(row.user_id)
+        .execute(&state.db)
+        .await;
+    }
+}
+
+#[allow(dead_code)]
+fn _as_text(v: &Value, key: &str) -> String {
+    v.get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_default()
+}

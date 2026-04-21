@@ -1,0 +1,176 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>登录 | Assistant Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #e8efe7;
+      --ink: #10221c;
+      --panel: rgba(255,255,255,.82);
+      --line: rgba(16,34,28,.16);
+      --accent: #0e7f5b;
+      --accent2: #ca5f27;
+      --warn: #8f2437;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      color: var(--ink);
+      font-family: "Manrope", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(42rem 24rem at 15% -10%, rgba(202,95,39,.2), transparent 56%),
+        radial-gradient(55rem 28rem at 110% 110%, rgba(14,127,91,.25), transparent 56%),
+        linear-gradient(135deg, #eef3ec, var(--bg));
+    }
+    .auth-card {
+      width: min(520px, 92vw);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--panel);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 24px 44px rgba(0,0,0,.12);
+      padding: 22px;
+    }
+    h1 {
+      margin: 0;
+      font-family: "Noto Serif SC", serif;
+      font-size: 28px;
+    }
+    .sub {
+      margin-top: 6px;
+      color: #4f615a;
+      font-size: 13px;
+    }
+    .tabs { margin-top: 16px; display: flex; gap: 8px; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 12px;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .tab { flex: 1; background: #edf4f1; color: var(--ink); }
+    .tab.active { background: var(--accent); color: #fff; }
+    .alt { background: var(--accent2); color: #fff; }
+    .field { margin-top: 10px; }
+    .field label { font-size: 12px; color: #506059; display: block; margin-bottom: 4px; }
+    .field input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      font: inherit;
+      background: #fff;
+    }
+    .row { display: flex; gap: 8px; margin-top: 14px; }
+    .row button { flex: 1; }
+    .status { min-height: 18px; margin-top: 10px; color: var(--warn); font-size: 12px; }
+    .next { margin-top: 12px; font-size: 12px; color: #60736a; }
+  </style>
+</head>
+<body>
+  <main class="auth-card">
+    <h1>Assistant Studio</h1>
+    <div class="sub">登录状态通过 cookie 维持，登录后可直接访问 /app 与 /pkuvideo。</div>
+
+    <div class="tabs">
+      <button id="tabLogin" class="tab active">登录</button>
+      <button id="tabRegister" class="tab">注册</button>
+    </div>
+
+    <form id="loginForm">
+      <div class="field"><label for="loginEmail">邮箱</label><input id="loginEmail" type="email" required /></div>
+      <div class="field"><label for="loginPassword">密码</label><input id="loginPassword" type="password" required /></div>
+      <div class="row"><button type="submit">登录</button></div>
+    </form>
+
+    <form id="registerForm" style="display:none;">
+      <div class="field"><label for="regName">用户名</label><input id="regName" required /></div>
+      <div class="field"><label for="regEmail">邮箱</label><input id="regEmail" type="email" required /></div>
+      <div class="field"><label for="regPassword">密码</label><input id="regPassword" type="password" required /></div>
+      <div class="row"><button type="submit" class="alt">注册并登录</button></div>
+    </form>
+
+    <div id="status" class="status"></div>
+    <div class="next">登录后将跳转到 <span id="nextPath"></span></div>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const tabLogin = document.getElementById("tabLogin");
+    const tabRegister = document.getElementById("tabRegister");
+    const loginForm = document.getElementById("loginForm");
+    const registerForm = document.getElementById("registerForm");
+
+    const next = new URLSearchParams(location.search).get("next") || "/app";
+    document.getElementById("nextPath").textContent = next;
+
+    function setTab(name) {
+      const isLogin = name === "login";
+      loginForm.style.display = isLogin ? "block" : "none";
+      registerForm.style.display = isLogin ? "none" : "block";
+      tabLogin.classList.toggle("active", isLogin);
+      tabRegister.classList.toggle("active", !isLogin);
+      statusEl.textContent = "";
+    }
+
+    async function callApi(path, body) {
+      const res = await fetch(path, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const txt = await res.text();
+      let payload = {};
+      try { payload = txt ? JSON.parse(txt) : {}; } catch { payload = { raw: txt }; }
+      if (!res.ok) throw new Error(payload.error || payload.raw || ("HTTP " + res.status));
+      return payload;
+    }
+
+    tabLogin.addEventListener("click", () => setTab("login"));
+    tabRegister.addEventListener("click", () => setTab("register"));
+
+    loginForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      statusEl.textContent = "登录中...";
+      try {
+        await callApi("/api/auth/login", {
+          email: document.getElementById("loginEmail").value.trim(),
+          password: document.getElementById("loginPassword").value
+        });
+        location.href = next;
+      } catch (err) {
+        statusEl.textContent = "登录失败: " + err.message;
+      }
+    });
+
+    registerForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      statusEl.textContent = "注册中...";
+      try {
+        await callApi("/api/auth/register", {
+          username: document.getElementById("regName").value.trim(),
+          email: document.getElementById("regEmail").value.trim(),
+          password: document.getElementById("regPassword").value
+        });
+        location.href = next;
+      } catch (err) {
+        statusEl.textContent = "注册失败: " + err.message;
+      }
+    });
+
+    fetch("/api/auth/me", { credentials: "include" }).then((r) => {
+      if (r.ok) location.href = next;
+    }).catch(() => {});
+  </script>
+</body>
+</html>
