@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -89,6 +89,60 @@
       font-size: 13px;
       background: #fff;
     }
+    .history-item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      font-size: 13px;
+      background: #fff;
+      margin-top: 10px;
+    }
+    .history-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .history-info {
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .status-succeeded {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .status-failed {
+      color: var(--warn);
+      font-weight: 600;
+    }
+    .status-running {
+      color: #f59e0b;
+      font-weight: 600;
+    }
+    .status-pending {
+      color: #6b7280;
+      font-weight: 600;
+    }
+    .history-actions {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .action-btn {
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.8);
+      color: var(--ink);
+      font-size: 11px;
+      cursor: pointer;
+      font-weight: normal;
+    }
+    .action-btn:hover {
+      background: var(--accent);
+      color: #fff;
+    }
     .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
     @media (max-width: 760px) {
       .grid { grid-template-columns: 1fr; }
@@ -103,6 +157,7 @@
     <div class="toolbar">
       <button id="goAppBtn" class="ghost">返回聊天主页</button>
       <button id="submitBtn">提交处理任务</button>
+      <button id="historyBtn">查看历史记录</button>
     </div>
 
     <section class="grid">
@@ -126,6 +181,11 @@
       <strong>任务状态</strong>
       <div class="mono" id="jobMeta">尚未提交任务</div>
       <div class="steps" id="steps"></div>
+    </section>
+
+    <section class="card" id="historySection" style="display: none;">
+      <strong>历史任务记录</strong>
+      <div id="historyList"></div>
     </section>
   </main>
 
@@ -212,10 +272,66 @@
       pollTimer = setInterval(pollJob, 2000);
     }
 
+    async function loadHistory() {
+      try {
+        const jobs = await api("/api/pkuvideo/jobs");
+        const historyList = document.getElementById("historyList");
+        
+        if (jobs.length === 0) {
+          historyList.innerHTML = "暂无历史任务记录";
+        } else {
+          historyList.innerHTML = jobs.map(job => {
+            return `
+              <div class="history-item">
+                <div class="history-header">
+                  <span>任务ID: ${esc(job.id)}</span>
+                  <span class="status-${job.status}">${job.status}</span>
+                </div>
+                <div class="history-info">
+                  <div>创建时间: ${job.created_at}</div>
+                  <div>视频链接: ${esc(job.video_url)}</div>
+                  ${job.transcript_path ? `<div>转写文件: ${esc(job.transcript_path)}</div>` : ""}
+                  ${job.notes_path ? `<div>讲义文件: ${esc(job.notes_path)}</div>` : ""}
+                  <div class="history-actions">
+                    <button onclick="reexecuteStep('${job.id}', 1)" class="action-btn">重新执行 MP3 抽离</button>
+                    <button onclick="reexecuteStep('${job.id}', 2)" class="action-btn">重新执行 语音转文字</button>
+                    <button onclick="reexecuteStep('${job.id}', 3)" class="action-btn">重新执行 讲义提取</button>
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join("");
+        }
+        
+        document.getElementById("historySection").style.display = "block";
+      } catch (err) {
+        statusEl.textContent = "加载历史记录失败: " + err.message;
+      }
+    }
+
+    async function reexecuteStep(jobId, stepIndex) {
+      try {
+        statusEl.textContent = "正在重新执行步骤...";
+        const stepNames = ["", "extract_mp3", "speech_to_text", "extract_notes"];
+        const stepName = stepNames[stepIndex];
+        
+        await api(`/api/pkuvideo/jobs/${jobId}/reexecute`, "POST", {
+          step: stepIndex
+        });
+        
+        statusEl.textContent = `步骤 ${stepIndex} (${stepName}) 重新执行成功`;
+        // 重新加载历史记录以更新状态
+        await loadHistory();
+      } catch (err) {
+        statusEl.textContent = "重新执行步骤失败: " + err.message;
+      }
+    }
+
     document.getElementById("goAppBtn").addEventListener("click", () => {
       location.href = "/app";
     });
     document.getElementById("submitBtn").addEventListener("click", submitJob);
+    document.getElementById("historyBtn").addEventListener("click", loadHistory);
 
     checkLogin();
   </script>

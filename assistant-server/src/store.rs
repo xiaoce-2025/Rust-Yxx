@@ -103,6 +103,7 @@ pub struct FileStore {
     wechat_bindings: Arc<RwLock<Vec<FileUserWeChatBinding>>>,
     wechat_channels: Arc<RwLock<HashMap<Uuid, FileUserWeChatChannel>>>,
     oauth_states: Arc<RwLock<Vec<FileWeChatOAuthState>>>,
+    pkuvideo_jobs: Arc<RwLock<HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob>>>,
 }
 
 impl FileStore {
@@ -119,6 +120,7 @@ impl FileStore {
             wechat_bindings: Arc::new(RwLock::new(Vec::new())),
             wechat_channels: Arc::new(RwLock::new(HashMap::new())),
             oauth_states: Arc::new(RwLock::new(Vec::new())),
+            pkuvideo_jobs: Arc::new(RwLock::new(HashMap::new())),
         };
 
         store.load_all().await?;
@@ -134,6 +136,7 @@ impl FileStore {
         self.load_wechat_bindings().await.ok();
         self.load_wechat_channels().await.ok();
         self.load_oauth_states().await.ok();
+        self.load_pkuvideo_jobs().await.ok();
         Ok(())
     }
 
@@ -451,5 +454,58 @@ impl FileStore {
         drop(states);
         self.save_oauth_states().await?;
         Ok(())
+    }
+
+    // ===== PKU Video Jobs =====
+    async fn load_pkuvideo_jobs(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = self.data_dir.join("pkuvideo_jobs.json");
+        if path.exists() {
+            let data = tokio::fs::read_to_string(&path).await?;
+            let jobs: HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob> = serde_json::from_str(&data)?;
+            *self.pkuvideo_jobs.write().await = jobs;
+        }
+        Ok(())
+    }
+
+    async fn save_pkuvideo_jobs(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = self.data_dir.join("pkuvideo_jobs.json");
+        let data = self.pkuvideo_jobs.read().await;
+        let json = serde_json::to_string_pretty(&*data)?;
+        tokio::fs::write(&path, json).await?;
+        Ok(())
+    }
+
+    pub async fn get_pkuvideo_job(&self, job_id: Uuid) -> Option<crate::services::pkuvideo::PkuVideoJob> {
+        self.pkuvideo_jobs.read().await.get(&job_id).cloned()
+    }
+
+    pub async fn get_pkuvideo_jobs_by_user(&self, user_id: Uuid) -> Vec<crate::services::pkuvideo::PkuVideoJob> {
+        let jobs = self.pkuvideo_jobs.read().await;
+        jobs.values()
+            .filter(|job| job.user_id == user_id)
+            .cloned()
+            .collect()
+    }
+
+    pub async fn insert_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), Box<dyn std::error::Error>> {
+        self.pkuvideo_jobs.write().await.insert(job.id, job);
+        self.save_pkuvideo_jobs().await?;
+        Ok(())
+    }
+
+    pub async fn update_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), Box<dyn std::error::Error>> {
+        self.pkuvideo_jobs.write().await.insert(job.id, job);
+        self.save_pkuvideo_jobs().await?;
+        Ok(())
+    }
+
+    pub async fn delete_pkuvideo_job(&self, job_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
+        self.pkuvideo_jobs.write().await.remove(&job_id);
+        self.save_pkuvideo_jobs().await?;
+        Ok(())
+    }
+
+    pub async fn get_all_pkuvideo_jobs(&self) -> HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob> {
+        self.pkuvideo_jobs.read().await.clone()
     }
 }

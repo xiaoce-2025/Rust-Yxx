@@ -44,6 +44,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideo/submit", post(submit_api))
         .route("/api/pkuvideo/submit-web", post(submit_web))
         .route("/api/pkuvideo/jobs/:id", get(job_detail))
+        .route("/api/pkuvideo/jobs", get(job_list))
+        .route("/api/pkuvideo/jobs/:id/reexecute", post(reexecute_step))
 }
 
 async fn submit_api(
@@ -114,6 +116,96 @@ async fn job_detail(
     Ok(Json(job))
 }
 
+async fn job_list(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> Result<Json<Vec<PkuVideoJob>>, ApiError> {
+    let jobs = state.pkuvideo_jobs.read().await;
+    let user_jobs: Vec<PkuVideoJob> = jobs
+        .values()
+        .filter(|job| job.user_id == current_user.id)
+        .cloned()
+        .collect();
+
+    Ok(Json(user_jobs))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReexecuteStepRequest {
+    step: u8,
+}
+
+async fn reexecute_step(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ReexecuteStepRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut jobs = state.pkuvideo_jobs.write().await;
+    let job = jobs.get_mut(&id).ok_or(ApiError::NotFound)?;
+
+    if job.user_id != current_user.id {
+        return Err(ApiError::Forbidden);
+    }
+
+    // 构建任务目录路径（时间戳_任务ID）
+    let timestamp = job.created_at.format("%Y%m%d_%H%M%S").to_string();
+    let base_dir = PathBuf::from("./data/pkuvideo_jobs");
+    let job_dir = base_dir.join(format!("{}_{}", timestamp, id));
+
+    let video_path = job_dir.join("video.mp4");
+    let mp3_path = job_dir.join("audio.mp3");
+    let transcript_path = job_dir.join("transcript.txt");
+    let notes_path = job_dir.join("lecture_notes.md");
+
+    // 根据步骤索引重新执行
+    match req.step {
+        1 => {
+            // 重新执行 MP3 抽离
+            crate::services::pkuvideo::extract_mp3(&video_path, &mp3_path)
+                .await
+                .map_err(|e| ApiError::Internal(e))?;
+            job.steps[1].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
+            job.steps[1].message = "MP3 抽离完成".to_string();
+            job.steps[1].finished_at = Some(chrono::Utc::now());
+        }
+        2 => {
+            // 重新执行 语音转文字
+            crate::services::pkuvideo::speech_to_text(&mp3_path, &transcript_path)
+                .await
+                .map_err(|e| ApiError::Internal(e))?;
+            job.steps[2].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
+            job.steps[2].message = "语音转文字完成".to_string();
+            job.steps[2].finished_at = Some(chrono::Utc::now());
+            job.transcript_path = Some(transcript_path.to_string_lossy().to_string());
+        }
+        3 => {
+            // 重新执行 讲义提取
+            crate::services::pkuvideo::extract_notes(&transcript_path, &notes_path)
+                .await
+                .map_err(|e| ApiError::Internal(e))?;
+            job.steps[3].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
+            job.steps[3].message = "讲义提取完成".to_string();
+            job.steps[3].finished_at = Some(chrono::Utc::now());
+            job.notes_path = Some(notes_path.to_string_lossy().to_string());
+        }
+        _ => {
+            return Err(ApiError::BadRequest("无效的步骤索引".to_string()));
+        }
+    }
+
+    job.updated_at = chrono::Utc::now();
+    job.status = crate::services::pkuvideo::PipelineStatus::Succeeded;
+    
+    // 保存到FileStore
+    state.store.update_pkuvideo_job(job.clone()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("步骤 {} 重新执行成功", req.step)
+    })))
+}
+
 fn validate_input(video_url: &str, pku_auth_one: &str, pku_auth_two: &str) -> Result<(), ApiError> {
     if video_url.trim().is_empty() || pku_auth_one.trim().is_empty() || pku_auth_two.trim().is_empty() {
         return Err(ApiError::BadRequest("video_url 和两条 pku 认证信息不能为空".to_string()));
@@ -135,7 +227,10 @@ async fn enqueue_job(
     let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");
 
     let job = PkuVideoJob::new(job_id, user_id, video_url.clone(), artifacts_dir);
-    state.pkuvideo_jobs.write().await.insert(job_id, job);
+    state.pkuvideo_jobs.write().await.insert(job_id, job.clone());
+    
+    // 保存到FileStore
+    state.store.insert_pkuvideo_job(job).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let state_for_task = state.clone();
     task::spawn(async move {
@@ -153,6 +248,8 @@ async fn enqueue_job(
                 job.status = PipelineStatus::Failed;
                 job.updated_at = Utc::now();
                 job.error = Some(e);
+                // 保存到FileStore
+                let _ = state.store.update_pkuvideo_job(job.clone()).await;
             }
         }
     });
@@ -186,6 +283,8 @@ async fn run_job_pipeline(
                 job.updated_at = Utc::now();
                 job.transcript_path = transcript_path;
                 job.notes_path = notes_path;
+                // 保存到FileStore
+                let _ = state.store.update_pkuvideo_job(job.clone()).await;
             }
             Ok(())
         }
@@ -213,6 +312,8 @@ async fn mark_job_running(state: &AppState, job_id: Uuid) {
     if let Some(job) = jobs.get_mut(&job_id) {
         job.status = PipelineStatus::Running;
         job.updated_at = Utc::now();
+        // 保存到FileStore
+        let _ = state.store.update_pkuvideo_job(job.clone()).await;
     }
 }
 
@@ -225,6 +326,8 @@ async fn mark_step_running(state: &AppState, job_id: Uuid, index: usize, msg: &s
             step.started_at = Some(Utc::now());
         }
         job.updated_at = Utc::now();
+        // 保存到FileStore
+        let _ = state.store.update_pkuvideo_job(job.clone()).await;
     }
 }
 
@@ -240,6 +343,8 @@ async fn mark_step_success(state: &AppState, job_id: Uuid, index: usize, msg: &s
             }
         }
         job.updated_at = Utc::now();
+        // 保存到FileStore
+        let _ = state.store.update_pkuvideo_job(job.clone()).await;
     }
 }
 
@@ -254,6 +359,10 @@ async fn mark_step_failed(state: &AppState, job_id: Uuid, index: usize, msg: &st
                 step.started_at = step.finished_at;
             }
         }
+        job.status = PipelineStatus::Failed;
         job.updated_at = Utc::now();
+        job.error = Some(msg.to_string());
+        // 保存到FileStore
+        let _ = state.store.update_pkuvideo_job(job.clone()).await;
     }
 }

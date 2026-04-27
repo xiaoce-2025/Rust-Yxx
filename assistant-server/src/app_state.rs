@@ -34,13 +34,23 @@ impl AppState {
     pub fn new(settings: Settings, store: Arc<FileStore>) -> Self {
         let wechat_service = WeChatService::new(settings.wechat.clone());
 
+        // 从store加载pkuvideo_jobs
+        let pkuvideo_jobs = Arc::new(RwLock::new(HashMap::new()));
+
         Self {
             settings: Arc::new(settings),
             store,
             wechat_service: Arc::new(wechat_service),
             plugin_router: Arc::new(PluginRouter::new()),
             in_memory_sessions: Arc::new(RwLock::new(HashMap::new())),
-            pkuvideo_jobs: Arc::new(RwLock::new(HashMap::new())),
+            pkuvideo_jobs,
         }
+    }
+
+    // 从FileStore加载pkuvideo_jobs到内存
+    pub async fn load_pkuvideo_jobs(&self) {
+        let jobs = self.store.get_all_pkuvideo_jobs().await;
+        let mut in_memory_jobs = self.pkuvideo_jobs.write().await;
+        *in_memory_jobs = jobs;
     }
 }

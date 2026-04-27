@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::{fs, process::Command};
 use uuid::Uuid;
 
 use crate::services::pkulogin::download_with_pku_cookie;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PipelineStatus {
     Pending,
@@ -16,7 +16,7 @@ pub enum PipelineStatus {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineStep {
     pub name: String,
     pub status: PipelineStatus,
@@ -25,7 +25,7 @@ pub struct PipelineStep {
     pub finished_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PkuVideoJob {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -81,7 +81,8 @@ pub async fn run_pipeline(
     login_credential_one: String,
     login_credential_two: String,
 ) -> Result<(Option<String>, Option<String>), String> {
-    let job_dir = base_dir.join(job_id.to_string());
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let job_dir = base_dir.join(format!("{}_{}", timestamp, job_id));
     fs::create_dir_all(&job_dir)
         .await
         .map_err(|e| format!("创建任务目录失败: {e}"))?;
@@ -123,7 +124,7 @@ async fn download_video(url: &str, video_path: &Path, username: &str, password: 
         .map_err(|e| format!("写入视频文件失败: {e}"))
 }
 
-async fn extract_mp3(video_path: &Path, mp3_path: &Path) -> Result<(), String> {
+pub async fn extract_mp3(video_path: &Path, mp3_path: &Path) -> Result<(), String> {
     let ffmpeg_result = Command::new("ffmpeg")
         .arg("-y")
         .arg("-i")
@@ -142,21 +143,21 @@ async fn extract_mp3(video_path: &Path, mp3_path: &Path) -> Result<(), String> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             eprintln!("ffmpeg执行失败: status={}, stdout={}, stderr={}", output.status, stdout, stderr);
             // Fallback: If ffmpeg is unavailable, create a placeholder mp3 file to keep pipeline progressing.
-            fs::write(mp3_path, b"[FFMPEG不可用] 占位mp3内容。请安装ffmpeg以获得真实的音频提取功能。")
+            fs::write(mp3_path, b"[FFMPEG UNAVAILABLE] Placeholder mp3 content. Please install ffmpeg for real audio extraction.")
                 .await
                 .map_err(|e| format!("生成占位 mp3 失败: {e}"))
         }
         Err(e) => {
             eprintln!("ffmpeg命令执行错误: {}", e);
             // Fallback: If ffmpeg is unavailable, create a placeholder mp3 file to keep pipeline progressing.
-            fs::write(mp3_path, b"[FFMPEG不可用] 占位mp3内容。请安装ffmpeg以获得真实的音频提取功能。")
+            fs::write(mp3_path, b"[FFMPEG UNAVAILABLE] Placeholder mp3 content. Please install ffmpeg for real audio extraction.")
                 .await
                 .map_err(|e| format!("生成占位 mp3 失败: {e}"))
         }
     }
 }
 
-async fn speech_to_text(mp3_path: &Path, transcript_path: &Path) -> Result<(), String> {
+pub async fn speech_to_text(mp3_path: &Path, transcript_path: &Path) -> Result<(), String> {
     let meta = fs::metadata(mp3_path)
         .await
         .map_err(|e| format!("读取音频元数据失败: {e}"))?;
@@ -171,7 +172,7 @@ async fn speech_to_text(mp3_path: &Path, transcript_path: &Path) -> Result<(), S
         .map_err(|e| format!("写入转写文本失败: {e}"))
 }
 
-async fn extract_notes(transcript_path: &Path, notes_path: &Path) -> Result<(), String> {
+pub async fn extract_notes(transcript_path: &Path, notes_path: &Path) -> Result<(), String> {
     let transcript = fs::read_to_string(transcript_path)
         .await
         .map_err(|e| format!("读取转写文本失败: {e}"))?;
