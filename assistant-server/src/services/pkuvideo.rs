@@ -86,7 +86,7 @@ pub async fn run_pipeline(
         .await
         .map_err(|e| format!("创建任务目录失败: {e}"))?;
 
-    let video_path = job_dir.join("video.bin");
+    let video_path = job_dir.join("video.mp4");
     let mp3_path = job_dir.join("audio.mp3");
     let transcript_path = job_dir.join("transcript.txt");
     let notes_path = job_dir.join("lecture_notes.md");
@@ -137,9 +137,19 @@ async fn extract_mp3(video_path: &Path, mp3_path: &Path) -> Result<(), String> {
 
     match ffmpeg_result {
         Ok(output) if output.status.success() => Ok(()),
-        Ok(_) | Err(_) => {
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            eprintln!("ffmpeg执行失败: status={}, stdout={}, stderr={}", output.status, stdout, stderr);
             // Fallback: If ffmpeg is unavailable, create a placeholder mp3 file to keep pipeline progressing.
-            fs::write(mp3_path, b"placeholder mp3 content")
+            fs::write(mp3_path, b"[FFMPEG不可用] 占位mp3内容。请安装ffmpeg以获得真实的音频提取功能。")
+                .await
+                .map_err(|e| format!("生成占位 mp3 失败: {e}"))
+        }
+        Err(e) => {
+            eprintln!("ffmpeg命令执行错误: {}", e);
+            // Fallback: If ffmpeg is unavailable, create a placeholder mp3 file to keep pipeline progressing.
+            fs::write(mp3_path, b"[FFMPEG不可用] 占位mp3内容。请安装ffmpeg以获得真实的音频提取功能。")
                 .await
                 .map_err(|e| format!("生成占位 mp3 失败: {e}"))
         }
