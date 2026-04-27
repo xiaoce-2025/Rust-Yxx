@@ -171,7 +171,7 @@ async fn reexecute_step(
         }
         2 => {
             // 重新执行 语音转文字
-            crate::services::pkuvideo::speech_to_text(&mp3_path, &transcript_path)
+            crate::services::pkuvideo::speech_to_text(&mp3_path, &transcript_path, &state.settings)
                 .await
                 .map_err(|e| ApiError::Internal(e))?;
             job.steps[2].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
@@ -268,7 +268,7 @@ async fn run_job_pipeline(
 
     mark_step_running(&state, job_id, 0, "开始下载视频").await;
     let base_dir = PathBuf::from("./data/pkuvideo_jobs");
-    let result = run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two).await;
+    let result = run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two, &state.settings).await;
 
     match result {
         Ok((transcript_path, notes_path)) => {

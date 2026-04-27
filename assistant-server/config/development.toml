@@ -1,13 +1,16 @@
+# 开发环境配置文件
+# 生产环境请创建 production.toml 文件并修改相应配置
+
 [server]
-address = "127.0.0.1"
+address = "0.0.0.0"
 port = 8080
 
 [wechat]
-api_base_url = "https://ilinkai.weixin.qq.com/"
-oauth_app_id = "YOUR_WECHAT_APP_ID"
-oauth_app_secret = "YOUR_WECHAT_APP_SECRET"
+api_base_url = "https://api.weixin.qq.com"
+oauth_app_id = "your_wechat_app_id"
+oauth_app_secret = "your_wechat_app_secret"
 redirect_uri = "http://localhost:8080/api/wechat/callback"
-qr_bot_type = "3"
+qr_bot_type = "test"
 
 [security]
 session_ttl_hours = 24
@@ -15,3 +18,12 @@ session_ttl_hours = 24
 [cors]
 allowed_origins = ["http://localhost:3000", "http://localhost:8080"]
 allow_credentials = true
+
+# 阿里云语音识别配置
+# 请在此处填写您的DASHSCOPE API Key
+# 或者通过环境变量 DASHSCOPE_API_KEY 设置
+[paraformer]
+api_key = "sk-b79a9ffcdcf141a1aeee64712a55c6a6"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "paraformer-v1"
+upload_url = "https://dashscope.aliyuncs.com/api/v1/uploads"

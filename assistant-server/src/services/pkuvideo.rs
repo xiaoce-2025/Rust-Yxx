@@ -80,6 +80,7 @@ pub async fn run_pipeline(
     video_url: String,
     login_credential_one: String,
     login_credential_two: String,
+    settings: &crate::config::Settings,
 ) -> Result<(Option<String>, Option<String>), String> {
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let job_dir = base_dir.join(format!("{}_{}", timestamp, job_id));
@@ -103,7 +104,7 @@ pub async fn run_pipeline(
     extract_mp3(&video_path, &mp3_path)
         .await
         .map_err(|e| format!("step=1;{e}"))?;
-    speech_to_text(&mp3_path, &transcript_path)
+    speech_to_text(&mp3_path, &transcript_path, settings)
         .await
         .map_err(|e| format!("step=2;{e}"))?;
     extract_notes(&transcript_path, &notes_path)
@@ -142,14 +143,12 @@ pub async fn extract_mp3(video_path: &Path, mp3_path: &Path) -> Result<(), Strin
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             eprintln!("ffmpeg执行失败: status={}, stdout={}, stderr={}", output.status, stdout, stderr);
-            // Fallback: If ffmpeg is unavailable, create a placeholder mp3 file to keep pipeline progressing.
             fs::write(mp3_path, b"[FFMPEG UNAVAILABLE] Placeholder mp3 content. Please install ffmpeg for real audio extraction.")
                 .await
                 .map_err(|e| format!("生成占位 mp3 失败: {e}"))
         }
         Err(e) => {
             eprintln!("ffmpeg命令执行错误: {}", e);
-            // Fallback: If ffmpeg is unavailable, create a placeholder mp3 file to keep pipeline progressing.
             fs::write(mp3_path, b"[FFMPEG UNAVAILABLE] Placeholder mp3 content. Please install ffmpeg for real audio extraction.")
                 .await
                 .map_err(|e| format!("生成占位 mp3 失败: {e}"))
@@ -157,19 +156,371 @@ pub async fn extract_mp3(video_path: &Path, mp3_path: &Path) -> Result<(), Strin
     }
 }
 
-pub async fn speech_to_text(mp3_path: &Path, transcript_path: &Path) -> Result<(), String> {
-    let meta = fs::metadata(mp3_path)
-        .await
-        .map_err(|e| format!("读取音频元数据失败: {e}"))?;
-    let transcript = format!(
-        "[自动转写结果]\n音频文件: {}\n文件大小: {} 字节\n\n本项目已完成转写步骤，你可以在此基础上接入真实 ASR 服务。",
-        mp3_path.to_string_lossy(),
-        meta.len()
-    );
+pub async fn speech_to_text(mp3_path: &Path, transcript_path: &Path, settings: &crate::config::Settings) -> Result<(), String> {
+    eprintln!("开始语音转文字处理");
+    
+    let api_key = std::env::var("DASHSCOPE_API_KEY")
+        .ok()
+        .or_else(|| settings.paraformer.api_key.clone())
+        .ok_or("未设置 DASHSCOPE_API_KEY 环境变量且配置文件中未设置 api_key，请联系管理员配置阿里云语音识别API密钥")?;
+
+    let base_url = settings.paraformer.base_url.as_deref()
+        .unwrap_or("https://dashscope.aliyuncs.com/compatible-mode/v1");
+
+    let model = settings.paraformer.model.as_deref()
+        .ok_or("配置文件中未设置 model，请联系管理员配置阿里云语音识别模型")?;
+
+    let upload_url = settings.paraformer.upload_url.as_deref()
+        .unwrap_or("https://dashscope.aliyuncs.com/api/v1/uploads");
+
+    eprintln!("使用API密钥: ******{}", &api_key[api_key.len().saturating_sub(6)..]);
+    eprintln!("使用Base URL: {}", base_url);
+    eprintln!("使用模型: {}", model);
+    eprintln!("使用上传URL: {}", upload_url);
+    eprintln!("处理文件: {:?}", mp3_path);
+
+    // 构建OSS URL存储文件路径
+    let oss_url_file = transcript_path.with_file_name("oss_url.json");
+    
+    // 检查是否存在有效的OSS URL
+    let oss_url = match check_existing_oss_url(&oss_url_file).await {
+        Ok(url) => {
+            eprintln!("使用缓存的OSS URL: {}", url);
+            url
+        },
+        Err(_) => {
+            // 重新上传文件
+            let new_url = upload_file_to_oss(&api_key, mp3_path, model, upload_url).await?;
+            eprintln!("文件上传成功，OSS URL: {}", new_url);
+            
+            // 保存OSS URL和上传时间
+            save_oss_url(&oss_url_file, &new_url).await?;
+            eprintln!("OSS URL已保存到: {:?}", oss_url_file);
+            
+            new_url
+        }
+    };
+
+    let task_id = submit_transcription_task(&api_key, &oss_url, model, base_url).await?;
+    eprintln!("任务提交成功，任务ID: {}", task_id);
+
+    let transcription_url = wait_for_transcription_complete(&api_key, &task_id, base_url).await?;
+    eprintln!("转写完成，结果URL: {}", transcription_url);
+
+    let transcript = download_transcription_result(&api_key, &transcription_url).await?;
+    eprintln!("下载转写结果成功，文本长度: {}字符", transcript.len());
 
     fs::write(transcript_path, transcript)
         .await
         .map_err(|e| format!("写入转写文本失败: {e}"))
+}
+
+// 检查是否存在有效的OSS URL（44小时内）
+async fn check_existing_oss_url(oss_url_file: &Path) -> Result<String, String> {
+    if !oss_url_file.exists() {
+        return Err("OSS URL文件不存在".to_string());
+    }
+    
+    let content = fs::read_to_string(oss_url_file)
+        .await
+        .map_err(|e| format!("读取OSS URL文件失败: {}", e))?;
+    
+    #[derive(serde::Deserialize)]
+    struct OSSUrlData {
+        url: String,
+        upload_time: String,
+    }
+    
+    let data: OSSUrlData = serde_json::from_str(&content)
+        .map_err(|e| format!("解析OSS URL文件失败: {}", e))?;
+    
+    // 解析上传时间
+    let upload_time = chrono::DateTime::parse_from_rfc3339(&data.upload_time)
+        .map_err(|e| format!("解析上传时间失败: {}", e))?;
+    
+    // 检查是否在44小时内
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(upload_time);
+    
+    if duration.num_hours() > 44 {
+        return Err("OSS URL已过期".to_string());
+    }
+    
+    Ok(data.url)
+}
+
+// 保存OSS URL和上传时间
+async fn save_oss_url(oss_url_file: &Path, url: &str) -> Result<(), String> {
+    #[derive(serde::Serialize)]
+    struct OSSUrlData {
+        url: String,
+        upload_time: String,
+    }
+    
+    let data = OSSUrlData {
+        url: url.to_string(),
+        upload_time: chrono::Utc::now().to_rfc3339(),
+    };
+    
+    let content = serde_json::to_string(&data)
+        .map_err(|e| format!("序列化OSS URL数据失败: {}", e))?;
+    
+    fs::write(oss_url_file, content)
+        .await
+        .map_err(|e| format!("写入OSS URL文件失败: {}", e))
+}
+
+async fn upload_file_to_oss(api_key: &str, file_path: &Path, model: &str, upload_url: &str) -> Result<String, String> {
+    eprintln!("开始上传文件到OSS");
+    // 获取上传凭证的URL
+    let get_policy_url = upload_url;
+
+    let client = reqwest::Client::new();
+
+    eprintln!("获取上传凭证: {}", get_policy_url);
+    let policy_response = client
+        .get(get_policy_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .query(&[("action", "getPolicy"), ("model", model)])
+        .send()
+        .await
+        .map_err(|e| format!("获取上传凭证失败: {}", e))?;
+
+    eprintln!("获取上传凭证响应状态: {}", policy_response.status());
+    if !policy_response.status().is_success() {
+        let error_text = policy_response.text().await.unwrap_or_default();
+        eprintln!("获取上传凭证失败响应: {}", error_text);
+        return Err(format!("获取上传凭证失败: {}", error_text));
+    }
+
+    let policy_data: serde_json::Value = policy_response.json()
+        .await
+        .map_err(|e| format!("解析上传凭证响应失败: {}", e))?;
+
+    eprintln!("上传凭证响应: {:?}", policy_data);
+
+    let data = policy_data.get("data")
+        .and_then(|v: &serde_json::Value| v.as_object())
+        .ok_or("响应中缺少data字段或data不是对象")?;
+
+    let upload_host = data.get("upload_host")
+        .and_then(|v| v.as_str())
+        .ok_or("响应中缺少upload_host字段")?;
+
+    let upload_dir = data.get("upload_dir")
+        .and_then(|v| v.as_str())
+        .ok_or("响应中缺少upload_dir字段")?;
+
+    let oss_access_key_id = data.get("oss_access_key_id")
+        .and_then(|v| v.as_str())
+        .ok_or("响应中缺少oss_access_key_id字段")?;
+
+    let signature = data.get("signature")
+        .and_then(|v| v.as_str())
+        .ok_or("响应中缺少signature字段")?;
+
+    let policy = data.get("policy")
+        .and_then(|v| v.as_str())
+        .ok_or("响应中缺少policy字段")?;
+
+    let x_oss_object_acl = data.get("x_oss_object_acl")
+        .and_then(|v| v.as_str())
+        .ok_or("响应中缺少x_oss_object_acl字段")?;
+
+    let x_oss_forbid_overwrite = data.get("x_oss_forbid_overwrite")
+        .and_then(|v| v.as_str())
+        .ok_or("响应中缺少x_oss_forbid_overwrite字段")?;
+
+    let file_name = file_path.file_name()
+        .and_then(|v| v.to_str())
+        .ok_or("无法获取文件名")?;
+
+    let key = format!("{}/{}", upload_dir, file_name);
+
+    eprintln!("读取文件: {:?}", file_path);
+    let file_bytes = fs::read(file_path)
+        .await
+        .map_err(|e| format!("读取文件失败: {}", e))?;
+
+    eprintln!("文件大小: {}字节", file_bytes.len());
+    eprintln!("上传到: {}", upload_host);
+    eprintln!("OSS Key: {}", key);
+
+    let multipart = reqwest::multipart::Form::new()
+        .text("OSSAccessKeyId", oss_access_key_id.to_string())
+        .text("Signature", signature.to_string())
+        .text("policy", policy.to_string())
+        .text("x-oss-object-acl", x_oss_object_acl.to_string())
+        .text("x-oss-forbid-overwrite", x_oss_forbid_overwrite.to_string())
+        .text("key", key.clone())
+        .text("success_action_status", "200")
+        .part("file", reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name.to_string())
+            .mime_str("audio/mpeg")
+            .map_err(|e| format!("设置MIME类型失败: {}", e))?);
+
+    eprintln!("开始上传文件...");
+    let upload_response = client
+        .post(upload_host)
+        .multipart(multipart)
+        .send()
+        .await
+        .map_err(|e| format!("上传文件到OSS失败: {}", e))?;
+
+    eprintln!("上传响应状态: {}", upload_response.status());
+    if !upload_response.status().is_success() {
+        let error_text = upload_response.text().await.unwrap_or_default();
+        eprintln!("上传失败响应: {}", error_text);
+        return Err(format!("上传文件到OSS失败: {}", error_text));
+    }
+
+    let oss_url = format!("oss://{}", key);
+    eprintln!("上传成功，OSS URL: {}", oss_url);
+    Ok(oss_url)
+}
+
+async fn submit_transcription_task(api_key: &str, file_url: &str, model: &str, base_url: &str) -> Result<String, String> {
+    let submit_url = format!("{}/api/v1/services/audio/asr/transcription", base_url);
+
+    let client = reqwest::Client::new();
+
+    let request_body = serde_json::json!({
+        "model": model,
+        "input": {
+            "file_urls": [file_url]
+        },
+        "parameters": {
+            "channel_id": [0]
+        }
+    });
+
+    let response = client
+        .post(&submit_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .header("X-DashScope-Async", "enable")
+        .header("X-DashScope-OssResourceResolve", "enable")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("提交转写任务失败: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("提交转写任务失败: {}", response.text().await.unwrap_or_default()));
+    }
+
+    let result: serde_json::Value = response.json()
+        .await
+        .map_err(|e| format!("解析转写任务响应失败: {}", e))?;
+
+    let task_id = result.get("output")
+        .and_then(|v| v.get("task_id"))
+        .and_then(|v| v.as_str())
+        .ok_or("响应中缺少task_id字段")?;
+
+    Ok(task_id.to_string())
+}
+
+async fn wait_for_transcription_complete(api_key: &str, task_id: &str, base_url: &str) -> Result<String, String> {
+    let query_url = format!("{}/api/v1/tasks/{}", base_url, task_id);
+
+    let client = reqwest::Client::new();
+
+    let max_retries = 60;
+    let retry_interval_secs = 5;
+
+    for i in 0..max_retries {
+        let response = client
+            .get(&query_url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(|e| format!("查询转写任务失败: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!("查询转写任务失败: {}", response.text().await.unwrap_or_default()));
+        }
+
+        let result: serde_json::Value = response.json()
+            .await
+            .map_err(|e| format!("解析查询响应失败: {}", e))?;
+
+        let task_status = result.get("output")
+            .and_then(|v| v.get("task_status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("PENDING");
+
+        match task_status {
+            "SUCCEEDED" => {
+                let transcription_url = result.get("output")
+                    .and_then(|v| v.get("results"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.get("transcription_url"))
+                    .and_then(|v| v.as_str())
+                    .ok_or("响应中缺少transcription_url字段")?;
+
+                return Ok(transcription_url.to_string());
+            }
+            "FAILED" => {
+                let error_msg = result.get("output")
+                    .and_then(|v| v.get("results"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|v| v.first())
+                    .and_then(|v| v.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("未知错误");
+                return Err(format!("转写任务失败: {}", error_msg));
+            }
+            _ => {
+                eprintln!("等待转写完成... ({}/{})", i + 1, max_retries);
+                tokio::time::sleep(tokio::time::Duration::from_secs(retry_interval_secs)).await;
+            }
+        }
+    }
+
+    Err("转写任务超时".to_string())
+}
+
+async fn download_transcription_result(api_key: &str, transcription_url: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(transcription_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| format!("下载转写结果失败: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("下载转写结果失败: {}", response.text().await.unwrap_or_default()));
+    }
+
+    let result: serde_json::Value = response.json()
+        .await
+        .map_err(|e| format!("解析转写结果JSON失败: {}", e))?;
+
+    let sentences = result.get("transcription_result")
+        .and_then(|v| v.as_array())
+        .ok_or("响应中缺少transcription_result字段")?;
+
+    let mut transcription_texts: Vec<String> = Vec::new();
+
+    for sentence in sentences {
+        let text = sentence.get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !text.is_empty() {
+            transcription_texts.push(text.to_string());
+        }
+    }
+
+    if transcription_texts.is_empty() {
+        Ok("[未识别到语音内容]".to_string())
+    } else {
+        Ok(transcription_texts.join("\n"))
+    }
 }
 
 pub async fn extract_notes(transcript_path: &Path, notes_path: &Path) -> Result<(), String> {
