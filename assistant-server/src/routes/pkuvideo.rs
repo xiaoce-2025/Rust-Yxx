@@ -156,7 +156,7 @@ async fn reexecute_step(
     let video_path = job_dir.join("video.mp4");
     let mp3_path = job_dir.join("audio.mp3");
     let transcript_path = job_dir.join("transcript.txt");
-    let notes_path = job_dir.join("lecture_notes.md");
+    let notes_path = job_dir.join("lecture_notes.tex");
 
     // 根据步骤索引重新执行
     match req.step {
