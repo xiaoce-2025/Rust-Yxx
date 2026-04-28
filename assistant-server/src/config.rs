@@ -7,7 +7,10 @@ pub struct Settings {
     pub wechat: WeChatConfig,
     pub security: SecurityConfig,
     pub cors: CorsConfig,
+    #[serde(rename = "audioapi_paraformer")]
     pub paraformer: ParaformerConfig,
+    #[serde(rename = "llm_deepseek")]
+    pub deepseek: DeepSeekConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -40,8 +43,18 @@ pub struct CorsConfig {
 pub struct ParaformerConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
-    pub model: Option<String>,
     pub upload_url: Option<String>,
+    pub transcription_url: Option<String>,
+    pub task_query_url: Option<String>,
+    pub model: Option<String>,
+    pub max_retries: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeepSeekConfig {
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
 }
 
 impl Settings {

@@ -22,8 +22,19 @@ allow_credentials = true
 # 阿里云语音识别配置
 # 请在此处填写您的DASHSCOPE API Key
 # 或者通过环境变量 DASHSCOPE_API_KEY 设置
-[paraformer]
+[audioapi_paraformer]
 api_key = "sk-b79a9ffcdcf141a1aeee64712a55c6a6"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 model = "paraformer-v1"
 upload_url = "https://dashscope.aliyuncs.com/api/v1/uploads"
+transcription_url = "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription"
+task_query_url = "https://dashscope.aliyuncs.com/api/v1/tasks"
+max_retries = 120
+
+# DeepSeek LLM 配置
+# 请在此处填写您的 DeepSeek API Key
+# 或者通过环境变量 DEEPSEEK_API_KEY 设置
+[llm_deepseek]
+api_key = "sk-d39fa690019744638773337bf0142e68"
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"

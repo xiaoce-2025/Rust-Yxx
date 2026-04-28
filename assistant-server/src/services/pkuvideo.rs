@@ -91,7 +91,7 @@ pub async fn run_pipeline(
     let video_path = job_dir.join("video.mp4");
     let mp3_path = job_dir.join("audio.mp3");
     let transcript_path = job_dir.join("transcript.txt");
-    let notes_path = job_dir.join("lecture_notes.md");
+    let notes_path = job_dir.join("lecture_notes.tex");
 
     download_video(
         &video_url,
@@ -107,7 +107,7 @@ pub async fn run_pipeline(
     speech_to_text(&mp3_path, &transcript_path, settings)
         .await
         .map_err(|e| format!("step=2;{e}"))?;
-    extract_notes(&transcript_path, &notes_path)
+    extract_notes(&transcript_path, &notes_path, settings)
         .await
         .map_err(|e| format!("step=3;{e}"))?;
 
@@ -173,10 +173,21 @@ pub async fn speech_to_text(mp3_path: &Path, transcript_path: &Path, settings: &
     let upload_url = settings.paraformer.upload_url.as_deref()
         .unwrap_or("https://dashscope.aliyuncs.com/api/v1/uploads");
 
+    let transcription_url = settings.paraformer.transcription_url.as_deref()
+        .unwrap_or("https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription");
+
+    let task_query_url = settings.paraformer.task_query_url.as_deref()
+        .unwrap_or("https://dashscope.aliyuncs.com/api/v1/tasks");
+
+    let max_retries = settings.paraformer.max_retries.unwrap_or(120);
+
     eprintln!("使用API密钥: ******{}", &api_key[api_key.len().saturating_sub(6)..]);
     eprintln!("使用Base URL: {}", base_url);
     eprintln!("使用模型: {}", model);
     eprintln!("使用上传URL: {}", upload_url);
+    eprintln!("使用转写URL: {}", transcription_url);
+    eprintln!("使用任务查询URL: {}", task_query_url);
+    eprintln!("使用最大重试次数: {}", max_retries);
     eprintln!("处理文件: {:?}", mp3_path);
 
     // 构建OSS URL存储文件路径
@@ -201,13 +212,13 @@ pub async fn speech_to_text(mp3_path: &Path, transcript_path: &Path, settings: &
         }
     };
 
-    let task_id = submit_transcription_task(&api_key, &oss_url, model, base_url).await?;
+    let task_id = submit_transcription_task(&api_key, &oss_url, model, transcription_url).await?;
     eprintln!("任务提交成功，任务ID: {}", task_id);
 
-    let transcription_url = wait_for_transcription_complete(&api_key, &task_id, base_url).await?;
-    eprintln!("转写完成，结果URL: {}", transcription_url);
+    let transcription_result_url = wait_for_transcription_complete(&api_key, &task_id, task_query_url, max_retries).await?;
+    eprintln!("转写完成，结果URL: {}", transcription_result_url);
 
-    let transcript = download_transcription_result(&api_key, &transcription_url).await?;
+    let transcript = download_transcription_result(&api_key, &transcription_result_url).await?;
     eprintln!("下载转写结果成功，文本长度: {}字符", transcript.len());
 
     fs::write(transcript_path, transcript)
@@ -380,8 +391,9 @@ async fn upload_file_to_oss(api_key: &str, file_path: &Path, model: &str, upload
     Ok(oss_url)
 }
 
-async fn submit_transcription_task(api_key: &str, file_url: &str, model: &str, base_url: &str) -> Result<String, String> {
-    let submit_url = format!("{}/api/v1/services/audio/asr/transcription", base_url);
+async fn submit_transcription_task(api_key: &str, file_url: &str, model: &str, transcription_url: &str) -> Result<String, String> {
+    // 使用从配置文件传递过来的转写URL
+    let submit_url = transcription_url;
 
     let client = reqwest::Client::new();
 
@@ -395,8 +407,11 @@ async fn submit_transcription_task(api_key: &str, file_url: &str, model: &str, b
         }
     });
 
+    eprintln!("提交转写任务: {}", submit_url);
+    eprintln!("请求体: {}", serde_json::to_string_pretty(&request_body).unwrap_or_default());
+    
     let response = client
-        .post(&submit_url)
+        .post(submit_url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .header("X-DashScope-Async", "enable")
@@ -406,8 +421,12 @@ async fn submit_transcription_task(api_key: &str, file_url: &str, model: &str, b
         .await
         .map_err(|e| format!("提交转写任务失败: {}", e))?;
 
+    eprintln!("提交转写任务响应状态: {}", response.status());
+    
     if !response.status().is_success() {
-        return Err(format!("提交转写任务失败: {}", response.text().await.unwrap_or_default()));
+        let error_body = response.text().await.unwrap_or_default();
+        eprintln!("提交转写任务失败响应: {}", error_body);
+        return Err(format!("提交转写任务失败: {}", error_body));
     }
 
     let result: serde_json::Value = response.json()
@@ -422,12 +441,12 @@ async fn submit_transcription_task(api_key: &str, file_url: &str, model: &str, b
     Ok(task_id.to_string())
 }
 
-async fn wait_for_transcription_complete(api_key: &str, task_id: &str, base_url: &str) -> Result<String, String> {
-    let query_url = format!("{}/api/v1/tasks/{}", base_url, task_id);
+async fn wait_for_transcription_complete(api_key: &str, task_id: &str, task_query_url: &str, max_retries: u32) -> Result<String, String> {
+    // 使用从配置文件传递过来的任务查询URL
+    let query_url = format!("{}/{}", task_query_url, task_id);
 
     let client = reqwest::Client::new();
 
-    let max_retries = 60;
     let retry_interval_secs = 5;
 
     for i in 0..max_retries {
@@ -480,7 +499,7 @@ async fn wait_for_transcription_complete(api_key: &str, task_id: &str, base_url:
         }
     }
 
-    Err("转写任务超时".to_string())
+    Err(format!("转写任务超时（等待了{}秒）", max_retries as u64 * retry_interval_secs))
 }
 
 async fn download_transcription_result(api_key: &str, transcription_url: &str) -> Result<String, String> {
@@ -501,9 +520,11 @@ async fn download_transcription_result(api_key: &str, transcription_url: &str) -
         .await
         .map_err(|e| format!("解析转写结果JSON失败: {}", e))?;
 
-    let sentences = result.get("transcription_result")
+    eprintln!("转写结果JSON响应: {}", serde_json::to_string_pretty(&result).unwrap_or_default());
+
+    let sentences = result.get("transcripts")
         .and_then(|v| v.as_array())
-        .ok_or("响应中缺少transcription_result字段")?;
+        .ok_or("响应中缺少transcripts字段")?;
 
     let mut transcription_texts: Vec<String> = Vec::new();
 
@@ -523,17 +544,92 @@ async fn download_transcription_result(api_key: &str, transcription_url: &str) -
     }
 }
 
-pub async fn extract_notes(transcript_path: &Path, notes_path: &Path) -> Result<(), String> {
+pub async fn extract_notes(transcript_path: &Path, notes_path: &Path, settings: &crate::config::Settings) -> Result<(), String> {
+    eprintln!("开始提取讲义");
+    
     let transcript = fs::read_to_string(transcript_path)
         .await
         .map_err(|e| format!("读取转写文本失败: {e}"))?;
 
-    let notes = format!(
-        "# 讲义提取结果\n\n## 核心主题\n- 根据转写自动归纳的主题（示例）\n\n## 关键概念\n- 概念 1\n- 概念 2\n\n## 课堂要点\n- 要点 1\n- 要点 2\n\n## 原始转写摘录\n{}\n",
-        transcript.lines().take(10).collect::<Vec<_>>().join("\n")
-    );
+    // 读取系统提示词文件
+    let system_prompt = fs::read_to_string("system_prompt.md")
+        .await
+        .map_err(|e| format!("读取系统提示词文件失败: {e}"))?;
 
-    fs::write(notes_path, notes)
+    // 获取 DeepSeek API 配置
+    let api_key = std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .or_else(|| settings.deepseek.api_key.clone())
+        .ok_or("未设置 DEEPSEEK_API_KEY 环境变量且配置文件中未设置 api_key，请联系管理员配置 DeepSeek API 密钥")?;
+
+    let base_url = settings.deepseek.base_url.as_deref()
+        .unwrap_or("https://api.deepseek.com");
+
+    let model = settings.deepseek.model.as_deref()
+        .unwrap_or("DeepSeek-V4-Flash");
+
+    eprintln!("使用DeepSeek模型: {}", model);
+    eprintln!("使用API基础URL: {}", base_url);
+    eprintln!("转写文本长度: {}字符", transcript.len());
+
+    // 构建请求
+    let client = reqwest::Client::new();
+
+    let request_body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": transcript
+            }
+        ],
+        "temperature": 0.1,
+        "extra_body": {
+            "thinking": {
+                "type": "enabled"
+            }
+        }
+    });
+
+    eprintln!("发送请求到DeepSeek API...");
+    let response = client
+        .post(format!("{}/chat/completions", base_url))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("调用DeepSeek API失败: {}", e))?;
+
+    eprintln!("DeepSeek API响应状态: {}", response.status());
+
+    if !response.status().is_success() {
+        let error_body = response.text().await.unwrap_or_default();
+        eprintln!("DeepSeek API失败响应: {}", error_body);
+        return Err(format!("调用DeepSeek API失败: {}", error_body));
+    }
+
+    let result: serde_json::Value = response.json()
+        .await
+        .map_err(|e| format!("解析DeepSeek API响应失败: {}", e))?;
+
+    // 提取回答内容（忽略 thinking/reasoning_content）
+    let notes_content = result.get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|v| v.first())
+        .and_then(|v| v.get("message"))
+        .and_then(|v| v.get("content"))
+        .and_then(|v| v.as_str())
+        .ok_or("响应中缺少content字段")?;
+
+    eprintln!("讲义生成成功，文本长度: {}字符", notes_content.len());
+
+    // 将结果保存为 .tex 文件
+    fs::write(notes_path, notes_content)
         .await
         .map_err(|e| format!("写入讲义失败: {e}"))
 }

@@ -181,7 +181,7 @@ async fn reexecute_step(
         }
         3 => {
             // 重新执行 讲义提取
-            crate::services::pkuvideo::extract_notes(&transcript_path, &notes_path)
+            crate::services::pkuvideo::extract_notes(&transcript_path, &notes_path, &state.settings)
                 .await
                 .map_err(|e| ApiError::Internal(e))?;
             job.steps[3].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
