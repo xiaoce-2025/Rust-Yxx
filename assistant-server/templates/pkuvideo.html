@@ -179,7 +179,7 @@
       </div>
       <div class="field">
         <label for="pkuAuthTwo">IAAA密码</label>
-        <input id="pkuAuthTwo" placeholder="xxxxx" />
+        <input id="pkuAuthTwo" type="password" placeholder="xxxxx" />
       </div>
     </section>
 
@@ -209,7 +209,8 @@
     const quotaInfoEl = document.getElementById("quotaInfo");
     let activeJobId = "";
     let pollTimer = null;
-    let userQuota = 0;
+    let storageQuota = 0;
+    let processingQuota = 0;
 
     async function api(path, method = "GET", body) {
       const res = await fetch(path, {
@@ -253,7 +254,8 @@
     async function checkLogin() {
       try {
         const userInfo = await api("/api/auth/me");
-        userQuota = userInfo.quota || 0;
+        storageQuota = userInfo.storage_quota || 0;
+        processingQuota = userInfo.processing_quota || 0;
         updateQuotaDisplay();
       } catch {
         location.href = "/auth?next=/pkuvideo";
@@ -263,17 +265,18 @@
     async function updateQuotaDisplay() {
       try {
         const userInfo = await api("/api/auth/me");
-        userQuota = userInfo.quota || 0;
-        quotaInfoEl.textContent = `资源限额: 3 | 剩余额度: ${userQuota}`;
+        storageQuota = userInfo.storage_quota || 0;
+        processingQuota = userInfo.processing_quota || 0;
+        quotaInfoEl.innerHTML = `储存资源限额: 3 | 剩余: ${storageQuota}<br/>处理资源限额: 1 | 剩余: ${processingQuota}`;
       } catch (err) {
         quotaInfoEl.textContent = `获取限额信息失败: ${err.message}`;
       }
     }
 
     async function submitJob() {
-      // 检查限额
-      if (userQuota <= 0) {
-        statusEl.textContent = "提交失败: 资源限额不足，请删除历史任务以释放额度";
+      // 检查处理资源限额
+      if (processingQuota <= 0) {
+        statusEl.textContent = "提交失败: 处理资源限额不足，请等待当前任务完成";
         return;
       }
 
@@ -286,9 +289,9 @@
         });
         activeJobId = resp.job_id;
         statusEl.textContent = "提交成功，任务已入队。";
-        // 更新限额显示（扣除了一个额度）
-        userQuota -= 1;
-        quotaInfoEl.textContent = `资源限额: 3 | 剩余额度: ${userQuota}`;
+        // 更新处理资源限额显示
+        processingQuota -= 1;
+        quotaInfoEl.innerHTML = `储存资源限额: 3 | 剩余: ${storageQuota}<br/>处理资源限额: 1 | 剩余: ${processingQuota}`;
         startPolling();
       } catch (err) {
         statusEl.textContent = "提交失败: " + err.message;

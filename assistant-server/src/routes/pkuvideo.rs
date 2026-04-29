@@ -281,9 +281,9 @@ async fn delete_job(
     // 从文件存储中删除任务
     state.store.delete_pkuvideo_job(id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    // 如果任务已完成，返还限额
+    // 如果任务已完成，返还储存限额
     if job_status == PipelineStatus::Succeeded {
-        state.store.increase_user_quota(current_user.id, 1).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+        state.store.increase_storage_quota(current_user.id, 1).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
     Ok(Json(serde_json::json!({
@@ -325,12 +325,12 @@ async fn enqueue_job(
 
     // 检查用户限额
     let user = state.store.get_user(user_id).await.ok_or(ApiError::Unauthorized)?;
-    if user.quota <= 0 {
-        return Err(ApiError::Forbidden("限额不足，请联系管理员".to_string()));
+    if user.processing_quota <= 0 {
+        return Err(ApiError::Forbidden("处理资源限额不足，请联系管理员".to_string()));
     }
 
-    // 扣除限额
-    state.store.decrease_user_quota(user_id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 扣除处理限额
+    state.store.decrease_processing_quota(user_id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let job_id = Uuid::new_v4();
     let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");

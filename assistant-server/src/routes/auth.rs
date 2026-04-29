@@ -48,7 +48,8 @@ struct CurrentUserResponse {
     user_id: Uuid,
     username: String,
     email: String,
-    quota: i32,
+    storage_quota: i32,
+    processing_quota: i32,
 }
 
 pub fn routes() -> Router<AppState> {
@@ -65,7 +66,8 @@ async fn me(State(state): State<AppState>, current_user: CurrentUser) -> Result<
         user_id: current_user.id,
         username: current_user.username,
         email: current_user.email,
-        quota: user.quota,
+        storage_quota: user.storage_quota,
+        processing_quota: user.processing_quota,
     }))
 }
 
@@ -90,7 +92,8 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
         is_active: true,
         created_at: now,
         updated_at: now,
-        quota: 3,
+        storage_quota: 3,
+        processing_quota: 1,
     };
 
     state.store.insert_user(user.clone()).await
