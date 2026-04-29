@@ -152,7 +152,7 @@
 <body>
   <main class="wrap">
     <h1>PKU Video 工作台</h1>
-    <div class="sub">流程：下载视频 -> 抽离 mp3 -> 语音转文字 -> 大模型提取讲义。页面提交使用 cookie 登录态。</div>
+    <div class="sub">流程：下载视频 -> 抽离 mp3 -> 语音转文字 -> 大模型提取讲义 -> 编译 PDF。页面提交使用 cookie 登录态。</div>
 
     <div class="toolbar">
       <button id="goAppBtn" class="ghost">返回聊天主页</button>
@@ -166,12 +166,12 @@
         <input id="videoUrl" placeholder="https://..." />
       </div>
       <div class="field">
-        <label for="pkuAuthOne">PKU 下载认证信息 1</label>
-        <input id="pkuAuthOne" placeholder="例如 token / cookie / key" />
+        <label for="pkuAuthOne">IAAA账号</label>
+        <input id="pkuAuthOne" placeholder="2x000xxxxx" />
       </div>
       <div class="field">
-        <label for="pkuAuthTwo">PKU 下载认证信息 2</label>
-        <input id="pkuAuthTwo" placeholder="例如 session / secret" />
+        <label for="pkuAuthTwo">IAAA密码</label>
+        <input id="pkuAuthTwo" placeholder="xxxxx" />
       </div>
     </section>
 
@@ -225,6 +225,9 @@
       }
       if (job.notes_path) {
         stepsEl.innerHTML += '<div class="step">讲义文件: <span class="mono">' + esc(job.notes_path) + '</span></div>';
+      }
+      if (job.pdf_path) {
+        stepsEl.innerHTML += '<div class="step">PDF文件: <span class="mono">' + esc(job.pdf_path) + '</span></div>';
       }
     }
 
@@ -292,10 +295,13 @@
                   <div>视频链接: ${esc(job.video_url)}</div>
                   ${job.transcript_path ? `<div>转写文件: ${esc(job.transcript_path)}</div>` : ""}
                   ${job.notes_path ? `<div>讲义文件: ${esc(job.notes_path)}</div>` : ""}
+                  ${job.pdf_path ? `<div>PDF文件: ${esc(job.pdf_path)}</div>` : ""}
                   <div class="history-actions">
+                    <button onclick="reexecuteStep('${job.id}', 0)" class="action-btn">重新执行 视频下载</button>
                     <button onclick="reexecuteStep('${job.id}', 1)" class="action-btn">重新执行 MP3 抽离</button>
                     <button onclick="reexecuteStep('${job.id}', 2)" class="action-btn">重新执行 语音转文字</button>
                     <button onclick="reexecuteStep('${job.id}', 3)" class="action-btn">重新执行 讲义提取</button>
+                    <button onclick="reexecuteStep('${job.id}', 4)" class="action-btn">重新执行 PDF编译</button>
                   </div>
                 </div>
               </div>
@@ -312,7 +318,7 @@
     async function reexecuteStep(jobId, stepIndex) {
       try {
         statusEl.textContent = "正在重新执行步骤...";
-        const stepNames = ["", "extract_mp3", "speech_to_text", "extract_notes"];
+        const stepNames = ["download_video", "extract_mp3", "speech_to_text", "extract_notes", "compile_pdf"];
         const stepName = stepNames[stepIndex];
         
         await api(`/api/pkuvideo/jobs/${jobId}/reexecute`, "POST", {

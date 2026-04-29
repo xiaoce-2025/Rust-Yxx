@@ -646,22 +646,26 @@ pub async fn extract_notes(transcript_path: &Path, notes_path: &Path, settings: 
         .map_err(|e| format!("写入讲义失败: {e}"))
 }
 
-/// 从内容中提取纯 LaTeX 代码（从 ```latex ... ``` 块中提取）
+/// 从内容中提取纯 LaTeX 代码
+/// 规则：
+/// 1. 只匹配 ```latex ... ``` 代码块，提取开始标记和最后一个 ``` 之间的内容
+/// 2. 如果没有匹配到 latex 代码块，直接返回原文，不做任何修改
 fn extract_pure_latex(content: &str) -> String {
-    // 尝试匹配 ```latex ... ``` 块
-    let re = regex::Regex::new(r"```latex\s*(.*?)\s*```").unwrap();
-    if let Some(captures) = re.captures(content) {
-        captures[1].to_string()
-    } else {
-        // 如果没有找到代码块，返回原始内容（去除可能的前后描述）
-        let trimmed = content.trim();
-        // 尝试查找第一个 \chapter 或 \section
-        if let Some(start) = trimmed.find('\\') {
-            trimmed[start..].to_string()
-        } else {
-            trimmed.to_string()
+    // 匹配 ```latex 开始标记的位置
+    if let Some(start_pos) = content.find("```latex") {
+        // 找到开始标记后，定位到标记结束位置（```latex 共9个字符）
+        let after_start = &content[start_pos + 9..];
+        
+        // 查找最后一个 ``` 的位置
+        if let Some(last_backtick_pos) = after_start.rfind("```") {
+            // 返回开始标记后到最后一个 ``` 之前的内容
+            let extracted = &after_start[..last_backtick_pos];
+            return extracted.trim().to_string();
         }
     }
+    
+    // 如果没有匹配到 latex 代码块，直接返回原文
+    content.to_string()
 }
 
 /// 将 LaTeX 章节文件编译为 PDF
