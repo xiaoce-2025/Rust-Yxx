@@ -675,56 +675,113 @@ pub async fn compile_pdf(notes_path: &Path, pdf_path: &Path) -> Result<(), Strin
     // 获取任务目录
     let job_dir = notes_path.parent().ok_or("无法获取任务目录")?;
     
+    // 转换为绝对路径以确保跨平台兼容性
+    let job_dir_abs = job_dir.canonicalize().map_err(|e| format!("无法获取任务目录绝对路径: {e}"))?;
+    eprintln!("任务目录(绝对路径): {:?}", job_dir_abs);
+    
+    // 检查笔记文件是否存在
+    if !notes_path.exists() {
+        return Err(format!("笔记文件不存在: {:?}", notes_path));
+    }
+    
     // 创建完整的 LaTeX 文档
     let full_tex = create_full_latex_doc(notes_path).await?;
     
     // 将完整文档写入临时文件
-    let full_tex_path = job_dir.join("full_document.tex");
+    let full_tex_path = job_dir_abs.join("full_document.tex");
     fs::write(&full_tex_path, full_tex)
         .await
         .map_err(|e| format!("写入完整文档失败: {e}"))?;
     
     eprintln!("完整文档路径: {:?}", full_tex_path);
     
+    // 验证文件是否写入成功
+    if !full_tex_path.exists() {
+        return Err("完整文档写入失败，文件不存在".to_string());
+    }
+    
     // 复制模板文件到任务目录
     let template_cls = Path::new("./data/templates/elegantbook/elegantbook.cls");
-    if template_cls.exists() {
-        fs::copy(template_cls, job_dir.join("elegantbook.cls"))
+    let template_cls_abs = template_cls.canonicalize().map_err(|e| format!("无法获取模板文件绝对路径: {e}"))?;
+    
+    if template_cls_abs.exists() {
+        fs::copy(&template_cls_abs, job_dir_abs.join("elegantbook.cls"))
             .await
             .map_err(|e| format!("复制模板文件失败: {e}"))?;
         eprintln!("已复制模板文件");
     } else {
-        return Err("模板文件不存在".to_string());
+        return Err(format!("模板文件不存在: {:?}", template_cls_abs));
+    }
+    
+    // 检查 xelatex 是否可用
+    let xelatex_check = Command::new("xelatex").arg("--version").output().await;
+    if xelatex_check.is_err() {
+        return Err("xelatex 命令不可用，请确保已安装 TeX Live 或 MiKTeX".to_string());
     }
     
     // 使用 xelatex 编译
+    eprintln!("开始执行 xelatex 编译...");
+    
+    // 将路径转换为使用正斜杠，确保跨平台兼容性（Windows 和 Linux）
+    // 首先移除 Windows 扩展路径前缀 \\?\
+    let full_tex_path_str = {
+        let s = full_tex_path.to_string_lossy();
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        s.replace('\\', "/")
+    };
+    
+    let job_dir_str = {
+        let s = job_dir_abs.to_string_lossy();
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        s.replace('\\', "/")
+    };
+    
+    eprintln!("编译路径: {}", full_tex_path_str);
+    eprintln!("输出目录: {}", job_dir_str);
+    
     let result = Command::new("xelatex")
         .arg("-interaction=nonstopmode")
         .arg("-output-directory")
-        .arg(job_dir)
-        .arg(&full_tex_path)
+        .arg(&job_dir_str)
+        .arg(&full_tex_path_str)
+        .current_dir(&job_dir_abs)
         .output()
         .await;
     
     match result {
-        Ok(output) if output.status.success() => {
-            eprintln!("xelatex 编译成功");
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            
+            if !output.status.success() {
+                eprintln!("xelatex 编译警告: status={}", output.status);
+                eprintln!("stdout: {}", stdout);
+                eprintln!("stderr: {}", stderr);
+            } else {
+                eprintln!("xelatex 编译成功");
+            }
             
             // 第二次编译以解决交叉引用
             let result2 = Command::new("xelatex")
                 .arg("-interaction=nonstopmode")
                 .arg("-output-directory")
-                .arg(job_dir)
-                .arg(&full_tex_path)
+                .arg(&job_dir_str)
+                .arg(&full_tex_path_str)
+                .current_dir(&job_dir_abs)
                 .output()
                 .await;
             
-            if result2.is_ok() && result2.as_ref().unwrap().status.success() {
-                eprintln!("第二次编译成功");
+            if let Ok(output2) = result2 {
+                if output2.status.success() {
+                    eprintln!("第二次编译成功");
+                } else {
+                    eprintln!("第二次编译状态: {:?}", output2.status);
+                }
             }
             
-            // 检查 PDF 是否生成
-            let generated_pdf = job_dir.join("full_document.pdf");
+            // 检查 PDF 是否生成（这是判断是否成功的关键）
+            let generated_pdf = job_dir_abs.join("full_document.pdf");
+            eprintln!("检查 PDF 文件: {:?}", generated_pdf);
             if generated_pdf.exists() {
                 // 复制到目标位置
                 fs::copy(&generated_pdf, pdf_path)
@@ -733,14 +790,19 @@ pub async fn compile_pdf(notes_path: &Path, pdf_path: &Path) -> Result<(), Strin
                 eprintln!("PDF 编译完成: {:?}", pdf_path);
                 Ok(())
             } else {
-                Err("PDF 文件未生成".to_string())
+                // 检查是否有 log 文件可以帮助诊断
+                let log_path = job_dir_abs.join("full_document.log");
+                eprintln!("检查日志文件: {:?}", log_path);
+                if log_path.exists() {
+                    if let Ok(log_content) = fs::read_to_string(&log_path).await {
+                        // 获取最后几行日志
+                        let last_lines: Vec<&str> = log_content.lines().rev().take(30).collect();
+                        let last_lines_str: Vec<String> = last_lines.into_iter().rev().map(|s| s.to_string()).collect();
+                        return Err(format!("PDF 文件未生成，编译日志最后30行:\n{}", last_lines_str.join("\n")));
+                    }
+                }
+                Err(format!("PDF 文件未生成\nstdout: {}\nstderr: {}", stdout, stderr))
             }
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            eprintln!("xelatex 编译失败: status={}, stdout={}, stderr={}", output.status, stdout, stderr);
-            Err(format!("xelatex 编译失败: {}", stderr))
         }
         Err(e) => {
             eprintln!("xelatex 命令执行错误: {}", e);
@@ -755,7 +817,7 @@ async fn create_full_latex_doc(chapter_path: &Path) -> Result<String, String> {
         .await
         .map_err(|e| format!("读取章节内容失败: {e}"))?;
     
-    let full_doc = format!("\\documentclass[lang=cn,newtx,10pt,scheme=chinese]{{elegantbook}}\n\n\\title{{课堂讲义}}\n\\author{{自动生成}}\n\\date{{}}\n\n\\begin{{document}}\n\n\\mainmatter\n\n{}\n\n\\end{{document}}\n", chapter_content);
+    let full_doc = format!("\\documentclass[lang=cn,10pt,scheme=chinese,a4paper]{{elegantbook}}\n\n\\title{{课堂讲义}}\n\\author{{自动生成}}\n\\date{{}}\n\n\\begin{{document}}\n\n\\mainmatter\n\n{}\n\n\\end{{document}}\n", chapter_content);
     
     Ok(full_doc)
 }
