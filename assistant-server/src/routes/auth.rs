@@ -48,6 +48,7 @@ struct CurrentUserResponse {
     user_id: Uuid,
     username: String,
     email: String,
+    quota: i32,
 }
 
 pub fn routes() -> Router<AppState> {
@@ -58,11 +59,13 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/logout", post(logout))
 }
 
-async fn me(current_user: CurrentUser) -> Result<Json<CurrentUserResponse>, ApiError> {
+async fn me(State(state): State<AppState>, current_user: CurrentUser) -> Result<Json<CurrentUserResponse>, ApiError> {
+    let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
     Ok(Json(CurrentUserResponse {
         user_id: current_user.id,
         username: current_user.username,
         email: current_user.email,
+        quota: user.quota,
     }))
 }
 
@@ -87,7 +90,7 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
         is_active: true,
         created_at: now,
         updated_at: now,
-        quota: 1,
+        quota: 3,
     };
 
     state.store.insert_user(user.clone()).await

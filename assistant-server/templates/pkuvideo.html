@@ -143,6 +143,14 @@
       background: var(--accent);
       color: #fff;
     }
+    .action-btn.delete {
+      border-color: var(--warn);
+      color: var(--warn);
+    }
+    .action-btn.delete:hover {
+      background: var(--warn);
+      color: #fff;
+    }
     .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
     @media (max-width: 760px) {
       .grid { grid-template-columns: 1fr; }
@@ -175,6 +183,11 @@
       </div>
     </section>
 
+    <div class="card" style="margin-top: 16px;">
+      <strong>资源限额</strong>
+      <div id="quotaInfo" class="mono">加载中...</div>
+    </div>
+
     <div id="status" class="status"></div>
 
     <section class="card">
@@ -193,8 +206,10 @@
     const statusEl = document.getElementById("status");
     const jobMetaEl = document.getElementById("jobMeta");
     const stepsEl = document.getElementById("steps");
+    const quotaInfoEl = document.getElementById("quotaInfo");
     let activeJobId = "";
     let pollTimer = null;
+    let userQuota = 0;
 
     async function api(path, method = "GET", body) {
       const res = await fetch(path, {
@@ -237,13 +252,31 @@
 
     async function checkLogin() {
       try {
-        await api("/api/auth/me");
+        const userInfo = await api("/api/auth/me");
+        userQuota = userInfo.quota || 0;
+        updateQuotaDisplay();
       } catch {
         location.href = "/auth?next=/pkuvideo";
       }
     }
 
+    async function updateQuotaDisplay() {
+      try {
+        const userInfo = await api("/api/auth/me");
+        userQuota = userInfo.quota || 0;
+        quotaInfoEl.textContent = `资源限额: 3 | 剩余额度: ${userQuota}`;
+      } catch (err) {
+        quotaInfoEl.textContent = `获取限额信息失败: ${err.message}`;
+      }
+    }
+
     async function submitJob() {
+      // 检查限额
+      if (userQuota <= 0) {
+        statusEl.textContent = "提交失败: 资源限额不足，请删除历史任务以释放额度";
+        return;
+      }
+
       statusEl.textContent = "提交中...";
       try {
         const resp = await api("/api/pkuvideo/submit-web", "POST", {
@@ -253,9 +286,14 @@
         });
         activeJobId = resp.job_id;
         statusEl.textContent = "提交成功，任务已入队。";
+        // 更新限额显示（扣除了一个额度）
+        userQuota -= 1;
+        quotaInfoEl.textContent = `资源限额: 3 | 剩余额度: ${userQuota}`;
         startPolling();
       } catch (err) {
         statusEl.textContent = "提交失败: " + err.message;
+        // 刷新限额信息
+        updateQuotaDisplay();
       }
     }
 
@@ -313,6 +351,7 @@
                     <button onclick="reexecuteStep('${job.id}', 3)" class="action-btn">重新执行 讲义提取</button>
                     <button onclick="reexecuteStep('${job.id}', 4)" class="action-btn">重新执行 PDF编译</button>
                     ${pdfUrl ? `<button onclick="window.open('${esc(pdfUrl)}')" class="action-btn" style="background: var(--accent); color: #fff;">下载 PDF</button>` : ""}
+                    <button onclick="deleteJob('${job.id}')" class="action-btn delete">删除任务</button>
                   </div>
                 </div>
               </div>
@@ -323,6 +362,23 @@
         document.getElementById("historySection").style.display = "block";
       } catch (err) {
         statusEl.textContent = "加载历史记录失败: " + err.message;
+      }
+    }
+
+    async function deleteJob(jobId) {
+      if (!confirm("确定要删除此任务吗？删除后将无法恢复，相关文件也会被删除。")) {
+        return;
+      }
+
+      try {
+        statusEl.textContent = "正在删除任务...";
+        await api("/api/pkuvideo/jobs/" + jobId, "DELETE");
+        statusEl.textContent = "任务删除成功";
+        // 刷新限额信息和历史记录
+        await updateQuotaDisplay();
+        await loadHistory();
+      } catch (err) {
+        statusEl.textContent = "删除任务失败: " + err.message;
       }
     }
 

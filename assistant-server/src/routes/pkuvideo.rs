@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use axum::{
     extract::{Path, State},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -46,6 +46,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideo/jobs/:id", get(job_detail))
         .route("/api/pkuvideo/jobs", get(job_list))
         .route("/api/pkuvideo/jobs/:id/reexecute", post(reexecute_step))
+        .route("/api/pkuvideo/jobs/:id", delete(delete_job))
 }
 
 async fn submit_api(
@@ -240,6 +241,54 @@ async fn reexecute_step(
     Ok(Json(serde_json::json!({
         "success": true,
         "message": format!("步骤 {} 重新执行成功", req.step)
+    })))
+}
+
+async fn delete_job(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // 先获取任务信息
+    let job_info = {
+        let jobs = state.pkuvideo_jobs.read().await;
+        let job = jobs.get(&id).ok_or(ApiError::NotFound)?;
+
+        if job.user_id != current_user.id {
+            return Err(ApiError::Forbidden("无权访问".to_string()));
+        }
+
+        // 复制需要的信息
+        (job.artifacts_dir.clone(), job.status.clone())
+    };
+
+    let (artifacts_dir, job_status) = job_info;
+
+    // 删除任务目录中的文件
+    let artifacts_path = PathBuf::from(&artifacts_dir);
+    if artifacts_path.exists() {
+        if let Err(e) = tokio::fs::remove_dir_all(&artifacts_path).await {
+            eprintln!("删除任务目录失败: {}", e);
+        }
+    }
+
+    // 从内存中删除任务
+    {
+        let mut jobs = state.pkuvideo_jobs.write().await;
+        jobs.remove(&id);
+    }
+
+    // 从文件存储中删除任务
+    state.store.delete_pkuvideo_job(id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 如果任务已完成，返还限额
+    if job_status == PipelineStatus::Succeeded {
+        state.store.increase_user_quota(current_user.id, 1).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "任务删除成功"
     })))
 }
 
