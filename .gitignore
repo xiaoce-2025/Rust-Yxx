@@ -34,4 +34,4 @@ assistant-server/data/
 
 *.dylib
 # 配置文件
-assistant-server/config/
+# assistant-server/config/
