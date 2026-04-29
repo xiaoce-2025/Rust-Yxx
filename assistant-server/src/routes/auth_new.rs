@@ -81,6 +81,7 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
         is_active: true,
         created_at: now,
         updated_at: now,
+        quota: 1,
     };
 
     state.store.insert_user(user.clone()).await
@@ -119,7 +120,7 @@ async fn login(
         .ok_or(ApiError::Unauthorized)?;
 
     if !user.is_active {
-        return Err(ApiError::Forbidden);
+        return Err(ApiError::Forbidden("用户未激活".to_string()));
     }
 
     if !verify_password(req.password.trim(), &user.password_hash)? {

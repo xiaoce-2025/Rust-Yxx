@@ -39,7 +39,7 @@ async fn list_messages(
         .ok_or(ApiError::NotFound)?;
     
     if conv.user_id != user.id {
-        return Err(ApiError::Forbidden);
+        return Err(ApiError::Forbidden("无权访问".to_string()));
     }
 
     let messages = state.store.get_messages(id).await;
@@ -67,7 +67,7 @@ async fn send_message(
         let conv = state.store.get_conversation(cid).await
             .ok_or(ApiError::NotFound)?;
         if conv.user_id != user.id {
-            return Err(ApiError::Forbidden);
+            return Err(ApiError::Forbidden("无权访问".to_string()));
         }
         cid
     } else {

@@ -17,6 +17,7 @@ pub struct FileUser {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub quota: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +176,28 @@ impl FileStore {
     pub async fn insert_user(&self, user: FileUser) -> Result<(), Box<dyn std::error::Error>> {
         self.users.write().await.insert(user.id, user);
         self.save_users().await?;
+        Ok(())
+    }
+
+    pub async fn decrease_user_quota(&self, user_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
+        let mut users = self.users.write().await;
+        if let Some(user) = users.get_mut(&user_id) {
+            if user.quota > 0 {
+                user.quota -= 1;
+                user.updated_at = chrono::Utc::now();
+                self.save_users().await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn increase_user_quota(&self, user_id: Uuid, amount: i32) -> Result<(), Box<dyn std::error::Error>> {
+        let mut users = self.users.write().await;
+        if let Some(user) = users.get_mut(&user_id) {
+            user.quota += amount;
+            user.updated_at = chrono::Utc::now();
+            self.save_users().await?;
+        }
         Ok(())
     }
 

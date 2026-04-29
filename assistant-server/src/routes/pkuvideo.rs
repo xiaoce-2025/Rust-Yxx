@@ -110,7 +110,7 @@ async fn job_detail(
     let job = jobs.get(&id).cloned().ok_or(ApiError::NotFound)?;
 
     if job.user_id != current_user.id {
-        return Err(ApiError::Forbidden);
+        return Err(ApiError::Forbidden("无权访问".to_string()));
     }
 
     Ok(Json(job))
@@ -145,7 +145,7 @@ async fn reexecute_step(
     let job = jobs.get_mut(&id).ok_or(ApiError::NotFound)?;
 
     if job.user_id != current_user.id {
-        return Err(ApiError::Forbidden);
+        return Err(ApiError::Forbidden("无权访问".to_string()));
     }
 
     // 构建任务目录路径（时间戳_任务ID）
@@ -269,10 +269,19 @@ async fn enqueue_job(
             job.status == PipelineStatus::Succeeded &&
             job.pdf_path.is_some()
         }) {
-            // 找到相同视频链接的已完成任务，直接复制结果
+            // 找到相同视频链接的已完成任务，直接复制结果（不消耗限额）
             return copy_existing_job(&state, user_id, &video_url, existing_job).await;
         }
     } // 在这里释放读取锁
+
+    // 检查用户限额
+    let user = state.store.get_user(user_id).await.ok_or(ApiError::Unauthorized)?;
+    if user.quota <= 0 {
+        return Err(ApiError::Forbidden("限额不足，请联系管理员".to_string()));
+    }
+
+    // 扣除限额
+    state.store.decrease_user_quota(user_id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let job_id = Uuid::new_v4();
     let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");
