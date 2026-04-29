@@ -157,9 +157,24 @@ async fn reexecute_step(
     let mp3_path = job_dir.join("audio.mp3");
     let transcript_path = job_dir.join("transcript.txt");
     let notes_path = job_dir.join("lecture_notes.tex");
+    let pdf_path = job_dir.join("lecture_notes.pdf");
 
     // 根据步骤索引重新执行
     match req.step {
+        0 => {
+            // 重新执行 视频下载（需要原始URL）
+            crate::services::pkuvideo::download_video(
+                &job.video_url,
+                &video_path,
+                "",
+                "",
+            )
+                .await
+                .map_err(|e| ApiError::Internal(e))?;
+            job.steps[0].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
+            job.steps[0].message = "视频下载完成".to_string();
+            job.steps[0].finished_at = Some(chrono::Utc::now());
+        }
         1 => {
             // 重新执行 MP3 抽离
             crate::services::pkuvideo::extract_mp3(&video_path, &mp3_path)
@@ -188,6 +203,16 @@ async fn reexecute_step(
             job.steps[3].message = "讲义提取完成".to_string();
             job.steps[3].finished_at = Some(chrono::Utc::now());
             job.notes_path = Some(notes_path.to_string_lossy().to_string());
+        }
+        4 => {
+            // 重新执行 PDF 编译
+            crate::services::pkuvideo::compile_pdf(&notes_path, &pdf_path)
+                .await
+                .map_err(|e| ApiError::Internal(e))?;
+            job.steps[4].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
+            job.steps[4].message = "PDF 编译完成".to_string();
+            job.steps[4].finished_at = Some(chrono::Utc::now());
+            job.pdf_path = Some(pdf_path.to_string_lossy().to_string());
         }
         _ => {
             return Err(ApiError::BadRequest("无效的步骤索引".to_string()));
@@ -271,11 +296,12 @@ async fn run_job_pipeline(
     let result = run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two, &state.settings).await;
 
     match result {
-        Ok((transcript_path, notes_path)) => {
+        Ok((transcript_path, notes_path, pdf_path)) => {
             mark_step_success(&state, job_id, 0, "视频下载完成").await;
             mark_step_success(&state, job_id, 1, "mp3 抽离完成").await;
             mark_step_success(&state, job_id, 2, "语音转文字完成").await;
             mark_step_success(&state, job_id, 3, "讲义提取完成").await;
+            mark_step_success(&state, job_id, 4, "PDF 编译完成").await;
 
             let mut jobs = state.pkuvideo_jobs.write().await;
             if let Some(job) = jobs.get_mut(&job_id) {
@@ -283,6 +309,7 @@ async fn run_job_pipeline(
                 job.updated_at = Utc::now();
                 job.transcript_path = transcript_path;
                 job.notes_path = notes_path;
+                job.pdf_path = pdf_path;
                 // 保存到FileStore
                 let _ = state.store.update_pkuvideo_job(job.clone()).await;
             }
@@ -300,7 +327,7 @@ fn parse_step_error(raw: &str) -> (usize, String) {
     if let Some((step_part, message)) = raw.split_once(';') {
         if let Some(step) = step_part.strip_prefix("step=") {
             if let Ok(index) = step.parse::<usize>() {
-                return (index.min(3), message.to_string());
+                return (index.min(4), message.to_string());
             }
         }
     }

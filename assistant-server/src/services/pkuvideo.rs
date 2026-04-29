@@ -37,6 +37,7 @@ pub struct PkuVideoJob {
     pub artifacts_dir: String,
     pub transcript_path: Option<String>,
     pub notes_path: Option<String>,
+    pub pdf_path: Option<String>,
     pub error: Option<String>,
 }
 
@@ -47,6 +48,7 @@ impl PkuVideoJob {
             "extract_mp3",
             "speech_to_text",
             "extract_lecture_notes",
+            "compile_pdf",
         ];
 
         Self {
@@ -69,6 +71,7 @@ impl PkuVideoJob {
             artifacts_dir,
             transcript_path: None,
             notes_path: None,
+            pdf_path: None,
             error: None,
         }
     }
@@ -81,7 +84,7 @@ pub async fn run_pipeline(
     login_credential_one: String,
     login_credential_two: String,
     settings: &crate::config::Settings,
-) -> Result<(Option<String>, Option<String>), String> {
+) -> Result<(Option<String>, Option<String>, Option<String>), String> {
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let job_dir = base_dir.join(format!("{}_{}", timestamp, job_id));
     fs::create_dir_all(&job_dir)
@@ -92,6 +95,7 @@ pub async fn run_pipeline(
     let mp3_path = job_dir.join("audio.mp3");
     let transcript_path = job_dir.join("transcript.txt");
     let notes_path = job_dir.join("lecture_notes.tex");
+    let pdf_path = job_dir.join("lecture_notes.pdf");
 
     download_video(
         &video_url,
@@ -110,14 +114,18 @@ pub async fn run_pipeline(
     extract_notes(&transcript_path, &notes_path, settings)
         .await
         .map_err(|e| format!("step=3;{e}"))?;
+    compile_pdf(&notes_path, &pdf_path)
+        .await
+        .map_err(|e| format!("step=4;{e}"))?;
 
     Ok((
         Some(transcript_path.to_string_lossy().to_string()),
         Some(notes_path.to_string_lossy().to_string()),
+        Some(pdf_path.to_string_lossy().to_string()),
     ))
 }
 
-async fn download_video(url: &str, video_path: &Path, username: &str, password: &str) -> Result<(), String> {
+pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str) -> Result<(), String> {
     let bytes = download_with_pku_cookie(url, username, password).await?;
 
     fs::write(video_path, bytes)
@@ -626,10 +634,124 @@ pub async fn extract_notes(transcript_path: &Path, notes_path: &Path, settings: 
         .and_then(|v| v.as_str())
         .ok_or("响应中缺少content字段")?;
 
-    eprintln!("讲义生成成功，文本长度: {}字符", notes_content.len());
+    eprintln!("讲义生成成功，原始内容长度: {}字符", notes_content.len());
+
+    // 提取纯 LaTeX 内容（从 ```latex ... ``` 中提取）
+    let pure_latex = extract_pure_latex(notes_content);
+    eprintln!("提取纯 LaTeX 内容，长度: {}字符", pure_latex.len());
 
     // 将结果保存为 .tex 文件
-    fs::write(notes_path, notes_content)
+    fs::write(notes_path, pure_latex)
         .await
         .map_err(|e| format!("写入讲义失败: {e}"))
+}
+
+/// 从内容中提取纯 LaTeX 代码（从 ```latex ... ``` 块中提取）
+fn extract_pure_latex(content: &str) -> String {
+    // 尝试匹配 ```latex ... ``` 块
+    let re = regex::Regex::new(r"```latex\s*(.*?)\s*```").unwrap();
+    if let Some(captures) = re.captures(content) {
+        captures[1].to_string()
+    } else {
+        // 如果没有找到代码块，返回原始内容（去除可能的前后描述）
+        let trimmed = content.trim();
+        // 尝试查找第一个 \chapter 或 \section
+        if let Some(start) = trimmed.find('\\') {
+            trimmed[start..].to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+/// 将 LaTeX 章节文件编译为 PDF
+pub async fn compile_pdf(notes_path: &Path, pdf_path: &Path) -> Result<(), String> {
+    eprintln!("开始编译 PDF");
+    
+    // 获取任务目录
+    let job_dir = notes_path.parent().ok_or("无法获取任务目录")?;
+    
+    // 创建完整的 LaTeX 文档
+    let full_tex = create_full_latex_doc(notes_path).await?;
+    
+    // 将完整文档写入临时文件
+    let full_tex_path = job_dir.join("full_document.tex");
+    fs::write(&full_tex_path, full_tex)
+        .await
+        .map_err(|e| format!("写入完整文档失败: {e}"))?;
+    
+    eprintln!("完整文档路径: {:?}", full_tex_path);
+    
+    // 复制模板文件到任务目录
+    let template_cls = Path::new("./data/templates/elegantbook/elegantbook.cls");
+    if template_cls.exists() {
+        fs::copy(template_cls, job_dir.join("elegantbook.cls"))
+            .await
+            .map_err(|e| format!("复制模板文件失败: {e}"))?;
+        eprintln!("已复制模板文件");
+    } else {
+        return Err("模板文件不存在".to_string());
+    }
+    
+    // 使用 xelatex 编译
+    let result = Command::new("xelatex")
+        .arg("-interaction=nonstopmode")
+        .arg("-output-directory")
+        .arg(job_dir)
+        .arg(&full_tex_path)
+        .output()
+        .await;
+    
+    match result {
+        Ok(output) if output.status.success() => {
+            eprintln!("xelatex 编译成功");
+            
+            // 第二次编译以解决交叉引用
+            let result2 = Command::new("xelatex")
+                .arg("-interaction=nonstopmode")
+                .arg("-output-directory")
+                .arg(job_dir)
+                .arg(&full_tex_path)
+                .output()
+                .await;
+            
+            if result2.is_ok() && result2.as_ref().unwrap().status.success() {
+                eprintln!("第二次编译成功");
+            }
+            
+            // 检查 PDF 是否生成
+            let generated_pdf = job_dir.join("full_document.pdf");
+            if generated_pdf.exists() {
+                // 复制到目标位置
+                fs::copy(&generated_pdf, pdf_path)
+                    .await
+                    .map_err(|e| format!("复制 PDF 文件失败: {e}"))?;
+                eprintln!("PDF 编译完成: {:?}", pdf_path);
+                Ok(())
+            } else {
+                Err("PDF 文件未生成".to_string())
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            eprintln!("xelatex 编译失败: status={}, stdout={}, stderr={}", output.status, stdout, stderr);
+            Err(format!("xelatex 编译失败: {}", stderr))
+        }
+        Err(e) => {
+            eprintln!("xelatex 命令执行错误: {}", e);
+            Err(format!("xelatex 命令执行错误: {}", e))
+        }
+    }
+}
+
+/// 根据章节内容创建完整的 LaTeX 文档
+async fn create_full_latex_doc(chapter_path: &Path) -> Result<String, String> {
+    let chapter_content = fs::read_to_string(chapter_path)
+        .await
+        .map_err(|e| format!("读取章节内容失败: {e}"))?;
+    
+    let full_doc = format!("\\documentclass[lang=cn,newtx,10pt,scheme=chinese]{{elegantbook}}\n\n\\title{{课堂讲义}}\n\\author{{自动生成}}\n\\date{{}}\n\n\\begin{{document}}\n\n\\mainmatter\n\n{}\n\n\\end{{document}}\n", chapter_content);
+    
+    Ok(full_doc)
 }

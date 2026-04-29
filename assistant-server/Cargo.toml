@@ -24,6 +24,7 @@ base64 = "0.22"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 async-trait = "0.1"
 http = "1"
+regex = "1"
 
 [profile.release]
 lto = true
