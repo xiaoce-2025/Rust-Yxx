@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::services::pkulogin::download_with_pku_cookie;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PipelineStatus {
     Pending,
@@ -118,10 +118,21 @@ pub async fn run_pipeline(
         .await
         .map_err(|e| format!("step=4;{e}"))?;
 
+    // 将路径转换为相对路径（相对于 base_dir）
+    let transcript_rel = transcript_path.strip_prefix(&base_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| transcript_path.to_string_lossy().to_string());
+    let notes_rel = notes_path.strip_prefix(&base_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| notes_path.to_string_lossy().to_string());
+    let pdf_rel = pdf_path.strip_prefix(&base_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| pdf_path.to_string_lossy().to_string());
+
     Ok((
-        Some(transcript_path.to_string_lossy().to_string()),
-        Some(notes_path.to_string_lossy().to_string()),
-        Some(pdf_path.to_string_lossy().to_string()),
+        Some(transcript_rel),
+        Some(notes_rel),
+        Some(pdf_rel),
     ))
 }
 

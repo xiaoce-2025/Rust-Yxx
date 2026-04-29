@@ -227,7 +227,11 @@
         stepsEl.innerHTML += '<div class="step">讲义文件: <span class="mono">' + esc(job.notes_path) + '</span></div>';
       }
       if (job.pdf_path) {
-        stepsEl.innerHTML += '<div class="step">PDF文件: <span class="mono">' + esc(job.pdf_path) + '</span></div>';
+        // 处理路径：将反斜杠转换为正斜杠，确保跨平台兼容
+        const normalizedPath = job.pdf_path.replace(/\\/g, "/");
+        // 构建完整的下载URL
+        const pdfUrl = normalizedPath.startsWith("/") ? normalizedPath : "/data/pkuvideo_jobs/" + normalizedPath;
+        stepsEl.innerHTML += '<div class="step">PDF文件: <span class="mono">' + esc(job.pdf_path) + '</span> <button onclick="window.open(\'' + esc(pdfUrl) + '\')" class="action-btn" style="margin-left: 8px;">下载 PDF</button></div>';
       }
     }
 
@@ -284,6 +288,12 @@
           historyList.innerHTML = "暂无历史任务记录";
         } else {
           historyList.innerHTML = jobs.map(job => {
+            // 处理路径：将反斜杠转换为正斜杠，确保跨平台兼容
+            let pdfUrl = null;
+            if (job.pdf_path) {
+              const normalizedPath = job.pdf_path.replace(/\\/g, "/");
+              pdfUrl = normalizedPath.startsWith("/") ? normalizedPath : "/data/pkuvideo_jobs/" + normalizedPath;
+            }
             return `
               <div class="history-item">
                 <div class="history-header">
@@ -295,13 +305,14 @@
                   <div>视频链接: ${esc(job.video_url)}</div>
                   ${job.transcript_path ? `<div>转写文件: ${esc(job.transcript_path)}</div>` : ""}
                   ${job.notes_path ? `<div>讲义文件: ${esc(job.notes_path)}</div>` : ""}
-                  ${job.pdf_path ? `<div>PDF文件: ${esc(job.pdf_path)}</div>` : ""}
+                  ${job.pdf_path ? `<div>PDF文件: <span class="mono">${esc(job.pdf_path)}</span></div>` : ""}
                   <div class="history-actions">
                     <button onclick="reexecuteStep('${job.id}', 0)" class="action-btn">重新执行 视频下载</button>
                     <button onclick="reexecuteStep('${job.id}', 1)" class="action-btn">重新执行 MP3 抽离</button>
                     <button onclick="reexecuteStep('${job.id}', 2)" class="action-btn">重新执行 语音转文字</button>
                     <button onclick="reexecuteStep('${job.id}', 3)" class="action-btn">重新执行 讲义提取</button>
                     <button onclick="reexecuteStep('${job.id}', 4)" class="action-btn">重新执行 PDF编译</button>
+                    ${pdfUrl ? `<button onclick="window.open('${esc(pdfUrl)}')" class="action-btn" style="background: var(--accent); color: #fff;">下载 PDF</button>` : ""}
                   </div>
                 </div>
               </div>

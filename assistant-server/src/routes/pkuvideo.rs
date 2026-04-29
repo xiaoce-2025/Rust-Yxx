@@ -192,7 +192,11 @@ async fn reexecute_step(
             job.steps[2].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
             job.steps[2].message = "语音转文字完成".to_string();
             job.steps[2].finished_at = Some(chrono::Utc::now());
-            job.transcript_path = Some(transcript_path.to_string_lossy().to_string());
+            // 存储相对路径
+            let transcript_rel = transcript_path.strip_prefix(&base_dir)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| transcript_path.to_string_lossy().to_string());
+            job.transcript_path = Some(transcript_rel);
         }
         3 => {
             // 重新执行 讲义提取
@@ -202,7 +206,11 @@ async fn reexecute_step(
             job.steps[3].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
             job.steps[3].message = "讲义提取完成".to_string();
             job.steps[3].finished_at = Some(chrono::Utc::now());
-            job.notes_path = Some(notes_path.to_string_lossy().to_string());
+            // 存储相对路径
+            let notes_rel = notes_path.strip_prefix(&base_dir)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| notes_path.to_string_lossy().to_string());
+            job.notes_path = Some(notes_rel);
         }
         4 => {
             // 重新执行 PDF 编译
@@ -212,7 +220,11 @@ async fn reexecute_step(
             job.steps[4].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
             job.steps[4].message = "PDF 编译完成".to_string();
             job.steps[4].finished_at = Some(chrono::Utc::now());
-            job.pdf_path = Some(pdf_path.to_string_lossy().to_string());
+            // 存储相对路径
+            let pdf_rel = pdf_path.strip_prefix(&base_dir)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| pdf_path.to_string_lossy().to_string());
+            job.pdf_path = Some(pdf_rel);
         }
         _ => {
             return Err(ApiError::BadRequest("无效的步骤索引".to_string()));
@@ -248,6 +260,20 @@ async fn enqueue_job(
     pku_auth_one: String,
     pku_auth_two: String,
 ) -> Result<Uuid, ApiError> {
+    // 先检查是否有相同视频链接的已完成任务
+    {
+        let existing_jobs = state.pkuvideo_jobs.read().await;
+        if let Some(existing_job) = existing_jobs.values().find(|job| {
+            job.user_id == user_id && 
+            job.video_url == video_url && 
+            job.status == PipelineStatus::Succeeded &&
+            job.pdf_path.is_some()
+        }) {
+            // 找到相同视频链接的已完成任务，直接复制结果
+            return copy_existing_job(&state, user_id, &video_url, existing_job).await;
+        }
+    } // 在这里释放读取锁
+
     let job_id = Uuid::new_v4();
     let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");
 
@@ -258,6 +284,7 @@ async fn enqueue_job(
     state.store.insert_pkuvideo_job(job).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let state_for_task = state.clone();
+    let state_for_error = state.clone();
     task::spawn(async move {
         if let Err(e) = run_job_pipeline(
             state_for_task,
@@ -268,16 +295,92 @@ async fn enqueue_job(
         )
         .await
         {
-            let mut jobs = state.pkuvideo_jobs.write().await;
+            let mut jobs = state_for_error.pkuvideo_jobs.write().await;
             if let Some(job) = jobs.get_mut(&job_id) {
                 job.status = PipelineStatus::Failed;
                 job.updated_at = Utc::now();
                 job.error = Some(e);
                 // 保存到FileStore
-                let _ = state.store.update_pkuvideo_job(job.clone()).await;
+                let _ = state_for_error.store.update_pkuvideo_job(job.clone()).await;
             }
         }
     });
+
+    Ok(job_id)
+}
+
+async fn copy_existing_job(
+    state: &AppState,
+    user_id: Uuid,
+    video_url: &str,
+    existing_job: &PkuVideoJob,
+) -> Result<Uuid, ApiError> {
+    let job_id = Uuid::new_v4();
+    let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");
+    
+    // 创建新任务目录
+    std::fs::create_dir_all(&artifacts_dir).map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 复制转写文件
+    let mut new_transcript_path = None;
+    if let Some(transcript_path) = &existing_job.transcript_path {
+        let src_path = PathBuf::from(transcript_path);
+        let dest_path = PathBuf::from(&artifacts_dir).join(src_path.file_name().unwrap());
+        std::fs::copy(&src_path, &dest_path).map_err(|e| ApiError::Internal(e.to_string()))?;
+        new_transcript_path = Some(dest_path.to_string_lossy().to_string());
+    }
+
+    // 复制讲义文件
+    let mut new_notes_path = None;
+    if let Some(notes_path) = &existing_job.notes_path {
+        let src_path = PathBuf::from(notes_path);
+        let dest_path = PathBuf::from(&artifacts_dir).join(src_path.file_name().unwrap());
+        std::fs::copy(&src_path, &dest_path).map_err(|e| ApiError::Internal(e.to_string()))?;
+        new_notes_path = Some(dest_path.to_string_lossy().to_string());
+    }
+
+    // 复制PDF文件
+    let mut new_pdf_path = None;
+    if let Some(pdf_path) = &existing_job.pdf_path {
+        let src_path = PathBuf::from(pdf_path);
+        let dest_path = PathBuf::from(&artifacts_dir).join(src_path.file_name().unwrap());
+        std::fs::copy(&src_path, &dest_path).map_err(|e| ApiError::Internal(e.to_string()))?;
+        new_pdf_path = Some(dest_path.to_string_lossy().to_string());
+    }
+
+    // 创建新任务并标记为成功
+    let mut job = PkuVideoJob::new(job_id, user_id, video_url.to_string(), artifacts_dir);
+    job.status = PipelineStatus::Succeeded;
+    job.transcript_path = new_transcript_path;
+    job.notes_path = new_notes_path;
+    job.pdf_path = new_pdf_path;
+    
+    // 标记所有步骤为成功
+    job.steps[0].status = PipelineStatus::Succeeded;
+    job.steps[0].message = "视频下载完成(复制)".to_string();
+    job.steps[0].finished_at = Some(Utc::now());
+    
+    job.steps[1].status = PipelineStatus::Succeeded;
+    job.steps[1].message = "MP3抽离完成(复制)".to_string();
+    job.steps[1].finished_at = Some(Utc::now());
+    
+    job.steps[2].status = PipelineStatus::Succeeded;
+    job.steps[2].message = "语音转文字完成(复制)".to_string();
+    job.steps[2].finished_at = Some(Utc::now());
+    
+    job.steps[3].status = PipelineStatus::Succeeded;
+    job.steps[3].message = "讲义提取完成(复制)".to_string();
+    job.steps[3].finished_at = Some(Utc::now());
+    
+    job.steps[4].status = PipelineStatus::Succeeded;
+    job.steps[4].message = "PDF编译完成(复制)".to_string();
+    job.steps[4].finished_at = Some(Utc::now());
+
+    job.updated_at = Utc::now();
+
+    // 保存到内存和文件存储
+    state.pkuvideo_jobs.write().await.insert(job_id, job.clone());
+    state.store.insert_pkuvideo_job(job).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(job_id)
 }
