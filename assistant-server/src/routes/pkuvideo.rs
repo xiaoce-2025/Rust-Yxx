@@ -345,8 +345,16 @@ async fn enqueue_job(
         return Err(ApiError::Forbidden("处理资源限额不足，请联系管理员".to_string()));
     }
 
+    // 检查储存资源限额
+    if user.storage_quota <= 0 {
+        return Err(ApiError::Forbidden("储存资源限额不足，请删除已完成的任务释放空间".to_string()));
+    }
+
     // 扣除处理限额
     state.store.decrease_processing_quota(user_id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 扣除储存资源限额
+    state.store.decrease_storage_quota(user_id, 1).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let job_id = Uuid::new_v4();
     let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");

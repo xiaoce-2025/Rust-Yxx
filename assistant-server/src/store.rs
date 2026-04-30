@@ -231,6 +231,18 @@ impl FileStore {
         self.save_users_data(&users).await
     }
 
+    pub async fn decrease_storage_quota(&self, user_id: Uuid, amount: i32) -> Result<(), Box<dyn std::error::Error>> {
+        let users = {
+            let mut users = self.users.write().await;
+            if let Some(user) = users.get_mut(&user_id) {
+                user.storage_quota = std::cmp::max(0, user.storage_quota - amount);
+                user.updated_at = chrono::Utc::now();
+            }
+            users.clone()
+        };
+        self.save_users_data(&users).await
+    }
+
     // ===== Sessions =====
     async fn load_sessions(&self) -> Result<(), Box<dyn std::error::Error>> {
         let path = self.data_dir.join("sessions.json");
