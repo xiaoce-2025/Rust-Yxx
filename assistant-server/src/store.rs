@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 
 
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileUser {
     pub id: Uuid,
@@ -161,12 +162,16 @@ impl FileStore {
         Ok(())
     }
 
-    async fn save_users(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn save_users_data(&self, users: &HashMap<Uuid, FileUser>) -> Result<(), Box<dyn std::error::Error>> {
         let path = self.data_dir.join("users.json");
-        let data = self.users.read().await;
-        let json = serde_json::to_string_pretty(&*data)?;
+        let json = serde_json::to_string_pretty(users)?;
         tokio::fs::write(&path, json).await?;
         Ok(())
+    }
+
+    async fn save_users(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let users = self.users.read().await;
+        self.save_users_data(&users).await
     }
 
     pub async fn get_user(&self, user_id: Uuid) -> Option<FileUser> {
@@ -192,31 +197,38 @@ impl FileStore {
     }
 
     pub async fn insert_user(&self, user: FileUser) -> Result<(), Box<dyn std::error::Error>> {
-        self.users.write().await.insert(user.id, user);
-        self.save_users().await?;
-        Ok(())
+        let users = {
+            let mut users = self.users.write().await;
+            users.insert(user.id, user);
+            users.clone()
+        };
+        self.save_users_data(&users).await
     }
 
     pub async fn decrease_processing_quota(&self, user_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
-        let mut users = self.users.write().await;
-        if let Some(user) = users.get_mut(&user_id) {
-            if user.processing_quota > 0 {
-                user.processing_quota -= 1;
-                user.updated_at = chrono::Utc::now();
-                self.save_users().await?;
+        let users = {
+            let mut users = self.users.write().await;
+            if let Some(user) = users.get_mut(&user_id) {
+                if user.processing_quota > 0 {
+                    user.processing_quota -= 1;
+                    user.updated_at = chrono::Utc::now();
+                }
             }
-        }
-        Ok(())
+            users.clone()
+        };
+        self.save_users_data(&users).await
     }
 
     pub async fn increase_storage_quota(&self, user_id: Uuid, amount: i32) -> Result<(), Box<dyn std::error::Error>> {
-        let mut users = self.users.write().await;
-        if let Some(user) = users.get_mut(&user_id) {
-            user.storage_quota += amount;
-            user.updated_at = chrono::Utc::now();
-            self.save_users().await?;
-        }
-        Ok(())
+        let users = {
+            let mut users = self.users.write().await;
+            if let Some(user) = users.get_mut(&user_id) {
+                user.storage_quota += amount;
+                user.updated_at = chrono::Utc::now();
+            }
+            users.clone()
+        };
+        self.save_users_data(&users).await
     }
 
     // ===== Sessions =====

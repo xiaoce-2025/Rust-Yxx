@@ -1,0 +1,345 @@
+warning: fields `wechat_service`, `plugin_router`, and `in_memory_sessions` are never read
+  --> src/app_state.rs:19:9
+   |
+16 | pub struct AppState {
+   |            -------- fields in this struct
+...
+19 |     pub wechat_service: Arc<WeChatService>,
+   |         ^^^^^^^^^^^^^^
+20 |     pub plugin_router: Arc<PluginRouter>,
+   |         ^^^^^^^^^^^^^
+21 |     pub in_memory_sessions: Arc<RwLock<HashMap<Uuid, RuntimeWechatSessio...
+   |         ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `AppState` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `User` is never constructed
+ --> src/models/user.rs:7:12
+  |
+7 | pub struct User {
+  |            ^^^^
+
+warning: struct `UserSession` is never constructed
+  --> src/models/user.rs:18:12
+   |
+18 | pub struct UserSession {
+   |            ^^^^^^^^^^^
+
+warning: struct `Conversation` is never constructed
+  --> src/models/user.rs:28:12
+   |
+28 | pub struct Conversation {
+   |            ^^^^^^^^^^^^
+
+warning: struct `ConversationMessage` is never constructed
+  --> src/models/user.rs:37:12
+   |
+37 | pub struct ConversationMessage {
+   |            ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `UserConfig` is never constructed
+  --> src/models/user.rs:46:12
+   |
+46 | pub struct UserConfig {
+   |            ^^^^^^^^^^
+
+warning: struct `WeChatUserInfo` is never constructed
+ --> src/models/wechat.rs:4:12
+  |
+4 | pub struct WeChatUserInfo {
+  |            ^^^^^^^^^^^^^^
+
+warning: struct `TokenResponse` is never constructed
+  --> src/models/wechat.rs:12:12
+   |
+12 | pub struct TokenResponse {
+   |            ^^^^^^^^^^^^^
+
+warning: struct `WeixinMessageItemText` is never constructed
+  --> src/models/wechat.rs:20:12
+   |
+20 | pub struct WeixinMessageItemText {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WeixinMessageItem` is never constructed
+  --> src/models/wechat.rs:25:12
+   |
+25 | pub struct WeixinMessageItem {
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: struct `WeixinMessage` is never constructed
+  --> src/models/wechat.rs:32:12
+   |
+32 | pub struct WeixinMessage {
+   |            ^^^^^^^^^^^^^
+
+warning: struct `WeixinUpdatesResponse` is never constructed
+  --> src/models/wechat.rs:45:12
+   |
+45 | pub struct WeixinUpdatesResponse {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `WeixinGenericResponse` is never constructed
+  --> src/models/wechat.rs:57:12
+   |
+57 | pub struct WeixinGenericResponse {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `handle` is never used
+ --> src/plugins/base.rs:5:14
+  |
+4 | pub trait MessageModule: Send + Sync {
+  |           ------------- method in this trait
+5 |     async fn handle(&self, text: &str) -> String;
+  |              ^^^^^^
+
+warning: struct `MessageClassifier` is never constructed
+ --> src/plugins/classifier.rs:1:12
+  |
+1 | pub struct MessageClassifier;
+  |            ^^^^^^^^^^^^^^^^^
+
+warning: associated function `classify` is never used
+ --> src/plugins/classifier.rs:4:12
+  |
+3 | impl MessageClassifier {
+  | ---------------------- associated function in this implementation
+4 |     pub fn classify(text: &str) -> &'static str {
+  |            ^^^^^^^^
+
+warning: field `modules` is never read
+ --> src/plugins/router.rs:9:5
+  |
+8 | pub struct PluginRouter {
+  |            ------------ field in this struct
+9 |     modules: HashMap<&'static str, Arc<dyn MessageModule>>,
+  |     ^^^^^^^
+
+warning: methods `reply` and `list_modules` are never used
+  --> src/plugins/router.rs:23:18
+   |
+12 | impl PluginRouter {
+   | ----------------- methods in this implementation
+...
+23 |     pub async fn reply(&self, text: &str) -> String {
+   |                  ^^^^^
+...
+36 |     pub fn list_modules(&self) -> Vec<String> {
+   |            ^^^^^^^^^^^^
+
+warning: struct `WeatherApiPayload` is never constructed
+ --> src/plugins/weather.rs:9:8
+  |
+9 | struct WeatherApiPayload {
+  |        ^^^^^^^^^^^^^^^^^
+
+warning: struct `CityInfo` is never constructed
+  --> src/plugins/weather.rs:16:8
+   |
+16 | struct CityInfo {
+   |        ^^^^^^^^
+
+warning: struct `WeatherData` is never constructed
+  --> src/plugins/weather.rs:21:8
+   |
+21 | struct WeatherData {
+   |        ^^^^^^^^^^^
+
+warning: struct `Forecast` is never constructed
+  --> src/plugins/weather.rs:26:8
+   |
+26 | struct Forecast {
+   |        ^^^^^^^^
+
+warning: field `conversation_id` is never read
+ --> src/routes/conversations.rs:8:5
+  |
+7 | struct SendMessageRequest {
+  |        ------------------ field in this struct
+8 |     conversation_id: Option<Uuid>,
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `SendMessageRequest` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `token` is never read
+  --> src/services/pkulogin.rs:20:5
+   |
+19 | struct PkuLoginResult {
+   |        -------------- field in this struct
+20 |     token: String,
+   |     ^^^^^
+
+warning: fields `oauth_app_id`, `oauth_app_secret`, `redirect_uri`, `api_base_url`, `qr_bot_type`, and `http_client` are never read
+  --> src/services/wechat.rs:11:9
+   |
+10 | pub struct WeChatService {
+   |            ------------- fields in this struct
+11 |     pub oauth_app_id: String,
+   |         ^^^^^^^^^^^^
+12 |     pub oauth_app_secret: String,
+   |         ^^^^^^^^^^^^^^^^
+13 |     pub redirect_uri: String,
+   |         ^^^^^^^^^^^^
+14 |     pub api_base_url: String,
+   |         ^^^^^^^^^^^^
+15 |     pub qr_bot_type: String,
+   |         ^^^^^^^^^^^
+16 |     pub http_client: reqwest::Client,
+   |         ^^^^^^^^^^^
+   |
+   = note: `WeChatService` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple associated items are never used
+   --> src/services/wechat.rs:31:12
+    |
+ 19 | impl WeChatService {
+    | ------------------ associated items in this implementation
+...
+ 31 |     pub fn generate_auth_url(&self, state: &str) -> String {
+    |            ^^^^^^^^^^^^^^^^^
+...
+ 40 |     pub async fn get_access_token(&self, code: &str) -> Result<(String,...
+    |                  ^^^^^^^^^^^^^^^^
+...
+ 58 |     pub async fn get_user_info(&self, access_token: &str, openid: &str)...
+    |                  ^^^^^^^^^^^^^
+...
+ 67 |     pub async fn bind_wechat_to_user(&self, _user_id: Uuid, _wechat_inf...
+    |                  ^^^^^^^^^^^^^^^^^^^
+...
+ 72 |     fn random_wechat_uin() -> String {
+    |        ^^^^^^^^^^^^^^^^^
+...
+ 77 |     fn ilink_headers(token: &str) -> HeaderMap {
+    |        ^^^^^^^^^^^^^
+...
+ 91 |     pub async fn get_bot_qrcode(&self, bot_type: &str) -> Result<Value,...
+    |                  ^^^^^^^^^^^^^^
+...
+104 |     pub async fn get_qrcode_status(&self, qrcode: &str) -> Result<Value...
+    |                  ^^^^^^^^^^^^^^^^^
+...
+118 |     pub async fn get_updates(&self, token: &str, cursor: &str) -> Resul...
+    |                  ^^^^^^^^^^^
+...
+136 |     pub async fn send_text_message(
+    |                  ^^^^^^^^^^^^^^^^^
+...
+170 |     pub fn normalize_weixin_user_id(user_id: &str) -> String {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+181 |     pub fn extract_text(message: &crate::models::wechat::WeixinMessage)...
+    |            ^^^^^^^^^^^^
+
+warning: multiple methods are never used
+   --> src/store.rs:172:14
+    |
+118 | impl FileStore {
+    | -------------- methods in this implementation
+...
+172 |     async fn save_users(&self) -> Result<(), Box<dyn std::error::Error>> {
+    |              ^^^^^^^^^^
+...
+281 |     async fn save_configs(&self) -> Result<(), Box<dyn std::error::Erro...
+    |              ^^^^^^^^^^^^
+...
+289 |     pub async fn get_config(&self, user_id: Uuid) -> Option<FileUserCon...
+    |                  ^^^^^^^^^^
+...
+293 |     pub async fn upsert_config(&self, config: FileUserConfig) -> Result...
+    |                  ^^^^^^^^^^^^^
+...
+310 |     async fn save_conversations(&self) -> Result<(), Box<dyn std::error...
+    |              ^^^^^^^^^^^^^^^^^^
+...
+318 |     pub async fn get_conversations(&self, user_id: Uuid) -> Vec<FileCon...
+    |                  ^^^^^^^^^^^^^^^^^
+...
+331 |     pub async fn get_conversation(&self, conv_id: Uuid) -> Option<FileC...
+    |                  ^^^^^^^^^^^^^^^^
+...
+335 |     pub async fn insert_conversation(&self, conv: FileConversation) -> ...
+    |                  ^^^^^^^^^^^^^^^^^^^
+...
+341 |     pub async fn update_conversation(&self, conv: FileConversation) -> ...
+    |                  ^^^^^^^^^^^^^^^^^^^
+...
+358 |     async fn save_messages(&self) -> Result<(), Box<dyn std::error::Err...
+    |              ^^^^^^^^^^^^^
+...
+366 |     pub async fn get_messages(&self, conv_id: Uuid) -> Vec<FileConversa...
+    |                  ^^^^^^^^^^^^
+...
+379 |     pub async fn insert_message(&self, msg: FileConversationMessage) ->...
+    |                  ^^^^^^^^^^^^^^
+...
+396 |     async fn save_wechat_bindings(&self) -> Result<(), Box<dyn std::err...
+    |              ^^^^^^^^^^^^^^^^^^^^
+...
+404 |     pub async fn get_wechat_binding(&self, user_id: Uuid) -> Option<Fil...
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+413 |     pub async fn upsert_wechat_binding(&self, binding: FileUserWeChatBi...
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+...
+425 |     pub async fn delete_wechat_binding(&self, user_id: Uuid) -> Result<...
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+...
+448 |     async fn save_wechat_channels(&self) -> Result<(), Box<dyn std::err...
+    |              ^^^^^^^^^^^^^^^^^^^^
+...
+456 |     pub async fn get_wechat_channel(&self, user_id: Uuid) -> Option<Fil...
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+460 |     pub async fn upsert_wechat_channel(&self, channel: FileUserWeChatCh...
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+...
+466 |     pub async fn get_all_wechat_channels(&self) -> Vec<FileUserWeChatCh...
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^
+...
+481 |     async fn save_oauth_states(&self) -> Result<(), Box<dyn std::error:...
+    |              ^^^^^^^^^^^^^^^^^
+...
+489 |     pub async fn get_oauth_state(&self, state: &str) -> Option<(Uuid, D...
+    |                  ^^^^^^^^^^^^^^^
+...
+498 |     pub async fn insert_oauth_state(&self, state: FileWeChatOAuthState)...
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+504 |     pub async fn delete_oauth_state(&self, state: &str) -> Result<(), B...
+    |                  ^^^^^^^^^^^^^^^^^^
+...
+530 |     pub async fn reload_whitelist(&self) -> Result<(), Box<dyn std::err...
+    |                  ^^^^^^^^^^^^^^^^
+...
+558 |     pub async fn get_pkuvideo_job(&self, job_id: Uuid) -> Option<crate:...
+    |                  ^^^^^^^^^^^^^^^^
+...
+562 |     pub async fn get_pkuvideo_jobs_by_user(&self, user_id: Uuid) -> Vec...
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `assistant-server` (bin "assistant-server") generated 27 warnings
+    Finished `release` profile [optimized] target(s) in 0.37s
+     Running `target/release/assistant-server`
+[2m2026-04-30T03:11:57.459962Z[0m [32m INFO[0m [2massistant_server[0m[2m:[0m assistant-server listening on 0.0.0.0:8080
+[2m2026-04-30T03:12:11.781044Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/pkuvideo [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:12:11.781149Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/pkuvideo [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2026-04-30T03:12:11.841294Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/auth/me [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:12:11.841429Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/auth/me [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2026-04-30T03:12:11.995429Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/auth/me [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:12:11.995540Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/auth/me [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2026-04-30T03:12:13.393606Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/pkuvideo/jobs [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:12:13.393703Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/pkuvideo/jobs [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2026-04-30T03:12:21.145410Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mDELETE [3muri[0m[2m=[0m/api/pkuvideo/jobs/63cf73eb-c844-4243-9f62-0984067d9152 [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:12:21.147289Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mDELETE [3muri[0m[2m=[0m/api/pkuvideo/jobs/63cf73eb-c844-4243-9f62-0984067d9152 [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m2 ms [3mstatus[0m[2m=[0m200
+[2m2026-04-30T03:12:21.155851Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/auth/me [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:12:21.156014Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/auth/me [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2026-04-30T03:12:21.161857Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/pkuvideo/jobs [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:12:21.161983Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/pkuvideo/jobs [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2026-04-30T03:13:19.445171Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/api/pkuvideo/submit-web [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:13:19.449784Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/api/pkuvideo/submit-web [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m4 ms [3mstatus[0m[2m=[0m200
+[2m2026-04-30T03:13:19.461229Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/pkuvideo/jobs/0c6cb77d-4f96-4ddb-a9c4-f5901109369d [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:13:19.461594Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/pkuvideo/jobs/0c6cb77d-4f96-4ddb-a9c4-f5901109369d [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200
+[2m2026-04-30T03:13:21.467806Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/pkuvideo/jobs/0c6cb77d-4f96-4ddb-a9c4-f5901109369d [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_request[0m[2m:[0m started processing request
+[2m2026-04-30T03:13:21.467962Z[0m [34mDEBUG[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mGET [3muri[0m[2m=[0m/api/pkuvideo/jobs/0c6cb77d-4f96-4ddb-a9c4-f5901109369d [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mtower_http::trace::on_response[0m[2m:[0m finished processing request [3mlatency[0m[2m=[0m0 ms [3mstatus[0m[2m=[0m200

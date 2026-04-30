@@ -205,7 +205,7 @@ fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
 pub fn random_user_agent(gz_file: &str) -> Result<String, String> {
     let mut candidates = load_user_agents_from_plain_file("./user_agents.txt").unwrap_or_default();
     if candidates.is_empty() {
-        candidates = load_user_agents_from_gzip_with_powershell(gz_file)?;
+        candidates = load_user_agents_from_gzip(gz_file)?;
     }
 
     if candidates.is_empty() {
@@ -234,23 +234,14 @@ fn load_user_agents_from_plain_file(path: &str) -> Result<Vec<String>, String> {
     Ok(candidates)
 }
 
-fn load_user_agents_from_gzip_with_powershell(path: &str) -> Result<Vec<String>, String> {
-    let escaped_path = path.replace('\'', "''");
-    let script = format!(
-        "$p='{escaped_path}';$fs=[IO.File]::OpenRead($p);try{{$gz=New-Object IO.Compression.GzipStream($fs,[IO.Compression.CompressionMode]::Decompress);$sr=New-Object IO.StreamReader($gz,[Text.Encoding]::UTF8);try{{$sr.ReadToEnd()}}finally{{$sr.Dispose();$gz.Dispose()}}}}finally{{$fs.Dispose()}}"
-    );
+fn load_user_agents_from_gzip(path: &str) -> Result<Vec<String>, String> {
+    use std::io::Read;
+    
+    let file = File::open(path).map_err(|e| format!("打开 {path} 失败: {e}"))?;
+    let mut gz = flate2::read::GzDecoder::new(file);
+    let mut content = String::new();
+    gz.read_to_string(&mut content).map_err(|e| format!("解压 {path} 失败: {e}"))?;
 
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-        .map_err(|e| format!("调用 PowerShell 解压 user_agents 失败: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("PowerShell 解压 user_agents 失败: {}", stderr.trim()));
-    }
-
-    let content = String::from_utf8_lossy(&output.stdout);
     let candidates: Vec<String> = content
         .lines()
         .map(str::trim)
