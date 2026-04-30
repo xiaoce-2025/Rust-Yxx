@@ -243,11 +243,7 @@
         stepsEl.innerHTML += '<div class="step">讲义文件: <span class="mono">' + esc(job.notes_path) + '</span></div>';
       }
       if (job.pdf_path) {
-        // 处理路径：将反斜杠转换为正斜杠，确保跨平台兼容
-        const normalizedPath = job.pdf_path.replace(/\\/g, "/");
-        // 构建完整的下载URL
-        const pdfUrl = normalizedPath.startsWith("/") ? normalizedPath : "/data/pkuvideo_jobs/" + normalizedPath;
-        stepsEl.innerHTML += '<div class="step">PDF文件: <span class="mono">' + esc(job.pdf_path) + '</span> <button onclick="window.open(\'' + esc(pdfUrl) + '\')" class="action-btn" style="margin-left: 8px;">下载 PDF</button></div>';
+        stepsEl.innerHTML += '<div class="step">PDF文件: <span class="mono">' + esc(job.pdf_path) + '</span> <button onclick="downloadPdf(\'' + job.id + '\')" class="action-btn" style="margin-left: 8px;">下载 PDF</button></div>';
       }
     }
 
@@ -329,12 +325,6 @@
           historyList.innerHTML = "暂无历史任务记录";
         } else {
           historyList.innerHTML = jobs.map(job => {
-            // 处理路径：将反斜杠转换为正斜杠，确保跨平台兼容
-            let pdfUrl = null;
-            if (job.pdf_path) {
-              const normalizedPath = job.pdf_path.replace(/\\/g, "/");
-              pdfUrl = normalizedPath.startsWith("/") ? normalizedPath : "/data/pkuvideo_jobs/" + normalizedPath;
-            }
             return `
               <div class="history-item">
                 <div class="history-header">
@@ -353,7 +343,7 @@
                     <button onclick="reexecuteStep('${job.id}', 2)" class="action-btn">重新执行 语音转文字</button>
                     <button onclick="reexecuteStep('${job.id}', 3)" class="action-btn">重新执行 讲义提取</button>
                     <button onclick="reexecuteStep('${job.id}', 4)" class="action-btn">重新执行 PDF编译</button>
-                    ${pdfUrl ? `<button onclick="window.open('${esc(pdfUrl)}')" class="action-btn" style="background: var(--accent); color: #fff;">下载 PDF</button>` : ""}
+                    ${job.pdf_path ? `<button onclick="downloadPdf('${job.id}')" class="action-btn" style="background: var(--accent); color: #fff;">下载 PDF</button>` : ""}
                     <button onclick="deleteJob('${job.id}')" class="action-btn delete">删除任务</button>
                   </div>
                 </div>
@@ -382,6 +372,29 @@
         await loadHistory();
       } catch (err) {
         statusEl.textContent = "删除任务失败: " + err.message;
+      }
+    }
+
+    async function downloadPdf(jobId) {
+      try {
+        const response = await fetch(`/api/pkuvideo/jobs/${jobId}/pdf`, {
+          method: "GET",
+          credentials: "include"
+        });
+        if (!response.ok) {
+          throw new Error("下载失败");
+        }
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `lecture_notes_${jobId}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+      } catch (err) {
+        alert("下载 PDF 失败: " + err.message);
       }
     }
 

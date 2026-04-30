@@ -47,6 +47,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideo/jobs", get(job_list))
         .route("/api/pkuvideo/jobs/:id/reexecute", post(reexecute_step))
         .route("/api/pkuvideo/jobs/:id", delete(delete_job))
+        .route("/api/pkuvideo/jobs/:id/pdf", get(download_pdf))
 }
 
 async fn submit_api(
@@ -563,4 +564,37 @@ async fn mark_step_failed(state: &AppState, job_id: Uuid, index: usize, msg: &st
         // 保存到FileStore
         let _ = state.store.update_pkuvideo_job(job.clone()).await;
     }
+}
+
+async fn download_pdf(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Path(job_id): Path<Uuid>,
+) -> Result<axum::response::Response, ApiError> {
+    let pdf_path_relative = {
+        let jobs = state.pkuvideo_jobs.read().await;
+        let job = jobs.get(&job_id).ok_or(ApiError::NotFound)?;
+
+        if job.user_id != current_user.id {
+            return Err(ApiError::Forbidden("无权访问此任务的 PDF".to_string()));
+        }
+
+        job.pdf_path.clone().ok_or(ApiError::NotFound)?
+    };
+
+    let pdf_full_path = std::path::Path::new("./data/pkuvideo_jobs").join(&pdf_path_relative);
+    
+    let pdf_data = tokio::fs::read(&pdf_full_path)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
+
+    let filename = format!("lecture_notes_{}.pdf", job_id);
+    let response = axum::response::Response::builder()
+        .header("Content-Type", "application/pdf")
+        .header("Content-Disposition", format!("attachment; filename=\"{}\"", filename))
+        .header("Content-Length", pdf_data.len())
+        .body(axum::body::Body::from(pdf_data))
+        .map_err(|_| ApiError::Internal("构建响应失败".to_string()))?;
+
+    Ok(response)
 }
