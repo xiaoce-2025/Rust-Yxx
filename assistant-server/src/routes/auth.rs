@@ -80,6 +80,14 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
         return Err(ApiError::Conflict("邮箱已存在".to_string()));
     }
 
+    if state.store.get_user_by_username(req.username.trim()).await.is_some() {
+        return Err(ApiError::Conflict("用户名已存在".to_string()));
+    }
+
+    if !state.store.is_email_in_whitelist(req.email.trim()).await {
+        return Err(ApiError::Forbidden("注册邮箱校验失败！请使用学号邮箱进行注册".to_string()));
+    }
+
     let password_hash = hash_password(req.password.trim())?;
     let user_id = Uuid::new_v4();
     let now = Utc::now();

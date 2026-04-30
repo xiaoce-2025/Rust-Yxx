@@ -160,7 +160,7 @@
 <body>
   <main class="wrap">
     <h1>PKU Video 工作台</h1>
-    <div class="sub">流程：下载视频 -> 抽离 mp3 -> 语音转文字 -> 大模型提取讲义 -> 编译 PDF。页面提交使用 cookie 登录态。</div>
+    <div class="sub">在下方输入课程回放的下载链接和你的门户账密，让严小希来帮你上课记笔记！（IAAA账密用于教学网登陆鉴权，你的账密会被直接发送至北大IAAA验证服务器，我们不会储存您的账密）</div>
 
     <div class="toolbar">
       <button id="goAppBtn" class="ghost">返回聊天主页</button>
@@ -276,7 +276,7 @@
     async function submitJob() {
       // 检查处理资源限额
       if (processingQuota <= 0) {
-        statusEl.textContent = "提交失败: 处理资源限额不足，请等待当前任务完成";
+        statusEl.textContent = "提交失败: 处理资源限额不足，请联系管理员获取更多额度（严小希平均处理1小时的回放需要消耗价值0.5r的token，严小希并没有那么充足的应对攻击的资金qwq，设置限额是为了保障正常使用）";
         return;
       }
 

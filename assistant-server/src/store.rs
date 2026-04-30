@@ -95,6 +95,11 @@ pub struct FileWeChatOAuthState {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrationWhitelist {
+    pub allowed_emails: Vec<String>,
+}
+
 pub struct FileStore {
     data_dir: PathBuf,
     users: Arc<RwLock<HashMap<Uuid, FileUser>>>,
@@ -106,6 +111,7 @@ pub struct FileStore {
     wechat_channels: Arc<RwLock<HashMap<Uuid, FileUserWeChatChannel>>>,
     oauth_states: Arc<RwLock<Vec<FileWeChatOAuthState>>>,
     pkuvideo_jobs: Arc<RwLock<HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob>>>,
+    whitelist: Arc<RwLock<RegistrationWhitelist>>,
 }
 
 impl FileStore {
@@ -123,6 +129,7 @@ impl FileStore {
             wechat_channels: Arc::new(RwLock::new(HashMap::new())),
             oauth_states: Arc::new(RwLock::new(Vec::new())),
             pkuvideo_jobs: Arc::new(RwLock::new(HashMap::new())),
+            whitelist: Arc::new(RwLock::new(RegistrationWhitelist { allowed_emails: Vec::new() })),
         };
 
         store.load_all().await?;
@@ -139,6 +146,7 @@ impl FileStore {
         self.load_wechat_channels().await.ok();
         self.load_oauth_states().await.ok();
         self.load_pkuvideo_jobs().await.ok();
+        self.load_whitelist().await.ok();
         Ok(())
     }
 
@@ -171,6 +179,15 @@ impl FileStore {
             .await
             .values()
             .find(|u| u.email == email)
+            .cloned()
+    }
+
+    pub async fn get_user_by_username(&self, username: &str) -> Option<FileUser> {
+        self.users
+            .read()
+            .await
+            .values()
+            .find(|u| u.username == username)
             .cloned()
     }
 
@@ -478,6 +495,33 @@ impl FileStore {
         drop(states);
         self.save_oauth_states().await?;
         Ok(())
+    }
+
+    // ===== Registration Whitelist =====
+    async fn load_whitelist(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = self.data_dir.join("whitelist.json");
+        if path.exists() {
+            let data = tokio::fs::read_to_string(&path).await?;
+            let whitelist: RegistrationWhitelist = serde_json::from_str(&data)?;
+            *self.whitelist.write().await = whitelist;
+        } else {
+            let default_whitelist = RegistrationWhitelist {
+                allowed_emails: Vec::new(),
+            };
+            let json = serde_json::to_string_pretty(&default_whitelist)?;
+            tokio::fs::write(&path, json).await?;
+            *self.whitelist.write().await = default_whitelist;
+        }
+        Ok(())
+    }
+
+    pub async fn reload_whitelist(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.load_whitelist().await
+    }
+
+    pub async fn is_email_in_whitelist(&self, email: &str) -> bool {
+        let whitelist = self.whitelist.read().await;
+        whitelist.allowed_emails.iter().any(|e| e == email)
     }
 
     // ===== PKU Video Jobs =====

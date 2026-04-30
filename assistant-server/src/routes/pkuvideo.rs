@@ -309,6 +309,17 @@ async fn enqueue_job(
     pku_auth_one: String,
     pku_auth_two: String,
 ) -> Result<Uuid, ApiError> {
+    // 获取用户信息，校验学号与邮箱匹配
+    let user = state.store.get_user(user_id).await.ok_or(ApiError::Unauthorized)?;
+    
+    // 从邮箱中提取 @ 前的学号部分
+    let email_student_id = user.email.split('@').next().unwrap_or("").trim();
+    
+    // 校验 IAAA 账号与邮箱学号是否匹配
+    if email_student_id != pku_auth_one.trim() {
+        return Err(ApiError::BadRequest("IAAA账号与注册邮箱学号不匹配，请检查".to_string()));
+    }
+    
     // 先检查是否有相同视频链接的已完成任务
     {
         let existing_jobs = state.pkuvideo_jobs.read().await;
@@ -324,7 +335,6 @@ async fn enqueue_job(
     } // 在这里释放读取锁
 
     // 检查用户限额
-    let user = state.store.get_user(user_id).await.ok_or(ApiError::Unauthorized)?;
     if user.processing_quota <= 0 {
         return Err(ApiError::Forbidden("处理资源限额不足，请联系管理员".to_string()));
     }

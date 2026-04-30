@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -94,7 +94,10 @@
 
     <form id="registerForm" style="display:none;">
       <div class="field"><label for="regName">用户名</label><input id="regName" required /></div>
-      <div class="field"><label for="regEmail">邮箱</label><input id="regEmail" type="email" required /></div>
+      <div class="field">
+        <label for="regEmail">邮箱 (请使用学号邮箱)</label>
+        <input id="regEmail" type="email" placeholder="2x000xxxxx@pku.edu.cn" required />
+      </div>
       <div class="field"><label for="regPassword">密码</label><input id="regPassword" type="password" required /></div>
       <div class="row"><button type="submit" class="alt">注册并登录</button></div>
     </form>
