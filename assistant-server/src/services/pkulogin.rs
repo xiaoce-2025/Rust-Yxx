@@ -46,6 +46,7 @@ async fn login_iaaa_and_get_cookies(
 
     let oauth_args = vec![
         "-sS".to_string(),
+        "-k".to_string(),
         "-A".to_string(),
         user_agent.clone(),
         "-H".to_string(),
@@ -82,6 +83,7 @@ async fn login_iaaa_and_get_cookies(
     for campus_url in campus_urls {
         let campus_args = vec![
             "-sS".to_string(),
+            "-k".to_string(),
             "-L".to_string(),
             "-A".to_string(),
             user_agent.clone(),
@@ -129,6 +131,7 @@ pub async fn download_with_pku_cookie(
 
     let args = vec![
         "-sS".to_string(),
+        "-k".to_string(),
         "-L".to_string(),
         "-A".to_string(),
         login.user_agent,
@@ -175,10 +178,11 @@ fn parse_token(body: &str) -> Result<String, String> {
 }
 
 fn run_curl_text(args: &[String]) -> Result<String, String> {
-    let output = Command::new("curl.exe")
+    let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let output = Command::new(curl_cmd)
         .args(args)
         .output()
-        .map_err(|e| format!("调用 curl.exe 失败: {e}"))?;
+        .map_err(|e| format!("调用 {} 失败: {}", curl_cmd, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -189,10 +193,11 @@ fn run_curl_text(args: &[String]) -> Result<String, String> {
 }
 
 fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
-    let output = Command::new("curl.exe")
+    let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let output = Command::new(curl_cmd)
         .args(args)
         .output()
-        .map_err(|e| format!("调用 curl.exe 失败: {e}"))?;
+        .map_err(|e| format!("调用 {} 失败: {}", curl_cmd, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
