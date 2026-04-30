@@ -231,19 +231,16 @@
     }
 
     function renderJob(job) {
-      jobMetaEl.textContent = "job_id=" + job.id + " | status=" + job.status + " | updated_at=" + job.updated_at;
-      stepsEl.innerHTML = (job.steps || []).map((s, i) => {
-        return '<div class="step">步骤' + (i + 1) + ' [' + esc(s.name) + '] : ' + esc(s.status) + '<br/>' + esc(s.message) + '</div>';
-      }).join("");
-
-      if (job.transcript_path) {
-        stepsEl.innerHTML += '<div class="step">转写文件: <span class="mono">' + esc(job.transcript_path) + '</span></div>';
-      }
-      if (job.notes_path) {
-        stepsEl.innerHTML += '<div class="step">讲义文件: <span class="mono">' + esc(job.notes_path) + '</span></div>';
-      }
-      if (job.pdf_path) {
-        stepsEl.innerHTML += '<div class="step">PDF文件: <span class="mono">' + esc(job.pdf_path) + '</span> <button onclick="downloadPdf(\'' + job.id + '\')" class="action-btn" style="margin-left: 8px;">下载 PDF</button></div>';
+      jobMetaEl.textContent = "";
+      if (job.status === "succeeded") {
+        stepsEl.innerHTML = '<div class="step" style="font-size: 1.2em; color: #22c55e;">处理完成！</div>';
+        if (job.pdf_path) {
+          stepsEl.innerHTML += '<div class="step" style="margin-top: 16px;"><button onclick="downloadPdf(\'' + job.id + '\')" class="action-btn" style="background: var(--accent); color: #fff; padding: 12px 24px; font-size: 1.1em;">下载 PDF</button></div>';
+        }
+      } else if (job.status === "failed") {
+        stepsEl.innerHTML = '<div class="step" style="font-size: 1.2em; color: #ef4444;">处理失败: ' + esc(job.error || "未知错误") + '</div>';
+      } else {
+        stepsEl.innerHTML = '<div class="step" style="font-size: 1.2em;">正在执行中，请稍后...</div>';
       }
     }
 
@@ -325,24 +322,17 @@
           historyList.innerHTML = "暂无历史任务记录";
         } else {
           historyList.innerHTML = jobs.map(job => {
+            const statusText = job.status === "succeeded" ? "已完成" : (job.status === "failed" ? "失败" : "处理中");
+            const statusColor = job.status === "succeeded" ? "#22c55e" : (job.status === "failed" ? "#ef4444" : "#eab308");
             return `
               <div class="history-item">
                 <div class="history-header">
-                  <span>任务ID: ${esc(job.id)}</span>
-                  <span class="status-${job.status}">${job.status}</span>
+                  <span>创建时间: ${job.created_at}</span>
+                  <span style="color: ${statusColor}; font-weight: bold;">${statusText}</span>
                 </div>
                 <div class="history-info">
-                  <div>创建时间: ${job.created_at}</div>
                   <div>视频链接: ${esc(job.video_url)}</div>
-                  ${job.transcript_path ? `<div>转写文件: ${esc(job.transcript_path)}</div>` : ""}
-                  ${job.notes_path ? `<div>讲义文件: ${esc(job.notes_path)}</div>` : ""}
-                  ${job.pdf_path ? `<div>PDF文件: <span class="mono">${esc(job.pdf_path)}</span></div>` : ""}
                   <div class="history-actions">
-                    <button onclick="reexecuteStep('${job.id}', 0)" class="action-btn">重新执行 视频下载</button>
-                    <button onclick="reexecuteStep('${job.id}', 1)" class="action-btn">重新执行 MP3 抽离</button>
-                    <button onclick="reexecuteStep('${job.id}', 2)" class="action-btn">重新执行 语音转文字</button>
-                    <button onclick="reexecuteStep('${job.id}', 3)" class="action-btn">重新执行 讲义提取</button>
-                    <button onclick="reexecuteStep('${job.id}', 4)" class="action-btn">重新执行 PDF编译</button>
                     ${job.pdf_path ? `<button onclick="downloadPdf('${job.id}')" class="action-btn" style="background: var(--accent); color: #fff;">下载 PDF</button>` : ""}
                     <button onclick="deleteJob('${job.id}')" class="action-btn delete">删除任务</button>
                   </div>

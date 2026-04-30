@@ -260,16 +260,21 @@ async fn delete_job(
         }
 
         // 复制需要的信息
-        (job.artifacts_dir.clone(), job.status.clone())
+        (job.pdf_path.clone(), job.status.clone())
     };
 
-    let (artifacts_dir, job_status) = job_info;
+    let (pdf_path, job_status) = job_info;
 
-    // 删除任务目录中的文件
-    let artifacts_path = PathBuf::from(&artifacts_dir);
-    if artifacts_path.exists() {
-        if let Err(e) = tokio::fs::remove_dir_all(&artifacts_path).await {
-            eprintln!("删除任务目录失败: {}", e);
+    // 删除任务目录中的文件（通过 pdf_path 的父目录定位）
+    if let Some(pdf) = pdf_path {
+        let artifacts_path = PathBuf::from(&pdf).parent()
+            .map(|p| std::path::Path::new("./data/pkuvideo_jobs").join(p))
+            .unwrap_or_else(|| PathBuf::from("./data/pkuvideo_jobs"));
+        
+        if artifacts_path.exists() {
+            if let Err(e) = tokio::fs::remove_dir_all(&artifacts_path).await {
+                eprintln!("删除任务目录失败: {}", e);
+            }
         }
     }
 
