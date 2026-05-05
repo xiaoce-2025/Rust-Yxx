@@ -2,6 +2,7 @@ pub mod auth;
 pub mod conversations;
 pub mod health;
 pub mod pkuvideo;
+pub mod pkuvideofullclass;
 pub mod settings;
 pub mod ui;
 pub mod wechat;
@@ -39,6 +40,7 @@ pub fn router(state: AppState) -> Router {
         .merge(auth::routes())
         .merge(conversations::routes())
         .merge(pkuvideo::routes())
+        .merge(pkuvideofullclass::routes())
         .merge(settings::routes())
         .merge(wechat::routes())
         .layer(cors)

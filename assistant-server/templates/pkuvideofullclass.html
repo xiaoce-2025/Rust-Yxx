@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IAAA账密绑定</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.0/jsencrypt.min.js"></script>
+  <style>
+    :root {
+      --ink: #13241d;
+      --line: rgba(19,36,29,.18);
+      --accent: #0c7a57;
+      --warn: #982a3d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Manrope", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(50rem 20rem at -10% -10%, rgba(181,91,35,.2), transparent 60%),
+        radial-gradient(60rem 26rem at 110% 110%, rgba(12,122,87,.2), transparent 60%),
+        #edf3ed;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.82);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 18px 38px rgba(0,0,0,.1);
+      padding: 20px;
+    }
+    h1 {
+      margin: 0;
+      font-family: "Noto Serif SC", serif;
+      font-size: 30px;
+    }
+    .sub { margin-top: 6px; color: #4f645b; font-size: 13px; }
+    .toolbar { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+      background: var(--accent);
+      color: #fff;
+    }
+    button.ghost {
+      color: var(--ink);
+      background: rgba(255,255,255,.8);
+      border: 1px solid var(--line);
+    }
+    .grid {
+      margin-top: 14px;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr 1fr;
+    }
+    .field label { font-size: 12px; display: block; margin-bottom: 4px; color: #4f635b; }
+    .field input {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      padding: 10px;
+      font: inherit;
+      background: #fff;
+    }
+    .full { grid-column: 1 / -1; }
+    .status { margin-top: 10px; min-height: 18px; font-size: 12px; }
+    .status.error { color: var(--warn); }
+    .status.success { color: var(--accent); }
+    .card {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,.7);
+      padding: 12px;
+    }
+    .warning-box {
+      margin-top: 16px;
+      border: 2px solid var(--warn);
+      border-radius: 14px;
+      background: rgba(152,42,61,.1);
+      padding: 16px;
+      color: var(--warn);
+    }
+    .warning-box strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 16px;
+    }
+    .bound-info {
+      margin-top: 16px;
+      border: 1px solid var(--accent);
+      border-radius: 14px;
+      background: rgba(12,122,87,.1);
+      padding: 16px;
+      color: var(--accent);
+    }
+    .bound-info strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 16px;
+    }
+    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+    @media (max-width: 760px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>IAAA账密绑定</h1>
+    <div class="sub">绑定北大教学网全程班账号，用于自动获取课程回放视频。您的密码会被RSA加密后储存，更换密码后需重新绑定。</div>
+
+    <div class="toolbar">
+      <button id="goAppBtn" class="ghost">返回PKUVideo</button>
+      <button id="refreshBtn" class="ghost">刷新状态</button>
+    </div>
+
+    <div id="boundInfo" class="bound-info" style="display: none;">
+      <strong>已绑定</strong>
+      <div id="boundStatus"></div>
+    </div>
+
+    <div id="warningBox" class="warning-box" style="display: none;">
+      <strong>⚠️ 密钥已过期</strong>
+      <div>检测到北大IAAA的RSA公钥已更换，原有绑定的账密已失效。请重新绑定您的IAAA账密。</div>
+    </div>
+
+    <div id="bindSection" class="card">
+      <strong id="bindTitle">绑定IAAA账密</strong>
+      <section class="grid" style="margin-top: 12px;">
+        <div class="field full">
+          <label for="iaaaUsername">IAAA账号（学号）</label>
+          <input id="iaaaUsername" placeholder="2x000xxxxx" />
+        </div>
+        <div class="field full">
+          <label for="iaaaPassword">IAAA密码</label>
+          <input id="iaaaPassword" type="password" placeholder="xxxxx" />
+        </div>
+      </section>
+      <div id="status" class="status"></div>
+      <div style="margin-top: 12px; display: flex; gap: 8px;">
+        <button id="bindBtn">确认绑定</button>
+        <button id="unbindBtn" class="ghost" style="display: none;">解除绑定</button>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const boundInfoEl = document.getElementById("boundInfo");
+    const warningBoxEl = document.getElementById("warningBox");
+    const bindSectionEl = document.getElementById("bindSection");
+    const bindBtnEl = document.getElementById("bindBtn");
+    const unbindBtnEl = document.getElementById("unbindBtn");
+    const bindTitleEl = document.getElementById("bindTitle");
+
+    let currentKey = null;
+    let isBound = false;
+    let keyExpired = false;
+
+    async function api(path, method = "GET", body) {
+      const res = await fetch(path, {
+        method,
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const txt = await res.text();
+      let payload = {};
+      try { payload = txt ? JSON.parse(txt) : {}; } catch { payload = { raw: txt }; }
+      if (!res.ok) throw new Error(payload.error || payload.raw || ("HTTP " + res.status));
+      return payload;
+    }
+
+    async function checkLogin() {
+      try {
+        await api("/api/auth/me");
+      } catch {
+        location.href = "/auth?next=/pkuvideofullclass";
+      }
+    }
+
+    async function getCurrentIaaaKey() {
+      try {
+        const resp = await api("/api/pkuvideofullclass/current-iaaa-key");
+        if (resp.success && resp.key) {
+          currentKey = resp.key;
+        }
+        return currentKey;
+      } catch (err) {
+        console.error("Failed to get IAAA key:", err);
+        return null;
+      }
+    }
+
+    async function loadBindingStatus() {
+      statusEl.textContent = "加载中...";
+      statusEl.className = "status";
+      try {
+        const resp = await api("/api/pkuvideofullclass/binding-status");
+        isBound = resp.is_bound;
+        keyExpired = resp.key_expired;
+
+        if (isBound) {
+          boundInfoEl.style.display = "block";
+          unbindBtnEl.style.display = "block";
+          bindBtnEl.textContent = "更新绑定";
+          bindTitleEl.textContent = "更新IAAA账密";
+
+          if (keyExpired) {
+            warningBoxEl.style.display = "block";
+            boundInfoEl.querySelector("div").textContent = "检测到密钥已过期，请重新绑定";
+          } else {
+            warningBoxEl.style.display = "none";
+            boundInfoEl.querySelector("div").textContent = "已成功绑定IAAA账号（密钥未过期）";
+          }
+        } else {
+          boundInfoEl.style.display = "none";
+          warningBoxEl.style.display = "none";
+          unbindBtnEl.style.display = "none";
+          bindBtnEl.textContent = "确认绑定";
+          bindTitleEl.textContent = "绑定IAAA账密";
+        }
+
+        statusEl.textContent = "";
+      } catch (err) {
+        statusEl.textContent = "加载状态失败: " + err.message;
+        statusEl.className = "status error";
+      }
+    }
+
+    async function encryptPassword(password, publicKey) {
+      return new Promise((resolve, reject) => {
+        try {
+          const crypt = new JSEncrypt();
+          crypt.setPublicKey(publicKey);
+          const encrypted = crypt.encrypt(password);
+          if (encrypted) {
+            resolve(encrypted);
+          } else {
+            reject(new Error("Encryption failed"));
+          }
+        } catch (err) {
+          reject(err);
+        }
+      });
+    }
+
+    async function handleBind() {
+      const username = document.getElementById("iaaaUsername").value.trim();
+      const password = document.getElementById("iaaaPassword").value;
+
+      if (!username) {
+        statusEl.textContent = "请输入IAAA账号";
+        statusEl.className = "status error";
+        return;
+      }
+
+      if (!password) {
+        statusEl.textContent = "请输入IAAA密码";
+        statusEl.className = "status error";
+        return;
+      }
+
+      statusEl.textContent = "正在获取IAAA公钥并加密密码...";
+      statusEl.className = "status";
+
+      try {
+        const key = await getCurrentIaaaKey();
+        if (!key) {
+          statusEl.textContent = "获取IAAA公钥失败，请稍后重试";
+          statusEl.className = "status error";
+          return;
+        }
+
+        statusEl.textContent = "正在加密密码...";
+        const encryptedPassword = await encryptPassword(password, key);
+
+        statusEl.textContent = "正在提交绑定...";
+        const resp = await api("/api/pkuvideofullclass/bind", "POST", {
+          encrypted_password: encryptedPassword,
+          iaaa_public_key: key
+        });
+
+        if (resp.success) {
+          statusEl.textContent = "绑定成功！";
+          statusEl.className = "status success";
+          document.getElementById("iaaaPassword").value = "";
+          await loadBindingStatus();
+        } else {
+          statusEl.textContent = resp.message || "绑定失败";
+          statusEl.className = "status error";
+        }
+      } catch (err) {
+        statusEl.textContent = "绑定失败: " + err.message;
+        statusEl.className = "status error";
+      }
+    }
+
+    async function handleUnbind() {
+      if (!confirm("确定要解除IAAA账密绑定吗？解除后将无法使用全程班自动获取功能。")) {
+        return;
+      }
+
+      statusEl.textContent = "正在解除绑定...";
+      statusEl.className = "status";
+
+      try {
+        const resp = await api("/api/pkuvideofullclass/unbind", "DELETE");
+        if (resp.success) {
+          statusEl.textContent = "解绑成功";
+          statusEl.className = "status success";
+          document.getElementById("iaaaUsername").value = "";
+          document.getElementById("iaaaPassword").value = "";
+          await loadBindingStatus();
+        } else {
+          statusEl.textContent = resp.message || "解绑失败";
+          statusEl.className = "status error";
+        }
+      } catch (err) {
+        statusEl.textContent = "解绑失败: " + err.message;
+        statusEl.className = "status error";
+      }
+    }
+
+    document.getElementById("goAppBtn").addEventListener("click", () => {
+      location.href = "/pkuvideo";
+    });
+    document.getElementById("refreshBtn").addEventListener("click", loadBindingStatus);
+    document.getElementById("bindBtn").addEventListener("click", handleBind);
+    document.getElementById("unbindBtn").addEventListener("click", handleUnbind);
+
+    checkLogin();
+    loadBindingStatus();
+  </script>
+</body>
+</html>

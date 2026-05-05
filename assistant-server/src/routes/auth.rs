@@ -102,6 +102,8 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
         updated_at: now,
         storage_quota: 3,
         processing_quota: 1,
+        iaaa_encrypted_password: None,
+        iaaa_public_key: None,
     };
 
     state.store.insert_user(user.clone()).await

@@ -20,6 +20,10 @@ pub struct FileUser {
     pub updated_at: DateTime<Utc>,
     pub storage_quota: i32,
     pub processing_quota: i32,
+    #[serde(default)]
+    pub iaaa_encrypted_password: Option<String>,
+    #[serde(default)]
+    pub iaaa_public_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +240,32 @@ impl FileStore {
             let mut users = self.users.write().await;
             if let Some(user) = users.get_mut(&user_id) {
                 user.storage_quota = std::cmp::max(0, user.storage_quota - amount);
+                user.updated_at = chrono::Utc::now();
+            }
+            users.clone()
+        };
+        self.save_users_data(&users).await
+    }
+
+    pub async fn update_iaaa_binding(&self, user_id: Uuid, encrypted_password: String, public_key: String) -> Result<(), Box<dyn std::error::Error>> {
+        let users = {
+            let mut users = self.users.write().await;
+            if let Some(user) = users.get_mut(&user_id) {
+                user.iaaa_encrypted_password = Some(encrypted_password);
+                user.iaaa_public_key = Some(public_key);
+                user.updated_at = chrono::Utc::now();
+            }
+            users.clone()
+        };
+        self.save_users_data(&users).await
+    }
+
+    pub async fn remove_iaaa_binding(&self, user_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
+        let users = {
+            let mut users = self.users.write().await;
+            if let Some(user) = users.get_mut(&user_id) {
+                user.iaaa_encrypted_password = None;
+                user.iaaa_public_key = None;
                 user.updated_at = chrono::Utc::now();
             }
             users.clone()
