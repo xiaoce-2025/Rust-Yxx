@@ -35,6 +35,6 @@ max_retries = 120
 # 请在此处填写您的 DeepSeek API Key
 # 或者通过环境变量 DEEPSEEK_API_KEY 设置
 [llm_deepseek]
-api_key = "sk-d39fa690019744638773337bf0142e68"
+api_key = "sk-d4928af4b4c84efda129cf3a904d41da"
 base_url = "https://api.deepseek.com"
 model = "deepseek-v4-flash"
