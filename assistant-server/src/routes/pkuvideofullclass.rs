@@ -9,6 +9,7 @@ use crate::{
     app_state::AppState,
     auth::CurrentUser,
     error::ApiError,
+    services::pkulogin,
 };
 
 const IAAA_PUBLIC_KEY_URL: &str = "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do";
@@ -29,6 +30,7 @@ struct BindingStatusResponse {
 
 #[derive(Debug, Deserialize)]
 struct BindRequest {
+    username: String,
     encrypted_password: String,
     iaaa_public_key: String,
 }
@@ -139,20 +141,40 @@ async fn bind(
     current_user: CurrentUser,
     Json(req): Json<BindRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if req.encrypted_password.is_empty() || req.iaaa_public_key.is_empty() {
+    if req.username.is_empty() || req.encrypted_password.is_empty() || req.iaaa_public_key.is_empty() {
         return Err(ApiError::BadRequest("Missing required fields".to_string()));
     }
 
-    state
-        .store
-        .update_iaaa_binding(current_user.id, req.encrypted_password, req.iaaa_public_key)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to save binding: {}", e)))?;
+    tracing::info!("IAAA binding attempt for user {} with username {}", current_user.id, req.username);
 
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "绑定成功"
-    })))
+    match pkulogin::login_iaaa_and_get_cookies(&req.username, &req.encrypted_password).await {
+        Ok(login_result) => {
+            tracing::info!("IAAA authentication succeeded for user {}, token obtained", req.username);
+            
+            // 删除临时cookie文件
+            let _ = std::fs::remove_file(&login_result.cookie_file);
+            
+            state
+                .store
+                .update_iaaa_binding(current_user.id, req.encrypted_password, req.iaaa_public_key)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to save IAAA binding for user {}: {}", current_user.id, e);
+                    ApiError::Internal(format!("Failed to save binding: {}", e))
+                })?;
+
+            tracing::info!("IAAA binding saved successfully for user {}", current_user.id);
+
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "message": "绑定成功"
+            })))
+        }
+        Err(err) => {
+            tracing::error!("IAAA authentication failed for user {}: {}", req.username, err);
+            Err(ApiError::BadRequest(format!("绑定失败: {}", err)))
+        }
+    }
 }
 
 async fn unbind(

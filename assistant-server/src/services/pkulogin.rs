@@ -16,17 +16,21 @@ const BLACKBOARD_REDIR_URL: &str =
 const BLACKBOARD_REDIR_URL_HTTPS: &str =
     "https://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin";
 
-struct PkuLoginResult {
-    token: String,
-    cookie_file: PathBuf,
-    user_agent: String,
+pub struct PkuLoginResult {
+    pub token: String,
+    pub cookie_file: PathBuf,
+    pub user_agent: String,
 }
 
-async fn login_iaaa_and_get_cookies(
+pub async fn login_iaaa_and_get_cookies(
     username: &str,
     password: &str,
 ) -> Result<PkuLoginResult, String> {
+    let start_time = chrono::Utc::now();
+    tracing::info!("IAAA登录流程开始 - 用户名: {}, 时间: {}", username, start_time);
+
     let user_agent = random_user_agent("./user_agents.txt.gz")?;
+    tracing::debug!("步骤1: 获取随机User-Agent成功 - {}", user_agent.chars().take(50).collect::<String>());
 
     let cookie_file = std::env::temp_dir().join(format!(
         "pku_cookie_{}_{}.txt",
@@ -34,6 +38,7 @@ async fn login_iaaa_and_get_cookies(
         chrono::Utc::now().timestamp_millis()
     ));
     let cookie_file_str = cookie_file.to_string_lossy().to_string();
+    tracing::debug!("步骤2: 创建临时Cookie文件 - {}", cookie_file_str);
 
     // Step 1: IAAA oauthlogin -> token
     let form_body = format!(
@@ -43,6 +48,7 @@ async fn login_iaaa_and_get_cookies(
         urlencoding::encode(password),
         urlencoding::encode(BLACKBOARD_REDIR_URL)
     );
+    tracing::debug!("步骤3: 准备OAuth登录请求 - body长度: {}", form_body.len());
 
     let oauth_args = vec![
         "-sS".to_string(),
@@ -60,27 +66,39 @@ async fn login_iaaa_and_get_cookies(
         IAAA_OAUTH_LOGIN_URL.to_string(),
     ];
 
-    let login_body = run_curl_text(&oauth_args).map_err(|e| format!("IAAA 登录请求失败: {e}"))?;
+    tracing::info!("步骤4: 开始执行IAAA OAuth登录请求...");
+    let login_body = run_curl_text(&oauth_args).map_err(|e| {
+        tracing::error!("IAAA OAuth登录请求失败: {}", e);
+        format!("IAAA 登录请求失败: {e}")
+    })?;
+    tracing::info!("步骤4完成: IAAA OAuth登录请求返回 - body长度: {}", login_body.len());
+
+    tracing::info!("步骤5: 解析IAAA响应Token...");
     let token = parse_token(&login_body)?;
+    tracing::info!("步骤5完成: Token解析成功 - token长度: {}", token.len());
 
     // Step 2: campusLogin?_rand=...&token=...
+    // 先尝试HTTPS，再尝试HTTP，避免HTTP超时等待
     let campus_urls = vec![
-        format!(
-            "{}?_rand={:.16}&token={}",
-            BLACKBOARD_REDIR_URL,
-            rand::random::<f64>(),
-            urlencoding::encode(&token)
-        ),
         format!(
             "{}?_rand={:.16}&token={}",
             BLACKBOARD_REDIR_URL_HTTPS,
             rand::random::<f64>(),
             urlencoding::encode(&token)
         ),
+        format!(
+            "{}?_rand={:.16}&token={}",
+            BLACKBOARD_REDIR_URL,
+            rand::random::<f64>(),
+            urlencoding::encode(&token)
+        ),
     ];
+    tracing::debug!("步骤6: 准备教学网重定向URL - HTTPS: {}, HTTP: {}", campus_urls[0].len(), campus_urls[1].len());
 
     let mut last_err = String::new();
-    for campus_url in campus_urls {
+    for (idx, campus_url) in campus_urls.iter().enumerate() {
+        tracing::info!("步骤7: 尝试第{}次教学网登录 (URL类型: {})...", idx + 1, if idx == 0 { "HTTPS" } else { "HTTP" });
+        
         let campus_args = vec![
             "-sS".to_string(),
             "-k".to_string(),
@@ -92,16 +110,18 @@ async fn login_iaaa_and_get_cookies(
             "-b".to_string(),
             cookie_file_str.clone(),
             "-o".to_string(),
-            "NUL".to_string(),
-            campus_url,
+            "/dev/null".to_string(),  // Linux/macOS
+            campus_url.clone(),
         ];
 
         match run_curl_text(&campus_args) {
             Ok(_) => {
+                tracing::info!("步骤7完成: 第{}次教学网登录成功", idx + 1);
                 last_err.clear();
                 break;
             }
             Err(e) => {
+                tracing::warn!("步骤7: 第{}次教学网登录失败: {}", idx + 1, e);
                 last_err = e;
             }
         }
@@ -109,8 +129,13 @@ async fn login_iaaa_and_get_cookies(
 
     if !last_err.is_empty() {
         let _ = fs::remove_file(&cookie_file);
+        tracing::error!("教学网登录失败: {}", last_err);
         return Err(format!("教学网 token 登录失败: {last_err}"));
     }
+
+    let end_time = chrono::Utc::now();
+    let duration = end_time - start_time;
+    tracing::info!("IAAA登录流程完成 - 总耗时: {}ms", duration.num_milliseconds());
 
     Ok(PkuLoginResult {
         token,

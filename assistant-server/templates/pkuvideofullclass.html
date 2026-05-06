@@ -289,6 +289,7 @@
 
         statusEl.textContent = "正在提交绑定...";
         const resp = await api("/api/pkuvideofullclass/bind", "POST", {
+          username: username,
           encrypted_password: encryptedPassword,
           iaaa_public_key: key
         });
