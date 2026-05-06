@@ -334,9 +334,29 @@
       }
     }
 
-    document.getElementById("goAppBtn").addEventListener("click", () => {
-      location.href = "/pkuvideo";
-    });
+    function getCallbackUrl() {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("callback") || null;
+    }
+
+    function initBackButton() {
+      const goAppBtn = document.getElementById("goAppBtn");
+      const callbackUrl = getCallbackUrl();
+      
+      if (callbackUrl) {
+        goAppBtn.textContent = "返回上一级";
+        goAppBtn.addEventListener("click", () => {
+          location.href = callbackUrl;
+        });
+      } else {
+        goAppBtn.textContent = "返回PKUVideo";
+        goAppBtn.addEventListener("click", () => {
+          location.href = "/pkuvideo";
+        });
+      }
+    }
+
+    initBackButton();
     document.getElementById("refreshBtn").addEventListener("click", loadBindingStatus);
     document.getElementById("bindBtn").addEventListener("click", handleBind);
     document.getElementById("unbindBtn").addEventListener("click", handleUnbind);

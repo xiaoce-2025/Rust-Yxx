@@ -9,6 +9,7 @@ pub fn routes() -> Router<AppState> {
         .route("/app", get(app_page))
         .route("/pkuvideo", get(pkuvideo_page))
         .route("/pkuvideofullclass", get(pkuvideofullclass_page))
+        .route("/pkuvideo_sequence", get(pkuvideo_sequence_page))
         .route("/settings", get(settings_page))
 }
 
@@ -26,6 +27,10 @@ async fn pkuvideo_page() -> Html<&'static str> {
 
 async fn pkuvideofullclass_page() -> Html<&'static str> {
     Html(include_str!("../../templates/pkuvideofullclass.html"))
+}
+
+async fn pkuvideo_sequence_page() -> Html<&'static str> {
+    Html(include_str!("../../templates/pkuvideo_sequence.html"))
 }
 
 async fn settings_page() -> Html<&'static str> {

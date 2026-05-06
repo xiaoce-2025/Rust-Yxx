@@ -33,12 +33,37 @@ struct BindRequest {
     iaaa_public_key: String,
 }
 
+#[derive(Debug, Serialize)]
+struct Course {
+    id: String,
+    name: String,
+    term: String,
+    teacher: Option<String>,
+    video_count: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct Video {
+    id: String,
+    title: String,
+    duration: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchSubmitRequest {
+    course_id: String,
+    video_ids: Vec<String>,
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/pkuvideofullclass/binding-status", get(get_binding_status))
         .route("/api/pkuvideofullclass/bind", post(bind))
         .route("/api/pkuvideofullclass/unbind", delete(unbind))
         .route("/api/pkuvideofullclass/current-iaaa-key", get(get_current_iaaa_key))
+        .route("/api/pkuvideofullclass/courses", get(get_courses))
+        .route("/api/pkuvideofullclass/courses/:course_id/videos", get(get_course_videos))
+        .route("/api/pkuvideofullclass/batch-submit", post(batch_submit))
 }
 
 async fn get_current_iaaa_key(
@@ -143,5 +168,35 @@ async fn unbind(
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "解绑成功"
+    })))
+}
+
+async fn get_courses(
+    _current_user: CurrentUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "courses": []
+    })))
+}
+
+async fn get_course_videos(
+    axum::extract::Path(course_id): axum::extract::Path<String>,
+    _current_user: CurrentUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "videos": []
+    })))
+}
+
+async fn batch_submit(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(req): Json<BatchSubmitRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "job_id": "mock-job-id"
     })))
 }
