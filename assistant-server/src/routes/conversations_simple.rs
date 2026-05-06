@@ -36,6 +36,6 @@ async fn send_message(
     Ok(Json(SendMessageResponse {
         conversation_id: Uuid::new_v4(),
         user_text: req.text,
-        assistant_text: "Demo response".to_string(),
+        assistant_text: "[Demo response]你好呀，我是严小希，欢迎使用「严小希」小助手」！什么，你问我为什么这里是demo response？那当然是因为可爱的严小希想摆烂了，尽情的享受欢愉的时光吧！（我才不告诉你是之前的api服务作废了但还没有换新的呢~）".to_string(),
     }))
 }
