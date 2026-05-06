@@ -27,6 +27,7 @@ Thumbs.db
 assistant-server/test_output/
 assistant-server/coverage/
 assistant-server/data/
+assistant-server/course_data/
 # 构建缓存
 *.o
 *.so

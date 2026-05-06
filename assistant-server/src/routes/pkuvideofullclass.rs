@@ -9,7 +9,7 @@ use crate::{
     app_state::AppState,
     auth::CurrentUser,
     error::ApiError,
-    services::pkulogin,
+    services::{course_parser, course_storage, pkulogin},
 };
 
 const IAAA_PUBLIC_KEY_URL: &str = "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do";
@@ -64,6 +64,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideofullclass/unbind", delete(unbind))
         .route("/api/pkuvideofullclass/current-iaaa-key", get(get_current_iaaa_key))
         .route("/api/pkuvideofullclass/courses", get(get_courses))
+        .route("/api/pkuvideofullclass/courses/refresh", post(refresh_courses))
         .route("/api/pkuvideofullclass/courses/:course_id/videos", get(get_course_videos))
         .route("/api/pkuvideofullclass/batch-submit", post(batch_submit))
 }
@@ -197,6 +198,55 @@ async fn get_courses(
     State(state): State<AppState>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // 获取用户信息
+    let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
+        tracing::error!("用户不存在: {}", current_user.id);
+        ApiError::Internal("用户不存在".to_string())
+    })?;
+
+    // 从邮箱中抽取学号 (格式: 学号@pku.edu.cn)
+    let username = user.email.split('@').next().ok_or_else(|| {
+        tracing::error!("邮箱格式无效: {}", user.email);
+        ApiError::BadRequest("无效的邮箱格式".to_string())
+    })?;
+
+    // 检查是否绑定了IAAA账号
+    let is_bound = user.iaaa_encrypted_password.is_some();
+
+    // 从本地存储加载课程信息
+    let courses = course_storage::load_courses(username)
+        .map_err(|e| {
+            tracing::error!("加载课程信息失败: {}", e);
+            ApiError::Internal(format!("加载课程信息失败: {}", e))
+        })?;
+
+    let last_updated = course_storage::get_last_updated(username);
+
+    tracing::info!("用户 {} 加载了 {} 门课程", username, courses.len());
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "courses": courses,
+        "is_bound": is_bound,
+        "last_updated": last_updated,
+        "message": if courses.is_empty() { "暂无课程信息，请刷新课程列表" } else { "" }
+    })))
+}
+
+async fn get_course_videos(
+    axum::extract::Path(course_id): axum::extract::Path<String>,
+    _current_user: CurrentUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "videos": []
+    })))
+}
+
+async fn refresh_courses(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
     // 获取用户绑定的IAAA信息
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
@@ -213,16 +263,12 @@ async fn get_courses(
         Some(p) => p,
         None => {
             tracing::warn!("用户未绑定IAAA账号: {}", current_user.id);
-            return Ok(Json(serde_json::json!({
-                "success": true,
-                "courses": [],
-                "message": "未绑定IAAA账号"
-            })));
+            return Err(ApiError::BadRequest("未绑定IAAA账号，请先绑定".to_string()));
         }
     };
 
-    tracing::info!("用户已绑定IAAA，开始登录...");
-    
+    tracing::info!("用户 {} 开始刷新课程列表...", username);
+
     // 使用pkulogin登录并获取cookies
     let login_result = pkulogin::login_iaaa_and_get_cookies(&username, &password).await
         .map_err(|e| {
@@ -244,33 +290,26 @@ async fn get_courses(
             ApiError::Internal(format!("获取教学网页面失败: {}", e))
         })?;
 
-    // 保存页面到本地
-    let save_path = format!("./course_page_{}.html", chrono::Utc::now().timestamp_millis());
-    std::fs::write(&save_path, &page_content).map_err(|e| {
-        tracing::error!("保存页面失败: {}", e);
-        let _ = std::fs::remove_file(&login_result.cookie_file);
-        ApiError::Internal(format!("保存页面失败: {}", e))
-    })?;
-    tracing::info!("教学网页面已保存到: {}", save_path);
+    // 解析课程信息
+    let courses = course_parser::parse_courses(&page_content);
+    tracing::info!("解析出 {} 门课程", courses.len());
+
+    // 保存课程信息到本地存储
+    course_storage::save_courses(username, &courses)
+        .map_err(|e| {
+            tracing::error!("保存课程信息失败: {}", e);
+            let _ = std::fs::remove_file(&login_result.cookie_file);
+            ApiError::Internal(format!("保存课程信息失败: {}", e))
+        })?;
 
     // 清理临时cookie文件
     let _ = std::fs::remove_file(&login_result.cookie_file);
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "courses": [],
-        "page_saved": save_path,
-        "page_length": page_content.len()
-    })))
-}
-
-async fn get_course_videos(
-    axum::extract::Path(course_id): axum::extract::Path<String>,
-    _current_user: CurrentUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "videos": []
+        "courses": courses,
+        "count": courses.len(),
+        "message": format!("成功刷新 {} 门课程", courses.len())
     })))
 }
 

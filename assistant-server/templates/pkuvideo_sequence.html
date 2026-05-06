@@ -6,7 +6,7 @@
   <title>「严小希」小助手-课程回放批量处理</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400,600,800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
   <style>
     :root {
       --ink: #13241d;
@@ -152,6 +152,8 @@
       margin-right: 8px;
     }
     .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+    .course-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .semester-select { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); font-size: 13px; background: #fff; min-width: 180px; }
   </style>
 </head>
 <body>
@@ -168,7 +170,12 @@
     <div id="status" class="status"></div>
 
     <div class="card">
-      <strong>选择课程</strong>
+      <div class="course-header">
+        <strong>选择课程</strong>
+        <select id="semesterSelect" class="semester-select">
+          <option value="">加载中...</option>
+        </select>
+      </div>
       <div id="courseList" class="course-list">
         <div class="status loading">
           <span class="loading-spinner"></span>正在加载课程列表...
@@ -194,9 +201,11 @@
     const selectAllEl = document.getElementById("selectAll");
     const submitBtnEl = document.getElementById("submitBtn");
     const refreshBtnEl = document.getElementById("refreshBtn");
+    const semesterSelectEl = document.getElementById("semesterSelect");
 
     let selectedCourse = null;
     let selectedVideos = new Set();
+    let allCourses = [];
 
     async function api(path, method = "GET", body) {
       const res = await fetch(path, {
@@ -239,25 +248,81 @@
       try {
         const resp = await api("/api/pkuvideofullclass/courses");
         if (resp.success && resp.courses && resp.courses.length > 0) {
-          courseListEl.innerHTML = resp.courses.map(course => `
-            <div class="course-item" data-course-id="${course.id}">
-              <div class="course-title">${esc(course.name)}</div>
-              <div class="course-info">学期: ${course.term} | 教师: ${course.teacher || "未知"} | 视频数: ${course.video_count || 0}</div>
-            </div>
-          `).join("");
-
-          document.querySelectorAll(".course-item").forEach(item => {
-            item.addEventListener("click", handleCourseSelect);
-          });
+          allCourses = resp.courses;
+          populateSemesterSelect(allCourses);
+          renderCourses(allCourses);
         } else {
+          allCourses = [];
+          semesterSelectEl.innerHTML = '<option value="">无可用学期</option>';
           courseListEl.innerHTML = '<div class="status">未找到课程，请确认已正确绑定IAAA账号</div>';
         }
       } catch (err) {
+        allCourses = [];
         courseListEl.innerHTML = '';
         statusEl.textContent = "加载课程列表失败: " + err.message;
         statusEl.className = "status error";
       }
     }
+
+    function populateSemesterSelect(courses) {
+      const semesters = [...new Set(courses.map(c => c.term).filter(t => t))];
+      const sortedSemesters = sortSemesters(semesters);
+      
+      // 构建选项
+      let optionsHtml = '<option value="">全部学期</option>' +
+        sortedSemesters.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+      
+      semesterSelectEl.innerHTML = optionsHtml;
+      
+      // 默认选择排序最大的学期（除"全部学期"外）
+      if (sortedSemesters.length > 0) {
+        semesterSelectEl.value = sortedSemesters[0];
+      }
+    }
+
+    function sortSemesters(semesters) {
+      return semesters.sort((a, b) => {
+        // 匹配学年和学期，格式如：25-26学年第2学期
+        const matchA = a.match(/(\d{2})-(\d{2})学年.*?(第(\d+)学期)/);
+        const matchB = b.match(/(\d{2})-(\d{2})学年.*?(第(\d+)学期)/);
+        
+        if (!matchA || !matchB) {
+          return a.localeCompare(b);
+        }
+        
+        const yearA = parseInt(matchA[1]);
+        const yearB = parseInt(matchB[1]);
+        const termA = parseInt(matchA[4]);
+        const termB = parseInt(matchB[4]);
+        
+        if (yearB !== yearA) {
+          return yearB - yearA; // 学年倒序，新学年在前
+        }
+        
+        // 学期倒序：第2学期 > 第1学期 > 第3学期 > ...
+        return termB - termA;
+      });
+    }
+
+    function renderCourses(courses) {
+      const selectedTerm = semesterSelectEl.value;
+      const filtered = selectedTerm ? courses.filter(c => c.term === selectedTerm) : courses;
+      if (filtered.length === 0) {
+        courseListEl.innerHTML = '<div class="status">该学期暂无课程</div>';
+        return;
+      }
+      courseListEl.innerHTML = filtered.map(course => `
+        <div class="course-item" data-course-id="${course.key}">
+          <div class="course-title">${esc(course.name)}</div>
+          <div class="course-info">学期: ${course.term}</div>
+        </div>
+      `).join("");
+      document.querySelectorAll(".course-item").forEach(item => {
+        item.addEventListener("click", handleCourseSelect);
+      });
+    }
+
+    semesterSelectEl.addEventListener("change", () => renderCourses(allCourses));
 
     function esc(s) {
       return String(s || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -349,7 +414,30 @@
       return `${m}:${s.toString().padStart(2, '0')}`;
     }
 
-    refreshBtnEl.addEventListener("click", loadCourseList);
+    async function refreshCourseList() {
+      refreshBtnEl.disabled = true;
+      statusEl.textContent = "正在刷新课程列表...";
+      statusEl.className = "status loading";
+
+      try {
+        const resp = await api("/api/pkuvideofullclass/courses/refresh", "POST");
+        if (resp.success) {
+          statusEl.textContent = resp.message;
+          statusEl.className = "status success";
+          loadCourseList(); // 刷新后重新加载课程列表
+        } else {
+          statusEl.textContent = resp.message || "刷新失败";
+          statusEl.className = "status error";
+        }
+      } catch (err) {
+        statusEl.textContent = "刷新失败: " + err.message;
+        statusEl.className = "status error";
+      } finally {
+        refreshBtnEl.disabled = false;
+      }
+    }
+
+    refreshBtnEl.addEventListener("click", refreshCourseList);
 
     document.getElementById("goAppBtn").addEventListener("click", () => {
       location.href = "/app";
