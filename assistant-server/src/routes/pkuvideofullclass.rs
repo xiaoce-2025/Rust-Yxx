@@ -194,11 +194,73 @@ async fn unbind(
 }
 
 async fn get_courses(
-    _current_user: CurrentUser,
+    State(state): State<AppState>,
+    current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // 获取用户绑定的IAAA信息
+    let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
+        tracing::error!("用户不存在: {}", current_user.id);
+        ApiError::Internal("用户不存在".to_string())
+    })?;
+
+    // 从邮箱中抽取学号 (格式: 学号@pku.edu.cn)
+    let username = user.email.split('@').next().ok_or_else(|| {
+        tracing::error!("邮箱格式无效: {}", user.email);
+        ApiError::BadRequest("无效的邮箱格式".to_string())
+    })?;
+
+    let password = match user.iaaa_encrypted_password {
+        Some(p) => p,
+        None => {
+            tracing::warn!("用户未绑定IAAA账号: {}", current_user.id);
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "courses": [],
+                "message": "未绑定IAAA账号"
+            })));
+        }
+    };
+
+    tracing::info!("用户已绑定IAAA，开始登录...");
+    
+    // 使用pkulogin登录并获取cookies
+    let login_result = pkulogin::login_iaaa_and_get_cookies(&username, &password).await
+        .map_err(|e| {
+            tracing::error!("IAAA登录失败: {}", e);
+            ApiError::BadRequest(format!("IAAA登录失败: {}", e))
+        })?;
+
+    let cookie_file_str = login_result.cookie_file.to_string_lossy().to_string();
+    tracing::info!("登录成功，Cookie文件: {}", cookie_file_str);
+
+    // 访问教学网首页
+    let portal_url = "https://course.pku.edu.cn/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1";
+    tracing::info!("开始访问教学网首页: {}", portal_url);
+
+    let page_content = pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, portal_url)
+        .map_err(|e| {
+            tracing::error!("获取教学网页面失败: {}", e);
+            let _ = std::fs::remove_file(&login_result.cookie_file);
+            ApiError::Internal(format!("获取教学网页面失败: {}", e))
+        })?;
+
+    // 保存页面到本地
+    let save_path = format!("./course_page_{}.html", chrono::Utc::now().timestamp_millis());
+    std::fs::write(&save_path, &page_content).map_err(|e| {
+        tracing::error!("保存页面失败: {}", e);
+        let _ = std::fs::remove_file(&login_result.cookie_file);
+        ApiError::Internal(format!("保存页面失败: {}", e))
+    })?;
+    tracing::info!("教学网页面已保存到: {}", save_path);
+
+    // 清理临时cookie文件
+    let _ = std::fs::remove_file(&login_result.cookie_file);
+
     Ok(Json(serde_json::json!({
         "success": true,
-        "courses": []
+        "courses": [],
+        "page_saved": save_path,
+        "page_length": page_content.len()
     })))
 }
 
