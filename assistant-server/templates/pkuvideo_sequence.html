@@ -410,8 +410,8 @@
               <div class="lesson-status">${lesson.is_processed ? '已处理' : '未处理'}</div>
             </div>
             <div class="lesson-actions">
-              <button class="ghost small" onclick="handleProcessLesson('${lesson.id}')">提交处理</button>
-              ${lesson.is_processed ? '<button class="ghost small" onclick="handleDownloadPdf(\'' + lesson.id + '\')">下载PDF</button>' : ''}
+              ${!lesson.tex_filename ? '<button class="ghost small" onclick="handleProcessLesson(\'' + lesson.id + '\')">提交处理</button>' : ''}
+              ${lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadPdf(\'' + lesson.id + '\')">下载PDF</button>' : ''}
             </div>
           </div>
         `).join("");
