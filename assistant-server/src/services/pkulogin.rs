@@ -9,6 +9,8 @@ use std::{
 use rand::{seq::SliceRandom, thread_rng};
 use serde_json::Value;
 
+use crate::services::login_cache::LoginCache;
+
 const IAAA_OAUTH_LOGIN_URL: &str = "https://iaaa.pku.edu.cn/iaaa/oauthlogin.do";
 const BLACKBOARD_APP_ID: &str = "blackboard";
 const BLACKBOARD_REDIR_URL: &str =
@@ -20,6 +22,29 @@ pub struct PkuLoginResult {
     pub token: String,
     pub cookie_file: PathBuf,
     pub user_agent: String,
+}
+
+pub async fn login_iaaa_and_get_cookies_with_cache(
+    username: &str,
+    password: &str,
+    login_cache: &LoginCache,
+) -> Result<PkuLoginResult, String> {
+    if let Some(cached_entry) = login_cache.get(username).await {
+        tracing::info!("使用缓存的IAAA登录信息 - 用户: {}", username);
+        return Ok(PkuLoginResult {
+            token: cached_entry.token,
+            cookie_file: cached_entry.cookie_file,
+            user_agent: cached_entry.user_agent,
+        });
+    }
+
+    tracing::info!("缓存未命中，执行新的IAAA登录 - 用户: {}", username);
+    let result = login_iaaa_and_get_cookies(username, password).await?;
+    
+    login_cache.set(username, result.cookie_file.clone(), result.user_agent.clone(), result.token.clone()).await;
+    tracing::info!("IAAA登录信息已缓存 - 用户: {}", username);
+    
+    Ok(result)
 }
 
 pub async fn login_iaaa_and_get_cookies(
@@ -78,7 +103,6 @@ pub async fn login_iaaa_and_get_cookies(
     tracing::info!("步骤5完成: Token解析成功 - token长度: {}", token.len());
 
     // Step 2: campusLogin?_rand=...&token=...
-    // 先尝试HTTPS，再尝试HTTP，避免HTTP超时等待
     let campus_urls = vec![
         format!(
             "{}?_rand={:.16}&token={}",
@@ -110,7 +134,7 @@ pub async fn login_iaaa_and_get_cookies(
             "-b".to_string(),
             cookie_file_str.clone(),
             "-o".to_string(),
-            "/dev/null".to_string(),  // Linux/macOS
+            "/dev/null".to_string(),
             campus_url.clone(),
         ];
 
@@ -165,10 +189,10 @@ pub async fn download_with_pku_cookie(
     url: &str,
     username: &str,
     password: &str,
+    login_cache: &LoginCache,
 ) -> Result<Vec<u8>, String> {
-    let login = login_iaaa_and_get_cookies(username, password).await?;
+    let login = login_iaaa_and_get_cookies_with_cache(username, password, login_cache).await?;
 
-    // Keep the same cookie jar after campusLogin and use it to access the replay URL.
     let cookie_file_str = login.cookie_file.to_string_lossy().to_string();
 
     let args = vec![
@@ -185,7 +209,6 @@ pub async fn download_with_pku_cookie(
     ];
 
     let bytes = run_curl_bytes(&args).map_err(|e| format!("下载请求失败: {e}"));
-    let _ = fs::remove_file(&login.cookie_file);
     bytes
 }
 

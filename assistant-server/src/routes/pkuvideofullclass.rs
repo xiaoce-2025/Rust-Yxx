@@ -288,7 +288,7 @@ async fn refresh_lessons(
 
     tracing::info!("用户 {} 开始刷新课程 {} 的课节列表...", username, course_id);
 
-    let login_result = pkulogin::login_iaaa_and_get_cookies(&username, &password).await
+    let login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
         .map_err(|e| {
             tracing::error!("IAAA登录失败: {}", e);
             ApiError::BadRequest(format!("IAAA登录失败: {}", e))
@@ -299,14 +299,14 @@ async fn refresh_lessons(
     let course_url = format!("https://course.pku.edu.cn/webapps/blackboard/execute/launcher?type=Course&id=PkId{{{}}}", course_id);
     tracing::info!("开始访问课程页面: {}", course_url);
 
-    let page_content = pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, &course_url)
-        .map_err(|e| {
+    let page_content = match pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, &course_url) {
+        Ok(content) => content,
+        Err(e) => {
             tracing::error!("获取课程页面失败: {}", e);
-            let _ = std::fs::remove_file(&login_result.cookie_file);
-            ApiError::Internal(format!("获取课程页面失败: {}", e))
-        })?;
-
-    let _ = std::fs::remove_file(&login_result.cookie_file);
+            state.login_cache.invalidate(username).await;
+            return Err(ApiError::Internal(format!("获取课程页面失败: {}", e)));
+        }
+    };
 
     let mock_lessons = lesson_storage::LessonInfo {
         id: "1".to_string(),
@@ -358,7 +358,7 @@ async fn refresh_courses(
 
     tracing::info!("用户 {} 开始刷新课程列表...", username);
 
-    let login_result = pkulogin::login_iaaa_and_get_cookies(&username, &password).await
+    let login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
         .map_err(|e| {
             tracing::error!("IAAA登录失败: {}", e);
             ApiError::BadRequest(format!("IAAA登录失败: {}", e))
@@ -370,12 +370,14 @@ async fn refresh_courses(
     let portal_url = "https://course.pku.edu.cn/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1";
     tracing::info!("开始访问教学网首页: {}", portal_url);
 
-    let page_content = pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, portal_url)
-        .map_err(|e| {
+    let page_content = match pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, portal_url) {
+        Ok(content) => content,
+        Err(e) => {
             tracing::error!("获取教学网页面失败: {}", e);
-            let _ = std::fs::remove_file(&login_result.cookie_file);
-            ApiError::Internal(format!("获取教学网页面失败: {}", e))
-        })?;
+            state.login_cache.invalidate(username).await;
+            return Err(ApiError::Internal(format!("获取教学网页面失败: {}", e)));
+        }
+    };
 
     let courses = course_parser::parse_courses(&page_content);
     tracing::info!("解析出 {} 门课程", courses.len());
@@ -383,11 +385,8 @@ async fn refresh_courses(
     course_storage::save_courses(username, &courses)
         .map_err(|e| {
             tracing::error!("保存课程信息失败: {}", e);
-            let _ = std::fs::remove_file(&login_result.cookie_file);
             ApiError::Internal(format!("保存课程信息失败: {}", e))
         })?;
-
-    let _ = std::fs::remove_file(&login_result.cookie_file);
 
     Ok(Json(serde_json::json!({
         "success": true,

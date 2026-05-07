@@ -6,6 +6,7 @@ use tokio::{fs, process::Command};
 use uuid::Uuid;
 
 use crate::services::pkulogin::download_with_pku_cookie;
+use crate::services::login_cache::LoginCache;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +85,7 @@ pub async fn run_pipeline(
     login_credential_one: String,
     login_credential_two: String,
     settings: &crate::config::Settings,
+    login_cache: &LoginCache,
 ) -> Result<(Option<String>, Option<String>, Option<String>), String> {
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let job_dir = base_dir.join(format!("{}_{}", timestamp, job_id));
@@ -102,6 +104,7 @@ pub async fn run_pipeline(
         &video_path,
         &login_credential_one,
         &login_credential_two,
+        login_cache,
     )
         .await
         .map_err(|e| format!("step=0;{e}"))?;
@@ -136,8 +139,8 @@ pub async fn run_pipeline(
     ))
 }
 
-pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str) -> Result<(), String> {
-    let bytes = download_with_pku_cookie(url, username, password).await?;
+pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str, login_cache: &LoginCache) -> Result<(), String> {
+    let bytes = download_with_pku_cookie(url, username, password, login_cache).await?;
 
     fs::write(video_path, bytes)
         .await
