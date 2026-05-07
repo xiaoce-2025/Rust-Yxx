@@ -389,7 +389,7 @@
       const lessons = resp.lessons || [];
       const total = resp.total || 0;
       const processed = resp.processed || 0;
-      const allProcessed = total > 0 && processed === total;
+      const hasProcessed = lessons.some(lesson => lesson.tex_filename);
 
       lessonSectionTitleEl.textContent = selectedCourseName || "课节列表";
 
@@ -417,7 +417,7 @@
         `).join("");
       }
 
-      downloadAllBtnEl.style.display = allProcessed ? 'inline-block' : 'none';
+      downloadAllBtnEl.style.display = hasProcessed ? 'inline-block' : 'none';
       statusEl.textContent = "";
       statusEl.className = "status";
 
