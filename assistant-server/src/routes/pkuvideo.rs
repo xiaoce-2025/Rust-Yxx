@@ -468,7 +468,7 @@ async fn copy_existing_job(
     Ok(job_id)
 }
 
-async fn run_job_pipeline(
+pub async fn run_job_pipeline(
     state: AppState,
     job_id: Uuid,
     video_url: String,

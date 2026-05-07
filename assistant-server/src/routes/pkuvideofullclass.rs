@@ -4,12 +4,18 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
     auth::CurrentUser,
     error::ApiError,
-    services::{course_parser, course_storage, lesson_parser, lesson_storage, pkulogin, video_downloader},
+    routes::pkuvideo::run_job_pipeline,
+    services::{
+        course_parser, course_storage, lesson_parser, lesson_storage, pkulogin, pkuvideo::{PipelineStatus, PkuVideoJob}, 
+        video_downloader
+    },
 };
 use lesson_storage::LessonInfo;
 
@@ -497,8 +503,9 @@ async fn process_lesson(
     let lesson_index = lesson_index.unwrap();
     let mut is_newly_processed = false;
     
+    // 步骤1: 获取下载链接（如果为空）
     if lessons[lesson_index].video_url.is_empty() {
-        tracing::info!("课节 {} 下载链接为空，开始获取播放链接并刷新课节列表", video_id);
+        tracing::info!("课节 {} 下载链接为空，开始获取下载链接", video_id);
 
         let login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
             .map_err(|e| {
@@ -514,7 +521,6 @@ async fn process_lesson(
             match video_downloader::get_video_download_url(&lessons[lesson_index].play_url, &cookie_file_str, &login_result.user_agent).await {
                 Ok(download_url) => {
                     lessons[lesson_index].video_url = download_url;
-                    lessons[lesson_index].is_processed = true;
                     is_newly_processed = true;
                     tracing::info!("成功获取下载链接: {}", lessons[lesson_index].video_url);
                 }
@@ -537,21 +543,176 @@ async fn process_lesson(
         tracing::info!("课节 {} 已有下载链接，跳过获取", video_id);
     }
 
-    let lesson = &lessons[lesson_index];
-    let message = if is_newly_processed {
-        "下载链接已获取"
-    } else if !lesson.video_url.is_empty() {
-        "下载链接已存在"
+    // 保存需要返回的视频信息
+    let video_url = lessons[lesson_index].video_url.clone();
+    let play_url = lessons[lesson_index].play_url.clone();
+    
+    // 步骤2: 提交pkuvideo任务（不扣除限额）
+    if video_url.is_empty() {
+        return Err(ApiError::Internal("下载链接为空，无法提交任务".to_string()));
+    }
+
+    tracing::info!("提交pkuvideo任务，视频URL: {}", video_url);
+    
+    let job_id = enqueue_job_without_limit(
+        &state,
+        current_user.id,
+        &video_url,
+        &username,
+        &password,
+    ).await?;
+
+    tracing::info!("任务提交成功，job_id: {}", job_id);
+
+    // 步骤3: 等待任务完成
+    tracing::info!("等待任务 {} 完成...", job_id);
+    let job_result = wait_for_job_completion(&state, job_id).await?;
+
+    if !job_result.success {
+        return Err(ApiError::Internal(format!("任务执行失败: {}", job_result.message)));
+    }
+
+    tracing::info!("任务 {} 执行完成", job_id);
+
+    // 步骤4: 复制.tex文件到course_data目录
+    let tex_filename = format!("{}_lesson_{}.tex", course_id, video_id);
+    let course_data_dir = format!("./course_data/{}/{}", username, course_id);
+    
+    if let Some(notes_path) = &job_result.notes_path {
+        // notes_path是相对于./data/pkuvideo_jobs/的相对路径，需要转换为完整路径
+        let base_dir = PathBuf::from("./data/pkuvideo_jobs");
+        let src_path = base_dir.join(notes_path);
+        
+        tracing::info!("尝试复制tex文件: {} -> {}", src_path.display(), course_data_dir);
+        
+        if !src_path.exists() {
+            tracing::warn!("源tex文件不存在: {}", src_path.display());
+        } else {
+            let dest_dir = PathBuf::from(&course_data_dir);
+            
+            // 确保目标目录存在
+            std::fs::create_dir_all(&dest_dir).map_err(|e| ApiError::Internal(format!("创建目录失败: {}", e)))?;
+            
+            let dest_path = dest_dir.join(&tex_filename);
+            std::fs::copy(&src_path, &dest_path).map_err(|e| ApiError::Internal(format!("复制文件失败: {}", e)))?;
+            
+            tracing::info!("tex文件已复制到: {}", dest_path.display());
+            
+            // 更新课节的tex文件名
+            lessons[lesson_index].tex_filename = Some(tex_filename.clone());
+            lessons[lesson_index].is_processed = true;
+            lesson_storage::save_lessons(username, &course_id, &lessons)
+                .map_err(|e| ApiError::Internal(format!("保存课节信息失败: {}", e)))?;
+        }
     } else {
-        "下载链接获取失败"
+        tracing::warn!("任务完成但未生成tex文件");
+    }
+
+    // 步骤5: 删除pkuvideo对应的资源
+    if let Some(artifacts_dir) = &job_result.artifacts_dir {
+        match std::fs::remove_dir_all(artifacts_dir) {
+            Ok(_) => tracing::info!("已清理pkuvideo任务资源: {}", artifacts_dir),
+            Err(e) => tracing::warn!("清理pkuvideo任务资源失败: {}", e),
+        }
+    }
+
+    // 步骤6: 删除内存中的任务记录
+    {
+        let mut jobs = state.pkuvideo_jobs.write().await;
+        jobs.remove(&job_id);
+    }
+    state.store.delete_pkuvideo_job(job_id).await.map_err(|e| ApiError::Internal(format!("删除任务记录失败: {}", e)))?;
+
+    let message = if is_newly_processed {
+        "下载链接已获取并处理完成"
+    } else {
+        "处理完成"
     };
     
     Ok(Json(serde_json::json!({
         "success": true,
         "message": message,
         "video_id": video_id,
-        "video_url": lesson.video_url,
-        "play_url": lesson.play_url,
-        "is_processed": lesson.is_processed
+        "video_url": video_url,
+        "play_url": play_url,
+        "is_processed": lessons[lesson_index].is_processed,
+        "tex_filename": lessons[lesson_index].tex_filename,
+        "job_id": job_id.to_string()
     })))
+}
+
+async fn enqueue_job_without_limit(
+    state: &AppState,
+    user_id: Uuid,
+    video_url: &str,
+    pku_auth_one: &str,
+    pku_auth_two: &str,
+) -> Result<Uuid, ApiError> {
+    let job_id = Uuid::new_v4();
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let artifacts_dir = format!("./data/pkuvideo_jobs/{}_{}", timestamp, job_id);
+    
+    let job = PkuVideoJob::new(job_id, user_id, video_url.to_string(), artifacts_dir.clone());
+    
+    // 保存到内存和文件存储
+    state.pkuvideo_jobs.write().await.insert(job_id, job.clone());
+    state.store.insert_pkuvideo_job(job).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 异步执行任务（不扣除限额）
+    let state_clone = state.clone();
+    let video_url_clone = video_url.to_string();
+    let pku_auth_one_clone = pku_auth_one.to_string();
+    let pku_auth_two_clone = pku_auth_two.to_string();
+    
+    tokio::spawn(async move {
+        let _ = run_job_pipeline(state_clone, job_id, video_url_clone, pku_auth_one_clone, pku_auth_two_clone).await;
+    });
+
+    Ok(job_id)
+}
+
+struct JobResult {
+    success: bool,
+    message: String,
+    notes_path: Option<String>,
+    artifacts_dir: Option<String>,
+}
+
+async fn wait_for_job_completion(state: &AppState, job_id: Uuid) -> Result<JobResult, ApiError> {
+    let max_wait_seconds = 3600; // 最多等待1小时
+    let check_interval_ms = 3000; // 每3秒检查一次
+    
+    for _ in 0..(max_wait_seconds * 1000 / check_interval_ms) {
+        {
+            let jobs = state.pkuvideo_jobs.read().await;
+            if let Some(job) = jobs.get(&job_id) {
+                match job.status {
+                    PipelineStatus::Succeeded => {
+                        return Ok(JobResult {
+                            success: true,
+                            message: "任务成功完成".to_string(),
+                            notes_path: job.notes_path.clone(),
+                            artifacts_dir: Some(job.artifacts_dir.clone()),
+                        });
+                    }
+                    PipelineStatus::Failed => {
+                        let error_msg = job.error.clone().unwrap_or_else(|| "未知错误".to_string());
+                        return Ok(JobResult {
+                            success: false,
+                            message: error_msg,
+                            notes_path: None,
+                            artifacts_dir: Some(job.artifacts_dir.clone()),
+                        });
+                    }
+                    _ => {
+                        // 任务仍在执行，继续等待
+                    }
+                }
+            }
+        }
+        
+        tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
+    }
+    
+    Err(ApiError::Internal("任务执行超时".to_string()))
 }
