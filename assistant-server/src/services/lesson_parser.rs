@@ -62,6 +62,55 @@ pub fn parse_lessons(html: &str, course_id: &str) -> Vec<LessonInfo> {
     lessons
 }
 
+pub fn has_next_page(html: &str) -> bool {
+    let document = Html::parse_document(html);
+    let next_page_selector = Selector::parse("a#listContainer_nextpage_bot").unwrap();
+    document.select(&next_page_selector).next().is_some()
+}
+
+pub fn get_next_page_url(html: &str) -> Option<String> {
+    let document = Html::parse_document(html);
+    let next_page_selector = Selector::parse("a#listContainer_nextpage_bot").unwrap();
+    
+    if let Some(next_page_link) = document.select(&next_page_selector).next() {
+        if let Some(href) = next_page_link.value().attr("href") {
+            return Some(format!("https://course.pku.edu.cn{}", href));
+        }
+    }
+    
+    None
+}
+
+pub fn assign_lesson_numbers(lessons: &mut Vec<LessonInfo>) {
+    lessons.sort_by(|a, b| {
+        let date_a = NaiveDate::parse_from_str(&a.date, "%Y-%m-%d").unwrap_or(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+        let date_b = NaiveDate::parse_from_str(&b.date, "%Y-%m-%d").unwrap_or(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+        
+        let time_order_a = parse_time_order(&a.time);
+        let time_order_b = parse_time_order(&b.time);
+        
+        match date_a.cmp(&date_b) {
+            std::cmp::Ordering::Equal => time_order_a.cmp(&time_order_b),
+            other => other,
+        }
+    });
+    
+    for (index, lesson) in lessons.iter_mut().enumerate() {
+        let lesson_number = index + 1;
+        lesson.id = format!("lesson_{}", lesson_number);
+    }
+}
+
+fn parse_time_order(time_str: &str) -> i32 {
+    let re = regex::Regex::new(r"第(\d+)节").unwrap();
+    if let Some(captures) = re.captures(time_str) {
+        if let Ok(num) = captures[1].parse::<i32>() {
+            return num;
+        }
+    }
+    0
+}
+
 fn parse_date_time_from_th(th_text: &str) -> (&str, &str) {
     let date_re = regex::Regex::new(r"(\d{4}-\d{2}-\d{2})").unwrap();
     let time_re = regex::Regex::new(r"(第\d+[-~]\d+节|第\d+节)").unwrap();
@@ -112,5 +161,54 @@ mod tests {
         assert_eq!(calculate_day_of_week("2026-04-30"), "周三");
         assert_eq!(calculate_day_of_week("2026-05-01"), "周四");
         assert_eq!(calculate_day_of_week("2026-05-03"), "周六");
+    }
+
+    #[test]
+    fn test_assign_lesson_numbers() {
+        let mut lessons = vec![
+            LessonInfo {
+                id: "test_1".to_string(),
+                video_url: "".to_string(),
+                play_url: "".to_string(),
+                date: "2026-05-02".to_string(),
+                time: "第3-4节".to_string(),
+                day_of_week: "周五".to_string(),
+                is_processed: false,
+                tex_filename: None,
+            },
+            LessonInfo {
+                id: "test_2".to_string(),
+                video_url: "".to_string(),
+                play_url: "".to_string(),
+                date: "2026-04-30".to_string(),
+                time: "第7-9节".to_string(),
+                day_of_week: "周三".to_string(),
+                is_processed: false,
+                tex_filename: None,
+            },
+            LessonInfo {
+                id: "test_3".to_string(),
+                video_url: "".to_string(),
+                play_url: "".to_string(),
+                date: "2026-05-02".to_string(),
+                time: "第1-2节".to_string(),
+                day_of_week: "周五".to_string(),
+                is_processed: false,
+                tex_filename: None,
+            },
+        ];
+        
+        assign_lesson_numbers(&mut lessons);
+        
+        assert_eq!(lessons[0].id, "lesson_1");
+        assert_eq!(lessons[0].date, "2026-04-30");
+        
+        assert_eq!(lessons[1].id, "lesson_2");
+        assert_eq!(lessons[1].date, "2026-05-02");
+        assert_eq!(lessons[1].time, "第1-2节");
+        
+        assert_eq!(lessons[2].id, "lesson_3");
+        assert_eq!(lessons[2].date, "2026-05-02");
+        assert_eq!(lessons[2].time, "第3-4节");
     }
 }

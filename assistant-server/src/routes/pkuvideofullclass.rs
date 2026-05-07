@@ -296,38 +296,62 @@ async fn refresh_lessons(
 
     let cookie_file_str = login_result.cookie_file.to_string_lossy().to_string();
 
-    let video_list_url = format!("https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/videoList.action?course_id={}&mode=view", course_id);
-    tracing::info!("开始访问视频列表页面: {}", video_list_url);
+    let mut all_lessons = Vec::new();
+    let mut current_url = format!("https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/videoList.action?course_id={}&mode=view", course_id);
+    let mut page_num = 1;
 
-    let page_content = match pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, &video_list_url) {
-        Ok(content) => content,
-        Err(e) => {
-            tracing::error!("获取视频列表页面失败: {}", e);
-            state.login_cache.invalidate(username).await;
-            return Err(ApiError::Internal(format!("获取视频列表页面失败: {}", e)));
+    loop {
+        tracing::info!("开始访问视频列表页面 {}: {}", page_num, current_url);
+
+        let page_content = match pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, &current_url) {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::error!("获取视频列表页面失败: {}", e);
+                state.login_cache.invalidate(username).await;
+                return Err(ApiError::Internal(format!("获取视频列表页面失败: {}", e)));
+            }
+        };
+
+        let mut lessons = lesson_parser::parse_lessons(&page_content, &course_id);
+        all_lessons.append(&mut lessons);
+
+        if !lesson_parser::has_next_page(&page_content) {
+            tracing::info!("已到达最后一页，共获取 {} 个课节", all_lessons.len());
+            break;
         }
-    };
 
-    let lessons = lesson_parser::parse_lessons(&page_content, &course_id);
-    
-    if lessons.is_empty() {
+        match lesson_parser::get_next_page_url(&page_content) {
+            Some(next_url) => {
+                current_url = next_url;
+                page_num += 1;
+            }
+            None => {
+                tracing::warn!("检测到有下一页，但无法获取下一页URL");
+                break;
+            }
+        }
+    }
+
+    if all_lessons.is_empty() {
         tracing::warn!("课程 {} 未解析到任何课节", course_id);
     }
 
+    lesson_parser::assign_lesson_numbers(&mut all_lessons);
+
     lesson_storage::init_course_dir(username, &course_id)
         .map_err(|e| ApiError::Internal(format!("创建课节目录失败: {}", e)))?;
-    lesson_storage::save_lessons(username, &course_id, &lessons)
+    lesson_storage::save_lessons(username, &course_id, &all_lessons)
         .map_err(|e| {
             tracing::error!("保存课节信息失败: {}", e);
             ApiError::Internal(format!("保存课节信息失败: {}", e))
         })?;
 
-    tracing::info!("用户 {} 课程 {} 课节列表已保存，共 {} 个课节", username, course_id, lessons.len());
+    tracing::info!("用户 {} 课程 {} 课节列表已保存，共 {} 个课节", username, course_id, all_lessons.len());
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "message": format!("成功刷新 {} 个课节", lessons.len()),
-        "count": lessons.len()
+        "message": format!("成功刷新 {} 个课节", all_lessons.len()),
+        "count": all_lessons.len()
     })))
 }
 
