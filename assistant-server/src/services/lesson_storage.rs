@@ -8,6 +8,7 @@ const COURSE_DATA_DIR: &str = "./course_data";
 pub struct LessonInfo {
     pub id: String,
     pub video_url: String,
+    pub play_url: String,
     pub date: String,
     pub time: String,
     pub day_of_week: String,

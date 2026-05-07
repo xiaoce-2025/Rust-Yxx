@@ -26,6 +26,7 @@ async-trait = "0.1"
 http = "1"
 regex = "1"
 flate2 = "1"
+scraper = "0.18"
 
 [profile.release]
 lto = true

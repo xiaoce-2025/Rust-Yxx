@@ -9,7 +9,7 @@ use crate::{
     app_state::AppState,
     auth::CurrentUser,
     error::ApiError,
-    services::{course_parser, course_storage, lesson_storage, pkulogin},
+    services::{course_parser, course_storage, lesson_parser, lesson_storage, pkulogin},
 };
 
 const IAAA_PUBLIC_KEY_URL: &str = "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do";
@@ -296,41 +296,38 @@ async fn refresh_lessons(
 
     let cookie_file_str = login_result.cookie_file.to_string_lossy().to_string();
 
-    let course_url = format!("https://course.pku.edu.cn/webapps/blackboard/execute/launcher?type=Course&id=PkId{{{}}}", course_id);
-    tracing::info!("开始访问课程页面: {}", course_url);
+    let video_list_url = format!("https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/videoList.action?course_id={}&mode=view", course_id);
+    tracing::info!("开始访问视频列表页面: {}", video_list_url);
 
-    let page_content = match pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, &course_url) {
+    let page_content = match pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, &video_list_url) {
         Ok(content) => content,
         Err(e) => {
-            tracing::error!("获取课程页面失败: {}", e);
+            tracing::error!("获取视频列表页面失败: {}", e);
             state.login_cache.invalidate(username).await;
-            return Err(ApiError::Internal(format!("获取课程页面失败: {}", e)));
+            return Err(ApiError::Internal(format!("获取视频列表页面失败: {}", e)));
         }
     };
 
-    let mock_lessons = lesson_storage::LessonInfo {
-        id: "1".to_string(),
-        video_url: "http://example.com/video1.mp4".to_string(),
-        date: "2025-03-01".to_string(),
-        time: "09:00".to_string(),
-        day_of_week: "周六".to_string(),
-        is_processed: false,
-        tex_filename: None,
-    };
+    let lessons = lesson_parser::parse_lessons(&page_content, &course_id);
+    
+    if lessons.is_empty() {
+        tracing::warn!("课程 {} 未解析到任何课节", course_id);
+    }
 
     lesson_storage::init_course_dir(username, &course_id)
         .map_err(|e| ApiError::Internal(format!("创建课节目录失败: {}", e)))?;
-    lesson_storage::save_lessons(username, &course_id, &[mock_lessons])
+    lesson_storage::save_lessons(username, &course_id, &lessons)
         .map_err(|e| {
             tracing::error!("保存课节信息失败: {}", e);
             ApiError::Internal(format!("保存课节信息失败: {}", e))
         })?;
 
-    tracing::info!("用户 {} 课程 {} 课节列表已保存", username, course_id);
+    tracing::info!("用户 {} 课程 {} 课节列表已保存，共 {} 个课节", username, course_id, lessons.len());
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "message": "课节列表已刷新"
+        "message": format!("成功刷新 {} 个课节", lessons.len()),
+        "count": lessons.len()
     })))
 }
 
