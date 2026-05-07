@@ -11,6 +11,7 @@ use crate::{
     error::ApiError,
     services::{course_parser, course_storage, lesson_parser, lesson_storage, pkulogin, video_downloader},
 };
+use lesson_storage::LessonInfo;
 
 const IAAA_PUBLIC_KEY_URL: &str = "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do";
 
@@ -289,6 +290,18 @@ async fn refresh_lessons(
 
     tracing::info!("用户 {} 开始刷新课程 {} 的课节列表...", username, course_id);
 
+    // 先加载已有的课节数据
+    let existing_lessons = match lesson_storage::load_lessons(username, &course_id) {
+        Ok(lessons) => {
+            tracing::info!("已加载 {} 个现有课节", lessons.len());
+            lessons
+        }
+        Err(_) => {
+            tracing::info!("未找到现有课节数据");
+            Vec::new()
+        }
+    };
+
     let login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
         .map_err(|e| {
             tracing::error!("IAAA登录失败: {}", e);
@@ -337,6 +350,9 @@ async fn refresh_lessons(
         tracing::warn!("课程 {} 未解析到任何课节", course_id);
     }
 
+    // 合并已有的课节数据：保留 video_url, is_processed, tex_filename，只更新 play_url
+    merge_lesson_data(&mut all_lessons, &existing_lessons);
+
     lesson_parser::assign_lesson_numbers(&mut all_lessons);
 
     lesson_storage::init_course_dir(username, &course_id)
@@ -354,6 +370,20 @@ async fn refresh_lessons(
         "message": format!("成功刷新 {} 个课节", all_lessons.len()),
         "count": all_lessons.len()
     })))
+}
+
+fn merge_lesson_data(new_lessons: &mut Vec<LessonInfo>, existing_lessons: &Vec<LessonInfo>) {
+    for new_lesson in new_lessons {
+        // 查找日期和时间相同的已有课节
+        if let Some(existing) = existing_lessons.iter().find(|l| l.date == new_lesson.date && l.time == new_lesson.time) {
+            tracing::info!("找到匹配的课节: {} {}，保留原有数据", new_lesson.date, new_lesson.time);
+            // 保留原有数据，只更新播放链接
+            new_lesson.video_url = existing.video_url.clone();
+            new_lesson.is_processed = existing.is_processed;
+            new_lesson.tex_filename = existing.tex_filename.clone();
+            // play_url 从新解析结果中获取（可能已更新）
+        }
+    }
 }
 
 async fn refresh_courses(
