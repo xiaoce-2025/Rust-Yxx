@@ -949,23 +949,46 @@ async fn download_course_pdf(
     })?;
     tracing::info!("已复制elegantbook模板文件");
 
+    // 复制封面图片到临时目录
+    let cover_image_path = std::path::Path::new("./image/cover_1.jpg");
+    if cover_image_path.exists() {
+        tokio::fs::copy(cover_image_path, temp_dir_path.join("cover_1.jpg")).await.map_err(|e| {
+            tracing::error!("复制封面图片失败: {}", e);
+            ApiError::Internal(format!("复制封面图片失败: {}", e))
+        })?;
+        tracing::info!("已复制封面图片");
+    } else {
+        tracing::warn!("封面图片不存在: {:?}", cover_image_path);
+    }
+
     // 构建完整的LaTeX文档内容
     let mut full_content = String::new();
-    
+
+    // 免责声明
+    let disclaimer1 = "「严小希」小助手是由cxxdgc开发的人工智能助手，其生成内容不代表作者任何观点或立场";
+    let disclaimer2 = "本笔记由人工智能根据课程回放生成，可能存在疏漏或偏差。如有冲突或疑问，请务必以课程回放、教材与PPT为准进行学习";
+
     // 封面和目录部分 - 使用elegantbook模板
     full_content.push_str(r#"\documentclass[lang=cn,10pt,scheme=chinese,a4paper]{elegantbook}
 
+\cover{cover_1.jpg}
+
 \title{"#);
-    full_content.push_str(&course_name);
+    full_content.push_str(&format!("{}笔记", course_name));
     full_content.push_str(r#"}
 \author{严小希}
-\date{}
+\extrainfo{"#);
+    full_content.push_str(&format!("{}\\\\{}", disclaimer1, disclaimer2));
+    full_content.push_str(r#"}
 
 \begin{document}
 
-\mainmatter
+\maketitle
 
 \tableofcontents
+
+\pagenumbering{arabic}
+\setcounter{page}{1}
 
 "#);
 
