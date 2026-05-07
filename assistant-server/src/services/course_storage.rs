@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use super::course_parser::CourseInfo;
 
@@ -12,14 +12,22 @@ pub struct UserCourses {
     pub last_updated: String,
 }
 
+fn get_user_dir(username: &str) -> PathBuf {
+    PathBuf::from(COURSE_DATA_DIR).join(username)
+}
+
+fn get_user_courses_path(username: &str) -> PathBuf {
+    get_user_dir(username).join("courses.json")
+}
+
 pub fn init_storage() -> Result<(), String> {
     fs::create_dir_all(COURSE_DATA_DIR).map_err(|e| format!("创建课程数据目录失败: {}", e))?;
     Ok(())
 }
 
 pub fn save_courses(username: &str, courses: &[CourseInfo]) -> Result<(), String> {
-    // 确保数据目录存在
-    init_storage()?;
+    let user_dir = get_user_dir(username);
+    fs::create_dir_all(&user_dir).map_err(|e| format!("创建用户目录失败: {}", e))?;
 
     let user_courses = UserCourses {
         username: username.to_string(),
@@ -27,7 +35,7 @@ pub fn save_courses(username: &str, courses: &[CourseInfo]) -> Result<(), String
         last_updated: chrono::Utc::now().to_rfc3339(),
     };
 
-    let file_path = get_user_file_path(username);
+    let file_path = get_user_courses_path(username);
     let json_data = serde_json::to_string_pretty(&user_courses)
         .map_err(|e| format!("序列化课程数据失败: {}", e))?;
 
@@ -39,8 +47,8 @@ pub fn save_courses(username: &str, courses: &[CourseInfo]) -> Result<(), String
 }
 
 pub fn load_courses(username: &str) -> Result<Vec<CourseInfo>, String> {
-    let file_path = get_user_file_path(username);
-    
+    let file_path = get_user_courses_path(username);
+
     if !file_path.exists() {
         tracing::info!("用户 {} 的课程数据文件不存在", username);
         return Ok(Vec::new());
@@ -57,8 +65,8 @@ pub fn load_courses(username: &str) -> Result<Vec<CourseInfo>, String> {
 }
 
 pub fn get_last_updated(username: &str) -> Option<String> {
-    let file_path = get_user_file_path(username);
-    
+    let file_path = get_user_courses_path(username);
+
     if !file_path.exists() {
         return None;
     }
@@ -72,10 +80,6 @@ pub fn get_last_updated(username: &str) -> Option<String> {
         }
         Err(_) => None,
     }
-}
-
-fn get_user_file_path(username: &str) -> PathBuf {
-    PathBuf::from(COURSE_DATA_DIR).join(format!("{}.json", username))
 }
 
 #[cfg(test)]
@@ -100,14 +104,14 @@ mod tests {
 
         init_storage().unwrap();
         save_courses(username, &courses).unwrap();
-        
+
         let loaded = load_courses(username).unwrap();
-        
+
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].key, "_12345_1");
         assert_eq!(loaded[1].name, "线性代数");
 
         // 清理测试文件
-        let _ = fs::remove_file(get_user_file_path(username));
+        let _ = fs::remove_dir_all(get_user_dir(username));
     }
 }

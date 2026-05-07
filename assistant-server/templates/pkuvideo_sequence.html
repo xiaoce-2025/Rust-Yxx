@@ -57,6 +57,11 @@
       background: rgba(255,255,255,.8);
       border: 1px solid var(--line);
     }
+    button.small {
+      padding: 6px 10px;
+      font-size: 12px;
+      border-radius: 8px;
+    }
     .card {
       margin-top: 16px;
       border: 1px solid var(--line);
@@ -108,52 +113,71 @@
       animation: spin 0.8s linear infinite;
       display: inline-block;
       margin-right: 8px;
+      vertical-align: middle;
     }
     @keyframes spin {
       to { transform: rotate(360deg); }
     }
-    .video-list {
+    .lesson-list {
       margin-top: 12px;
-      max-height: 300px;
-      overflow-y: auto;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
     }
-    .video-item {
+    .lesson-item {
       display: flex;
       align-items: center;
-      padding: 8px;
-      border-radius: 8px;
-      margin-bottom: 4px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
       background: #fff;
+      gap: 12px;
     }
-    .video-item:last-child {
-      margin-bottom: 0;
+    .lesson-item.processed {
+      background: rgba(12,122,87,.05);
     }
-    .video-checkbox {
-      margin-right: 10px;
+    .lesson-datetime {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 80px;
+      padding-right: 12px;
+      border-right: 1px solid var(--line);
     }
-    .video-title {
-      flex: 1;
-      font-size: 13px;
+    .lesson-date {
+      font-weight: 600;
+      font-size: 14px;
+      color: var(--ink);
     }
-    .video-duration {
+    .lesson-time {
       font-size: 12px;
       color: #6b7280;
     }
-    .select-all-container {
-      display: flex;
-      align-items: center;
-      margin-bottom: 8px;
-      font-size: 13px;
+    .lesson-day {
+      font-size: 11px;
+      color: var(--accent);
     }
-    .select-all-checkbox {
-      margin-right: 8px;
+    .lesson-info {
+      flex: 1;
+    }
+    .lesson-title {
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .lesson-status {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 2px;
+    }
+    .lesson-actions {
+      display: flex;
+      gap: 8px;
     }
     .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
     .course-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
     .semester-select { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); font-size: 13px; background: #fff; min-width: 180px; }
+    .section-header { display: flex; align-items: center; justify-content: space-between; }
+    .section-title { font-weight: 600; font-size: 16px; }
   </style>
 </head>
 <body>
@@ -164,12 +188,11 @@
     <div class="toolbar">
       <button id="goAppBtn" class="ghost">返回聊天主页</button>
       <button id="refreshBtn" class="ghost">刷新课程列表</button>
-      <button id="submitBtn" disabled>提交批量任务</button>
     </div>
 
     <div id="status" class="status"></div>
 
-    <div class="card">
+    <div class="card" id="courseSection">
       <div class="course-header">
         <strong>选择课程</strong>
         <select id="semesterSelect" class="semester-select">
@@ -183,29 +206,35 @@
       </div>
     </div>
 
-    <div class="card" id="videoSection" style="display: none;">
-      <strong>选择视频</strong>
-      <div class="select-all-container">
-        <input type="checkbox" id="selectAll" class="select-all-checkbox" />
-        <label for="selectAll">全选</label>
+    <div class="card" id="lessonSection" style="display: none;">
+      <div class="section-header">
+        <div class="section-title" id="lessonSectionTitle">课节列表</div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button id="backBtn" class="ghost small">返回</button>
+          <button id="processAllBtn" class="ghost small">处理全部课节</button>
+          <button id="downloadAllBtn" class="ghost small" style="display: none;">下载完整PDF</button>
+        </div>
       </div>
-      <div id="videoList" class="video-list"></div>
+      <div id="lessonList" class="lesson-list"></div>
     </div>
   </main>
 
   <script>
     const statusEl = document.getElementById("status");
     const courseListEl = document.getElementById("courseList");
-    const videoSectionEl = document.getElementById("videoSection");
-    const videoListEl = document.getElementById("videoList");
-    const selectAllEl = document.getElementById("selectAll");
-    const submitBtnEl = document.getElementById("submitBtn");
+    const lessonSectionEl = document.getElementById("lessonSection");
+    const lessonListEl = document.getElementById("lessonList");
     const refreshBtnEl = document.getElementById("refreshBtn");
     const semesterSelectEl = document.getElementById("semesterSelect");
+    const backBtnEl = document.getElementById("backBtn");
+    const processAllBtnEl = document.getElementById("processAllBtn");
+    const downloadAllBtnEl = document.getElementById("downloadAllBtn");
+    const lessonSectionTitleEl = document.getElementById("lessonSectionTitle");
 
     let selectedCourse = null;
-    let selectedVideos = new Set();
+    let selectedCourseName = null;
     let allCourses = [];
+    let currentLessons = [];
 
     async function api(path, method = "GET", body) {
       const res = await fetch(path, {
@@ -267,14 +296,12 @@
     function populateSemesterSelect(courses) {
       const semesters = [...new Set(courses.map(c => c.term).filter(t => t))];
       const sortedSemesters = sortSemesters(semesters);
-      
-      // 构建选项
+
       let optionsHtml = '<option value="">全部学期</option>' +
         sortedSemesters.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
-      
+
       semesterSelectEl.innerHTML = optionsHtml;
-      
-      // 默认选择排序最大的学期（除"全部学期"外）
+
       if (sortedSemesters.length > 0) {
         semesterSelectEl.value = sortedSemesters[0];
       }
@@ -282,24 +309,22 @@
 
     function sortSemesters(semesters) {
       return semesters.sort((a, b) => {
-        // 匹配学年和学期，格式如：25-26学年第2学期
         const matchA = a.match(/(\d{2})-(\d{2})学年.*?(第(\d+)学期)/);
         const matchB = b.match(/(\d{2})-(\d{2})学年.*?(第(\d+)学期)/);
-        
+
         if (!matchA || !matchB) {
           return a.localeCompare(b);
         }
-        
+
         const yearA = parseInt(matchA[1]);
         const yearB = parseInt(matchB[1]);
         const termA = parseInt(matchA[4]);
         const termB = parseInt(matchB[4]);
-        
+
         if (yearB !== yearA) {
-          return yearB - yearA; // 学年倒序，新学年在前
+          return yearB - yearA;
         }
-        
-        // 学期倒序：第2学期 > 第1学期 > 第3学期 > ...
+
         return termB - termA;
       });
     }
@@ -312,7 +337,7 @@
         return;
       }
       courseListEl.innerHTML = filtered.map(course => `
-        <div class="course-item" data-course-id="${course.key}">
+        <div class="course-item" data-course-id="${course.key}" data-course-name="${esc(course.name)}">
           <div class="course-title">${esc(course.name)}</div>
           <div class="course-info">学期: ${course.term}</div>
         </div>
@@ -331,100 +356,95 @@
     async function handleCourseSelect(e) {
       const courseItem = e.currentTarget;
       const courseId = courseItem.dataset.courseId;
+      const courseName = courseItem.dataset.courseName;
 
-      document.querySelectorAll(".course-item").forEach(item => item.classList.remove("selected"));
-      courseItem.classList.add("selected");
       selectedCourse = courseId;
+      selectedCourseName = courseName;
 
-      videoSectionEl.style.display = "none";
-      videoListEl.innerHTML = '';
-      selectedVideos.clear();
-      submitBtnEl.disabled = true;
-
-      statusEl.textContent = "正在加载课程视频...";
+      statusEl.textContent = "正在加载课节列表...";
       statusEl.className = "status loading";
 
       try {
         const resp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos`);
-        if (resp.success && resp.videos && resp.videos.length > 0) {
-          videoListEl.innerHTML = resp.videos.map((video, index) => `
-            <div class="video-item">
-              <input type="checkbox" class="video-checkbox" id="video-${index}" data-video-id="${video.id}" />
-              <label for="video-${index}" class="video-title">${esc(video.title)}</label>
-              <span class="video-duration">${formatDuration(video.duration)}</span>
-            </div>
-          `).join("");
-
-          document.querySelectorAll(".video-checkbox").forEach(checkbox => {
-            checkbox.addEventListener("change", handleVideoSelect);
-          });
-
-          selectAllEl.checked = false;
-          videoSectionEl.style.display = "block";
-          statusEl.textContent = "";
-          statusEl.className = "status";
+        if (resp.success) {
+          currentLessons = resp.lessons || [];
+          renderLessonList(resp);
         } else {
-          videoSectionEl.style.display = "none";
-          statusEl.textContent = "该课程暂无视频";
-          statusEl.className = "status";
+          currentLessons = [];
+          renderLessonList({ lessons: [], total: 0, processed: 0 });
         }
       } catch (err) {
-        videoSectionEl.style.display = "none";
-        statusEl.textContent = "加载视频列表失败: " + err.message;
+        currentLessons = [];
+        statusEl.textContent = "加载课节列表失败: " + err.message;
         statusEl.className = "status error";
+        renderLessonList({ lessons: [], total: 0, processed: 0 });
       }
     }
 
-    function handleVideoSelect(e) {
-      const checkbox = e.currentTarget;
-      const videoId = checkbox.dataset.videoId;
+    function renderLessonList(resp) {
+      const lessons = resp.lessons || [];
+      const total = resp.total || 0;
+      const processed = resp.processed || 0;
+      const allProcessed = total > 0 && processed === total;
 
-      if (checkbox.checked) {
-        selectedVideos.add(videoId);
+      lessonSectionTitleEl.textContent = selectedCourseName || "课节列表";
+
+      if (lessons.length === 0) {
+        lessonListEl.innerHTML = '<div class="status">暂无课节信息，请点击"刷新课节列表"按钮获取</div>';
       } else {
-        selectedVideos.delete(videoId);
+        lessonListEl.innerHTML = lessons.map((lesson, index) => `
+          <div class="lesson-item ${lesson.is_processed ? 'processed' : ''}">
+            <div class="lesson-datetime">
+              <div class="lesson-date">${esc(lesson.date)}</div>
+              <div class="lesson-time">${esc(lesson.time)}</div>
+              <div class="lesson-day">${esc(lesson.day_of_week)}</div>
+            </div>
+            <div class="lesson-info">
+              <div class="lesson-title">第${index + 1}课</div>
+              <div class="lesson-status">${lesson.is_processed ? '已处理' : '未处理'}</div>
+            </div>
+            <div class="lesson-actions">
+              <button class="ghost small" onclick="handleProcessLesson('${lesson.id}')">提交处理</button>
+              ${lesson.is_processed ? '<button class="ghost small" onclick="handleDownloadPdf(\'' + lesson.id + '\')">下载PDF</button>' : ''}
+            </div>
+          </div>
+        `).join("");
       }
 
-      const totalVideos = document.querySelectorAll(".video-checkbox").length;
-      selectAllEl.checked = selectedVideos.size === totalVideos && totalVideos > 0;
-      submitBtnEl.disabled = selectedVideos.size === 0;
+      downloadAllBtnEl.style.display = allProcessed ? 'inline-block' : 'none';
+      statusEl.textContent = "";
+      statusEl.className = "status";
+
+      document.getElementById("courseSection").style.display = "none";
+      lessonSectionEl.style.display = "block";
+      refreshBtnEl.textContent = "刷新课节列表";
     }
 
-    selectAllEl.addEventListener("change", () => {
-      document.querySelectorAll(".video-checkbox").forEach(checkbox => {
-        checkbox.checked = selectAllEl.checked;
-        const videoId = checkbox.dataset.videoId;
-        if (selectAllEl.checked) {
-          selectedVideos.add(videoId);
-        } else {
-          selectedVideos.delete(videoId);
-        }
-      });
-      submitBtnEl.disabled = !selectAllEl.checked;
-    });
+    function handleBack() {
+      selectedCourse = null;
+      selectedCourseName = null;
+      currentLessons = [];
 
-    function formatDuration(seconds) {
-      if (!seconds || isNaN(seconds)) return "未知";
-      const h = Math.floor(seconds / 3600);
-      const m = Math.floor((seconds % 3600) / 60);
-      const s = seconds % 60;
-      if (h > 0) {
-        return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-      }
-      return `${m}:${s.toString().padStart(2, '0')}`;
+      lessonSectionEl.style.display = "none";
+      document.getElementById("courseSection").style.display = "block";
+      refreshBtnEl.textContent = "刷新课程列表";
     }
 
-    async function refreshCourseList() {
+    backBtnEl.addEventListener("click", handleBack);
+
+    async function refreshLessonList() {
+      if (!selectedCourse) return;
+
       refreshBtnEl.disabled = true;
-      statusEl.textContent = "正在刷新课程列表...";
+      statusEl.textContent = "正在刷新课节列表...";
       statusEl.className = "status loading";
 
       try {
-        const resp = await api("/api/pkuvideofullclass/courses/refresh", "POST");
+        const resp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/refresh`, "POST");
         if (resp.success) {
-          statusEl.textContent = resp.message;
+          statusEl.textContent = resp.message || "刷新成功";
           statusEl.className = "status success";
-          loadCourseList(); // 刷新后重新加载课程列表
+          await handleCourseSelect({ currentTarget: { dataset: { courseId: selectedCourse, courseName: selectedCourseName } } });
         } else {
           statusEl.textContent = resp.message || "刷新失败";
           statusEl.className = "status error";
@@ -437,38 +457,49 @@
       }
     }
 
-    refreshBtnEl.addEventListener("click", refreshCourseList);
+    function handleProcessLesson(lessonId) {
+      statusEl.textContent = "提交处理功能开发中...";
+      statusEl.className = "status";
+    }
 
-    document.getElementById("goAppBtn").addEventListener("click", () => {
-      location.href = "/app";
+    function handleDownloadPdf(lessonId) {
+      statusEl.textContent = "下载PDF功能开发中...";
+      statusEl.className = "status";
+    }
+
+    refreshBtnEl.addEventListener("click", () => {
+      if (selectedCourse) {
+        refreshLessonList();
+      } else {
+        refreshCourseList();
+      }
     });
 
-    submitBtnEl.addEventListener("click", async () => {
-      if (!selectedCourse || selectedVideos.size === 0) return;
-
-      statusEl.textContent = "正在提交批量任务...";
+    async function refreshCourseList() {
+      refreshBtnEl.disabled = true;
+      statusEl.textContent = "正在刷新课程列表...";
       statusEl.className = "status loading";
-      submitBtnEl.disabled = true;
 
       try {
-        const resp = await api("/api/pkuvideofullclass/batch-submit", "POST", {
-          course_id: selectedCourse,
-          video_ids: Array.from(selectedVideos)
-        });
-
+        const resp = await api("/api/pkuvideofullclass/courses/refresh", "POST");
         if (resp.success) {
-          statusEl.textContent = "批量任务提交成功！任务ID: " + resp.job_id;
+          statusEl.textContent = resp.message;
           statusEl.className = "status success";
+          loadCourseList();
         } else {
-          statusEl.textContent = resp.message || "提交失败";
+          statusEl.textContent = resp.message || "刷新失败";
           statusEl.className = "status error";
         }
       } catch (err) {
-        statusEl.textContent = "提交失败: " + err.message;
+        statusEl.textContent = "刷新失败: " + err.message;
         statusEl.className = "status error";
       } finally {
-        submitBtnEl.disabled = selectedVideos.size === 0;
+        refreshBtnEl.disabled = false;
       }
+    }
+
+    document.getElementById("goAppBtn").addEventListener("click", () => {
+      location.href = "/app";
     });
 
     checkLogin();
