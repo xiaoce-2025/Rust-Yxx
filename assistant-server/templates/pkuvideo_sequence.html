@@ -496,9 +496,48 @@
       }
     }
 
-    function handleDownloadPdf(lessonId) {
-      statusEl.textContent = "下载PDF功能开发中...";
-      statusEl.className = "status";
+    async function handleDownloadPdf(lessonId) {
+      statusEl.textContent = "正在生成PDF...";
+      statusEl.className = "status processing";
+      
+      try {
+        const response = await fetch(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/download-pdf`, {
+          method: 'GET',
+          credentials: 'include'
+        });
+        
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.message || '下载失败');
+        }
+        
+        const blob = await response.blob();
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let filename = 'lecture_notes.pdf';
+        
+        if (contentDisposition) {
+          const match = contentDisposition.match(/filename="?([^"]+)"?/);
+          if (match) {
+            filename = match[1];
+          }
+        }
+        
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        
+        statusEl.textContent = "PDF下载完成";
+        statusEl.className = "status success";
+      } catch (error) {
+        console.error('下载PDF失败:', error);
+        statusEl.textContent = "下载PDF失败: " + error.message;
+        statusEl.className = "status error";
+      }
     }
 
     refreshBtnEl.addEventListener("click", () => {
