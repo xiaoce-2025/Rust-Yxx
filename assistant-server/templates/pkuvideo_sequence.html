@@ -463,9 +463,37 @@
       }
     }
 
-    function handleProcessLesson(lessonId) {
-      statusEl.textContent = "提交处理功能开发中...";
-      statusEl.className = "status";
+    async function handleProcessLesson(lessonId) {
+      if (!selectedCourse) {
+        statusEl.textContent = "请先选择课程";
+        statusEl.className = "status error";
+        return;
+      }
+
+      statusEl.textContent = "正在获取下载链接...";
+      statusEl.className = "status loading";
+
+      try {
+        const resp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/process`, "POST");
+        
+        if (resp.success) {
+          statusEl.textContent = resp.message || "下载链接已获取";
+          statusEl.className = "status";
+          
+          const lessonIndex = currentLessons.findIndex(l => l.id === lessonId);
+          if (lessonIndex !== -1 && resp.video_url) {
+            currentLessons[lessonIndex].video_url = resp.video_url;
+            currentLessons[lessonIndex].is_processed = true;
+            renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+          }
+        } else {
+          statusEl.textContent = resp.message || "获取下载链接失败";
+          statusEl.className = "status error";
+        }
+      } catch (err) {
+        statusEl.textContent = "获取下载链接失败: " + err.message;
+        statusEl.className = "status error";
+      }
     }
 
     function handleDownloadPdf(lessonId) {

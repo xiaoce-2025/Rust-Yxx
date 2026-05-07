@@ -185,6 +185,27 @@ pub fn fetch_with_cookie(cookie_file: &str, user_agent: &str, url: &str) -> Resu
     run_curl_text(&args)
 }
 
+pub fn fetch_with_cookie_redirect(cookie_file: &str, user_agent: &str, url: &str) -> Result<String, String> {
+    let args = vec![
+        "-sS".to_string(),
+        "-k".to_string(),
+        "-L".to_string(),
+        "-A".to_string(),
+        user_agent.to_string(),
+        "-c".to_string(),
+        cookie_file.to_string(),
+        "-b".to_string(),
+        cookie_file.to_string(),
+        "-o".to_string(),
+        "/dev/null".to_string(),
+        "-w".to_string(),
+        "%{url_effective}".to_string(),
+        url.to_string(),
+    ];
+
+    run_curl_text(&args)
+}
+
 pub async fn download_with_pku_cookie(
     url: &str,
     username: &str,

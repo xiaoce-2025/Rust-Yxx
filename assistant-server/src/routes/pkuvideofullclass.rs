@@ -9,7 +9,7 @@ use crate::{
     app_state::AppState,
     auth::CurrentUser,
     error::ApiError,
-    services::{course_parser, course_storage, lesson_parser, lesson_storage, pkulogin},
+    services::{course_parser, course_storage, lesson_parser, lesson_storage, pkulogin, video_downloader},
 };
 
 const IAAA_PUBLIC_KEY_URL: &str = "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do";
@@ -68,6 +68,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideofullclass/courses/:course_id/videos", get(get_course_videos))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/refresh", post(refresh_lessons))
         .route("/api/pkuvideofullclass/batch-submit", post(batch_submit))
+        .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/process", post(process_lesson))
 }
 
 async fn get_current_iaaa_key(
@@ -425,5 +426,102 @@ async fn batch_submit(
     Ok(Json(serde_json::json!({
         "success": true,
         "job_id": "mock-job-id"
+    })))
+}
+
+async fn process_lesson(
+    State(state): State<AppState>,
+    axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
+    current_user: CurrentUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
+        tracing::error!("用户不存在: {}", current_user.id);
+        ApiError::Internal("用户不存在".to_string())
+    })?;
+
+    let username = user.email.split('@').next().ok_or_else(|| {
+        tracing::error!("邮箱格式无效: {}", user.email);
+        ApiError::BadRequest("无效的邮箱格式".to_string())
+    })?;
+
+    let password = match user.iaaa_encrypted_password {
+        Some(p) => p,
+        None => {
+            tracing::warn!("用户未绑定IAAA账号: {}", current_user.id);
+            return Err(ApiError::BadRequest("未绑定IAAA账号，请先绑定".to_string()));
+        }
+    };
+
+    let mut lessons = lesson_storage::load_lessons(username, &course_id)
+        .map_err(|e| {
+            tracing::error!("加载课节信息失败: {}", e);
+            ApiError::Internal(format!("加载课节信息失败: {}", e))
+        })?;
+
+    let lesson_index = lessons.iter().position(|l| l.id == video_id);
+
+    if lesson_index.is_none() {
+        return Err(ApiError::BadRequest("课节不存在".to_string()));
+    }
+
+    let lesson_index = lesson_index.unwrap();
+    let mut is_newly_processed = false;
+    
+    if lessons[lesson_index].video_url.is_empty() {
+        tracing::info!("课节 {} 下载链接为空，开始获取播放链接并刷新课节列表", video_id);
+
+        let login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
+            .map_err(|e| {
+                tracing::error!("IAAA登录失败: {}", e);
+                ApiError::BadRequest(format!("IAAA登录失败: {}", e))
+            })?;
+
+        let cookie_file_str = login_result.cookie_file.to_string_lossy().to_string();
+
+        if !lessons[lesson_index].play_url.is_empty() {
+            tracing::info!("尝试获取下载链接，播放链接: {}", lessons[lesson_index].play_url);
+            
+            match video_downloader::get_video_download_url(&lessons[lesson_index].play_url, &cookie_file_str, &login_result.user_agent).await {
+                Ok(download_url) => {
+                    lessons[lesson_index].video_url = download_url;
+                    lessons[lesson_index].is_processed = true;
+                    is_newly_processed = true;
+                    tracing::info!("成功获取下载链接: {}", lessons[lesson_index].video_url);
+                }
+                Err(e) => {
+                    tracing::warn!("获取下载链接失败: {}", e);
+                    return Err(ApiError::Internal(format!("获取下载链接失败: {}", e)));
+                }
+            }
+        } else {
+            tracing::warn!("课节 {} 播放链接为空，无法获取下载链接", video_id);
+            return Err(ApiError::BadRequest("播放链接为空，请先刷新课节列表".to_string()));
+        }
+
+        lesson_storage::save_lessons(username, &course_id, &lessons)
+            .map_err(|e| {
+                tracing::error!("保存课节信息失败: {}", e);
+                ApiError::Internal(format!("保存课节信息失败: {}", e))
+            })?;
+    } else {
+        tracing::info!("课节 {} 已有下载链接，跳过获取", video_id);
+    }
+
+    let lesson = &lessons[lesson_index];
+    let message = if is_newly_processed {
+        "下载链接已获取"
+    } else if !lesson.video_url.is_empty() {
+        "下载链接已存在"
+    } else {
+        "下载链接获取失败"
+    };
+    
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": message,
+        "video_id": video_id,
+        "video_url": lesson.video_url,
+        "play_url": lesson.play_url,
+        "is_processed": lesson.is_processed
     })))
 }

@@ -6,4 +6,5 @@ pub mod login_cache;
 pub mod pkuvideo;
 pub mod pkulogin;
 pub mod scheduler;
+pub mod video_downloader;
 pub mod wechat;
