@@ -78,6 +78,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideofullclass/batch-submit", post(batch_submit))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/process", post(process_lesson))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/download-pdf", get(download_lesson_pdf))
+        .route("/api/pkuvideofullclass/courses/:course_id/download-pdf", get(download_course_pdf))
 }
 
 async fn get_current_iaaa_key(
@@ -860,6 +861,227 @@ async fn download_lesson_pdf(
 
     // 构建文件名
     let pdf_filename = format!("{}.pdf", tex_filename.replace(".tex", ""));
+
+    // 构建响应
+    let response = axum::response::Response::builder()
+        .header("Content-Type", "application/pdf")
+        .header("Content-Disposition", format!("attachment; filename=\"{}\"", pdf_filename))
+        .header("Content-Length", pdf_data.len())
+        .body(axum::body::Body::from(pdf_data))
+        .map_err(|e| ApiError::Internal(format!("构建响应失败: {}", e)))?;
+
+    // 临时目录会在函数结束时自动删除
+    Ok(response)
+}
+
+async fn download_course_pdf(
+    State(state): State<AppState>,
+    axum::extract::Path(course_id): axum::extract::Path<String>,
+    current_user: CurrentUser,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
+        tracing::error!("用户不存在: {}", current_user.id);
+        ApiError::Internal("用户不存在".to_string())
+    })?;
+
+    let username = user.email.split('@').next().ok_or_else(|| {
+        tracing::error!("邮箱格式无效: {}", user.email);
+        ApiError::BadRequest("无效的邮箱格式".to_string())
+    })?;
+
+    // 加载课节信息
+    let lessons = lesson_storage::load_lessons(username, &course_id)
+        .map_err(|e| {
+            tracing::error!("加载课节信息失败: {}", e);
+            ApiError::Internal(format!("加载课节信息失败: {}", e))
+        })?;
+
+    // 筛选已处理的课节（有tex文件）
+    let mut processed_lessons: Vec<&LessonInfo> = lessons.iter()
+        .filter(|l| l.tex_filename.is_some())
+        .collect();
+
+    if processed_lessons.is_empty() {
+        return Err(ApiError::BadRequest("没有已处理的课节".to_string()));
+    }
+
+    // 按时间先后排序（日期+时间）
+    processed_lessons.sort_by(|a, b| {
+        let a_datetime = format!("{} {}", a.date, a.time);
+        let b_datetime = format!("{} {}", b.date, b.time);
+        a_datetime.cmp(&b_datetime)
+    });
+
+    // 获取课程信息
+    let courses = course_storage::load_courses(username)
+        .map_err(|e| {
+            tracing::error!("加载课程信息失败: {}", e);
+            ApiError::Internal(format!("加载课程信息失败: {}", e))
+        })?;
+
+    let course_name = courses.iter()
+        .find(|c| c.key == course_id)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "未知课程".to_string());
+
+    // 创建临时目录
+    let temp_dir = tempdir::TempDir::new("pkuvideo_course_pdf").map_err(|e| {
+        tracing::error!("创建临时目录失败: {}", e);
+        ApiError::Internal(format!("创建临时目录失败: {}", e))
+    })?;
+    let temp_dir_path = temp_dir.path();
+    tracing::info!("创建临时编译目录: {:?}", temp_dir_path);
+
+    // 复制elegantbook模板文件到临时目录
+    let template_cls = std::path::Path::new("./data/templates/elegantbook/elegantbook.cls");
+    let template_cls_abs = template_cls.canonicalize().map_err(|e| {
+        tracing::error!("无法获取模板文件绝对路径: {}", e);
+        ApiError::Internal(format!("无法获取模板文件绝对路径: {}", e))
+    })?;
+
+    if !template_cls_abs.exists() {
+        return Err(ApiError::Internal(format!("模板文件不存在: {:?}", template_cls_abs)));
+    }
+
+    tokio::fs::copy(&template_cls_abs, temp_dir_path.join("elegantbook.cls")).await.map_err(|e| {
+        tracing::error!("复制模板文件失败: {}", e);
+        ApiError::Internal(format!("复制模板文件失败: {}", e))
+    })?;
+    tracing::info!("已复制elegantbook模板文件");
+
+    // 构建完整的LaTeX文档内容
+    let mut full_content = String::new();
+    
+    // 封面和目录部分 - 使用elegantbook模板
+    full_content.push_str(r#"\documentclass[lang=cn,10pt,scheme=chinese,a4paper]{elegantbook}
+
+\title{"#);
+    full_content.push_str(&course_name);
+    full_content.push_str(r#"}
+\author{严小希}
+\date{}
+
+\begin{document}
+
+\mainmatter
+
+\tableofcontents
+
+"#);
+
+    // 添加各个课节内容
+    for lesson in processed_lessons.iter() {
+        if let Some(tex_filename) = &lesson.tex_filename {
+            let tex_path = PathBuf::from("./course_data")
+                .join(username)
+                .join(&course_id)
+                .join(tex_filename);
+            
+            match tokio::fs::read_to_string(&tex_path).await {
+                Ok(content) => {
+                    // 在\chapter{标题}的末尾添加日期
+                    let modified_content = if let Some(chapter_start) = content.find("\\chapter{") {
+                        let after_chapter = chapter_start + 9; // 跳过 "\\chapter{"
+                        if let Some(close_brace) = content[after_chapter..].find("}") {
+                            let insert_pos = after_chapter + close_brace;
+                            let mut result = content.clone();
+                            result.insert_str(insert_pos, &format!(" ({})", lesson.date));
+                            result
+                        } else {
+                            content
+                        }
+                    } else {
+                        content
+                    };
+                    full_content.push_str(&modified_content);
+                    full_content.push_str("\n");
+                }
+                Err(e) => {
+                    tracing::warn!("读取课节tex文件失败: {} - {}", tex_path.display(), e);
+                }
+            }
+        }
+    }
+
+    // 文档结束
+    full_content.push_str("\n\\end{document}\n");
+
+    // 将完整内容写入临时文件
+    let full_tex_path = temp_dir_path.join("full_document.tex");
+    tokio::fs::write(&full_tex_path, &full_content).await.map_err(|e| {
+        tracing::error!("写入tex文件失败: {}", e);
+        ApiError::Internal(format!("写入tex文件失败: {}", e))
+    })?;
+
+    // 编译PDF - xelatex需要多次运行才能完成交叉引用和目录生成
+    let pdf_path = temp_dir_path.join("full_document.pdf");
+    
+    // 将路径转换为使用正斜杠，确保跨平台兼容性
+    let full_tex_path_str = {
+        let s = full_tex_path.to_string_lossy();
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        s.replace('\\', "/")
+    };
+    
+    let temp_dir_str = {
+        let s = temp_dir_path.to_string_lossy();
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        s.replace('\\', "/")
+    };
+    
+    for pass in 1..=3 {
+        tracing::info!("xelatex编译第{}次...", pass);
+        
+        let result = tokio::process::Command::new("xelatex")
+            .arg("-interaction=nonstopmode")
+            .arg("-output-directory")
+            .arg(&temp_dir_str)
+            .arg(&full_tex_path_str)
+            .current_dir(temp_dir_path)
+            .output()
+            .await;
+
+        match result {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let exit_code = output.status.code();
+                
+                tracing::info!("xelatex第{}次编译完成 - exit_code: {:?}", pass, exit_code);
+                
+                // 检查PDF是否已生成（即使exit code非0也可能生成了PDF）
+                if pdf_path.exists() {
+                    tracing::info!("xelatex第{}次编译后PDF已生成: {:?}", pass, pdf_path);
+                } else {
+                    tracing::warn!("xelatex第{}次编译后PDF尚未生成", pass);
+                    
+                    // 如果exit code表示真正失败（非0且不是因警告），才返回错误
+                    if !output.status.success() {
+                        tracing::error!("xelatex第{}次编译失败 - exit_code: {:?}, stdout: {}, stderr: {}", 
+                            pass, exit_code, stdout, stderr);
+                        return Err(ApiError::Internal(format!("PDF编译失败 (第{}次): exit_code={:?}, {}", pass, exit_code, stderr)));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("执行xelatex失败: {}", e);
+                return Err(ApiError::Internal(format!("执行xelatex失败: {}", e)));
+            }
+        }
+    }
+
+    // 检查PDF是否生成成功
+    if !pdf_path.exists() {
+        return Err(ApiError::Internal("PDF生成失败，文件不存在".to_string()));
+    }
+
+    // 使用tokio::fs读取PDF内容
+    let pdf_data = tokio::fs::read(&pdf_path)
+        .await
+        .map_err(|e| ApiError::Internal(format!("读取PDF文件失败: {}", e)))?;
+
+    // 构建文件名
+    let pdf_filename = format!("{}_{}.pdf", course_id, course_name.replace(|c: char| !c.is_alphanumeric(), "_"));
 
     // 构建响应
     let response = axum::response::Response::builder()

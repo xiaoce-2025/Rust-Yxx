@@ -540,6 +540,8 @@
       }
     }
 
+    downloadAllBtnEl.addEventListener("click", handleDownloadCoursePdf);
+
     refreshBtnEl.addEventListener("click", () => {
       if (selectedCourse) {
         refreshLessonList();
@@ -547,6 +549,56 @@
         refreshCourseList();
       }
     });
+
+    async function handleDownloadCoursePdf() {
+      if (!selectedCourse) {
+        statusEl.textContent = "请先选择课程";
+        statusEl.className = "status error";
+        return;
+      }
+
+      statusEl.textContent = "正在生成完整PDF...";
+      statusEl.className = "status loading";
+
+      try {
+        const response = await fetch(`/api/pkuvideofullclass/courses/${selectedCourse}/download-pdf`, {
+          method: 'GET',
+          credentials: 'include'
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.message || '下载失败');
+        }
+
+        const blob = await response.blob();
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let filename = 'course_full.pdf';
+
+        if (contentDisposition) {
+          const match = contentDisposition.match(/filename="?([^"]+)"?/);
+          if (match) {
+            filename = match[1];
+          }
+        }
+
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+
+        statusEl.textContent = "PDF下载完成";
+        statusEl.className = "status success";
+      } catch (error) {
+        console.error('下载完整PDF失败:', error);
+        statusEl.textContent = "下载完整PDF失败: " + error.message;
+        statusEl.className = "status error";
+      }
+    }
 
     async function refreshCourseList() {
       refreshBtnEl.disabled = true;
