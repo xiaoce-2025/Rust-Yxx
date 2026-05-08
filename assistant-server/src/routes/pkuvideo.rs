@@ -475,6 +475,7 @@ pub async fn run_job_pipeline(
     pku_auth_one: String,
     pku_auth_two: String,
 ) -> Result<(), String> {
+    tracing::info!("run_job_pipeline 开始执行, job_id: {}", job_id);
     mark_job_running(&state, job_id).await;
 
     mark_step_running(&state, job_id, 0, "开始下载视频").await;

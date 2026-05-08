@@ -21,6 +21,7 @@ pub struct AppState {
     pub in_memory_sessions: Arc<RwLock<HashMap<Uuid, RuntimeWechatSession>>>,
     pub pkuvideo_jobs: Arc<RwLock<HashMap<Uuid, PkuVideoJob>>>,
     pub login_cache: Arc<LoginCache>,
+    pub processing_users: Arc<RwLock<HashMap<Uuid, ProcessingState>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +32,12 @@ pub struct RuntimeWechatSession {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProcessingState {
+    pub course_id: String,
+    pub started_at: DateTime<Utc>,
+}
+
 impl AppState {
     pub fn new(settings: Settings, store: Arc<FileStore>) -> Self {
         let wechat_service = WeChatService::new(settings.wechat.clone());
@@ -38,6 +45,8 @@ impl AppState {
         let pkuvideo_jobs = Arc::new(RwLock::new(HashMap::new()));
 
         let login_cache = Arc::new(LoginCache::new(10)); // 10分钟缓存
+
+        let processing_users = Arc::new(RwLock::new(HashMap::new()));
 
         Self {
             settings: Arc::new(settings),
@@ -47,6 +56,7 @@ impl AppState {
             in_memory_sessions: Arc::new(RwLock::new(HashMap::new())),
             pkuvideo_jobs,
             login_cache,
+            processing_users,
         }
     }
 

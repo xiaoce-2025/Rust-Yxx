@@ -239,6 +239,18 @@
     let selectedCourseName = null;
     let allCourses = [];
     let currentLessons = [];
+    let isProcessing = false;
+
+    function setProcessing(processing) {
+      isProcessing = processing;
+      document.querySelectorAll('button').forEach(btn => {
+        const id = btn.id;
+        // 允许刷新和返回按钮始终可用
+        if (id !== 'refreshBtn' && id !== 'backBtn' && id !== 'goAppBtn') {
+          btn.disabled = processing;
+        }
+      });
+    }
 
     async function api(path, method = "GET", body) {
       const res = await fetch(path, {
@@ -464,12 +476,18 @@
     }
 
     async function handleProcessLesson(lessonId) {
+      if (isProcessing) {
+        statusEl.textContent = "请等待当前操作完成";
+        statusEl.className = "status error";
+        return;
+      }
       if (!selectedCourse) {
         statusEl.textContent = "请先选择课程";
         statusEl.className = "status error";
         return;
       }
 
+      setProcessing(true);
       statusEl.textContent = "正在获取下载链接...";
       statusEl.className = "status loading";
 
@@ -493,10 +511,19 @@
       } catch (err) {
         statusEl.textContent = "获取下载链接失败: " + err.message;
         statusEl.className = "status error";
+      } finally {
+        setProcessing(false);
       }
     }
 
     async function handleDownloadPdf(lessonId) {
+      if (isProcessing) {
+        statusEl.textContent = "请等待当前操作完成";
+        statusEl.className = "status error";
+        return;
+      }
+      
+      setProcessing(true);
       statusEl.textContent = "正在生成PDF...";
       statusEl.className = "status processing";
       
@@ -537,6 +564,8 @@
         console.error('下载PDF失败:', error);
         statusEl.textContent = "下载PDF失败: " + error.message;
         statusEl.className = "status error";
+      } finally {
+        setProcessing(false);
       }
     }
 
@@ -551,12 +580,18 @@
     });
 
     async function handleDownloadCoursePdf() {
+      if (isProcessing) {
+        statusEl.textContent = "请等待当前操作完成";
+        statusEl.className = "status error";
+        return;
+      }
       if (!selectedCourse) {
         statusEl.textContent = "请先选择课程";
         statusEl.className = "status error";
         return;
       }
 
+      setProcessing(true);
       statusEl.textContent = "正在生成完整PDF...";
       statusEl.className = "status loading";
 
@@ -597,6 +632,8 @@
         console.error('下载完整PDF失败:', error);
         statusEl.textContent = "下载完整PDF失败: " + error.message;
         statusEl.className = "status error";
+      } finally {
+        setProcessing(false);
       }
     }
 
