@@ -244,6 +244,13 @@
 \end{solution}
 ```
 
+**重点说明**
+latex需要用下面的textbf命令加粗，而不是用md文件中的**。再latex文件中不要出现*字符（数学公式等必须包含的除外）
+```latex
+\textbf{加粗字体}：正常内容
+```
+
+
 ### 代码块规范
 ```latex
 \begin{lstlisting}[language=Python]

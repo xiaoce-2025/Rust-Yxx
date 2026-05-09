@@ -117,9 +117,12 @@ pub async fn run_pipeline(
     extract_notes(&transcript_path, &notes_path, settings)
         .await
         .map_err(|e| format!("step=3;{e}"))?;
-    compile_pdf(&notes_path, &pdf_path)
-        .await
-        .map_err(|e| format!("step=4;{e}"))?;
+
+    // PDF 编译失败不影响任务完成，只要 tex 文件生成成功即可
+    let pdf_result = compile_pdf(&notes_path, &pdf_path).await;
+    if let Err(ref e) = pdf_result {
+        eprintln!("PDF 编译失败，但任务继续执行: {}", e);
+    }
 
     // 将路径转换为相对路径（相对于 base_dir）
     let transcript_rel = transcript_path.strip_prefix(&base_dir)
@@ -128,14 +131,20 @@ pub async fn run_pipeline(
     let notes_rel = notes_path.strip_prefix(&base_dir)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| notes_path.to_string_lossy().to_string());
-    let pdf_rel = pdf_path.strip_prefix(&base_dir)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| pdf_path.to_string_lossy().to_string());
+    
+    // PDF 路径只有在编译成功时才返回
+    let pdf_rel = if pdf_result.is_ok() && pdf_path.exists() {
+        pdf_path.strip_prefix(&base_dir)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| pdf_path.to_string_lossy().to_string())
+    } else {
+        "".to_string()
+    };
 
     Ok((
         Some(transcript_rel),
         Some(notes_rel),
-        Some(pdf_rel),
+        if pdf_rel.is_empty() { None } else { Some(pdf_rel) },
     ))
 }
 
