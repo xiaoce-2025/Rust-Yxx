@@ -5,6 +5,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -21,6 +22,7 @@ use crate::{
 use lesson_storage::LessonInfo;
 
 const IAAA_PUBLIC_KEY_URL: &str = "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do";
+const MAX_VIDEO_LIST_PAGES: usize = 100;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct IaaaPublicKeyResponse {
@@ -322,8 +324,26 @@ async fn refresh_lessons(
     let mut all_lessons = Vec::new();
     let mut current_url = format!("https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/videoList.action?course_id={}&mode=view", course_id);
     let mut page_num = 1;
+    let mut visited_urls = HashSet::new();
 
     loop {
+        if page_num > MAX_VIDEO_LIST_PAGES {
+            tracing::error!(
+                "刷新课节分页超过上限，课程: {}, 已抓取页数: {}",
+                course_id,
+                page_num - 1
+            );
+            return Err(ApiError::Internal(format!(
+                "课节分页异常：超过最大页数限制({})，已终止刷新",
+                MAX_VIDEO_LIST_PAGES
+            )));
+        }
+
+        if !visited_urls.insert(current_url.clone()) {
+            tracing::error!("检测到重复分页URL，疑似循环跳转: {}", current_url);
+            return Err(ApiError::Internal("课节分页异常：检测到重复页面跳转，已终止刷新".to_string()));
+        }
+
         tracing::info!("开始访问视频列表页面 {}: {}", page_num, current_url);
 
         let page_content = match pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, &current_url) {
@@ -335,21 +355,32 @@ async fn refresh_lessons(
             }
         };
 
+        if page_num == 1 {
+            let looks_like_video_page = page_content.contains("bb-streammedia-hqy-BBLEARN")
+                || page_content.contains("listContainer_row:");
+            if !looks_like_video_page {
+                tracing::warn!(
+                    "首屏内容疑似非视频页，课程: {}，当前URL: {}，可能发生了跳转或权限拦截",
+                    course_id,
+                    current_url
+                );
+            }
+        }
+
         let mut lessons = lesson_parser::parse_lessons(&page_content, &course_id);
         all_lessons.append(&mut lessons);
 
-        if !lesson_parser::has_next_page(&page_content) {
-            tracing::info!("已到达最后一页，共获取 {} 个课节", all_lessons.len());
-            break;
-        }
-
         match lesson_parser::get_next_page_url(&page_content) {
             Some(next_url) => {
+                if next_url == current_url {
+                    tracing::error!("下一页URL与当前页相同，疑似循环跳转: {}", next_url);
+                    return Err(ApiError::Internal("课节分页异常：下一页地址重复，已终止刷新".to_string()));
+                }
                 current_url = next_url;
                 page_num += 1;
             }
             None => {
-                tracing::warn!("检测到有下一页，但无法获取下一页URL");
+                tracing::info!("已到达最后一页，共获取 {} 个课节", all_lessons.len());
                 break;
             }
         }

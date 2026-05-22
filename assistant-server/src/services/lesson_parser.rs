@@ -63,9 +63,7 @@ pub fn parse_lessons(html: &str, course_id: &str) -> Vec<LessonInfo> {
 }
 
 pub fn has_next_page(html: &str) -> bool {
-    let document = Html::parse_document(html);
-    let next_page_selector = Selector::parse("a#listContainer_nextpage_bot").unwrap();
-    document.select(&next_page_selector).next().is_some()
+    get_next_page_url(html).is_some()
 }
 
 pub fn get_next_page_url(html: &str) -> Option<String> {
@@ -73,12 +71,54 @@ pub fn get_next_page_url(html: &str) -> Option<String> {
     let next_page_selector = Selector::parse("a#listContainer_nextpage_bot").unwrap();
     
     if let Some(next_page_link) = document.select(&next_page_selector).next() {
+        if let Some(class_name) = next_page_link.value().attr("class") {
+            if class_name.split_whitespace().any(|c| c.eq_ignore_ascii_case("disabled")) {
+                return None;
+            }
+        }
+
+        if let Some(aria_disabled) = next_page_link.value().attr("aria-disabled") {
+            if aria_disabled.eq_ignore_ascii_case("true") {
+                return None;
+            }
+        }
+
         if let Some(href) = next_page_link.value().attr("href") {
-            return Some(format!("https://course.pku.edu.cn{}", href));
+            let href = href.trim();
+
+            if href.is_empty() || href == "#" || href.to_ascii_lowercase().starts_with("javascript:") {
+                return None;
+            }
+
+            if href.starts_with("http://") || href.starts_with("https://") {
+                if is_video_list_url(href) {
+                    return Some(href.to_string());
+                }
+                return None;
+            }
+
+            if href.starts_with('/') {
+                let full_url = format!("https://course.pku.edu.cn{}", href);
+                if is_video_list_url(&full_url) {
+                    return Some(full_url);
+                }
+                return None;
+            }
+
+            let full_url = format!("https://course.pku.edu.cn/{}", href.trim_start_matches('/'));
+            if is_video_list_url(&full_url) {
+                return Some(full_url);
+            }
+            return None;
         }
     }
     
     None
+}
+
+fn is_video_list_url(url: &str) -> bool {
+    // 只接受视频课节列表分页URL，避免误跟随到课程导航/工具页造成循环。
+    url.contains("/webapps/bb-streammedia-hqy-BBLEARN/videoList.action")
 }
 
 pub fn assign_lesson_numbers(lessons: &mut Vec<LessonInfo>) {
