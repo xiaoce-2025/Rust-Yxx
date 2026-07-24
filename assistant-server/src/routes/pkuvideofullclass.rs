@@ -79,6 +79,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideofullclass/courses/:course_id/videos/refresh", post(refresh_lessons))
         .route("/api/pkuvideofullclass/batch-submit", post(batch_submit))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/process", post(process_lesson))
+        .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/process-status", get(get_process_status))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/download-pdf", get(download_lesson_pdf))
         .route("/api/pkuvideofullclass/courses/:course_id/download-pdf", get(download_course_pdf))
 }
@@ -521,7 +522,8 @@ async fn process_lesson(
         });
     }
 
-    // 使用 match 确保无论成功还是失败都清理处理状态
+    // 以下为同步准备阶段：获取下载链接、提交任务
+    // 如果此阶段失败，需要手动清理 processing_users
     let result = async {
         let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
             tracing::error!("用户不存在: {}", current_user.id);
@@ -531,7 +533,7 @@ async fn process_lesson(
         let username = user.email.split('@').next().ok_or_else(|| {
             tracing::error!("邮箱格式无效: {}", user.email);
             ApiError::BadRequest("无效的邮箱格式".to_string())
-        })?;
+        })?.to_string();
 
         let password = match user.iaaa_encrypted_password {
             Some(p) => p,
@@ -541,7 +543,7 @@ async fn process_lesson(
             }
         };
 
-        let mut lessons = lesson_storage::load_lessons(username, &course_id)
+        let mut lessons = lesson_storage::load_lessons(&username, &course_id)
             .map_err(|e| {
                 tracing::error!("加载课节信息失败: {}", e);
                 ApiError::Internal(format!("加载课节信息失败: {}", e))
@@ -555,7 +557,7 @@ async fn process_lesson(
 
         let lesson_index = lesson_index.unwrap();
         let mut is_newly_processed = false;
-        
+
         // 步骤1: 获取下载链接（如果为空）
         if lessons[lesson_index].video_url.is_empty() {
             tracing::info!("课节 {} 下载链接为空，开始获取下载链接", video_id);
@@ -570,7 +572,7 @@ async fn process_lesson(
 
             if !lessons[lesson_index].play_url.is_empty() {
                 tracing::info!("尝试获取下载链接，播放链接: {}", lessons[lesson_index].play_url);
-                
+
                 match video_downloader::get_video_download_url(&lessons[lesson_index].play_url, &cookie_file_str, &login_result.user_agent).await {
                     Ok(download_url) => {
                         lessons[lesson_index].video_url = download_url;
@@ -587,7 +589,7 @@ async fn process_lesson(
                 return Err(ApiError::BadRequest("播放链接为空，请先刷新课节列表".to_string()));
             }
 
-            lesson_storage::save_lessons(username, &course_id, &lessons)
+            lesson_storage::save_lessons(&username, &course_id, &lessons)
                 .map_err(|e| {
                     tracing::error!("保存课节信息失败: {}", e);
                     ApiError::Internal(format!("保存课节信息失败: {}", e))
@@ -596,17 +598,15 @@ async fn process_lesson(
             tracing::info!("课节 {} 已有下载链接，跳过获取", video_id);
         }
 
-        // 保存需要返回的视频信息
         let video_url = lessons[lesson_index].video_url.clone();
-        let play_url = lessons[lesson_index].play_url.clone();
-        
+
         // 步骤2: 提交pkuvideo任务（不扣除限额）
         if video_url.is_empty() {
             return Err(ApiError::Internal("下载链接为空，无法提交任务".to_string()));
         }
 
         tracing::info!("提交pkuvideo任务，视频URL: {}", video_url);
-        
+
         let job_id = enqueue_job_without_limit(
             &state,
             current_user.id,
@@ -615,92 +615,96 @@ async fn process_lesson(
             &password,
         ).await?;
 
-        tracing::info!("任务提交成功，job_id: {}", job_id);
+        tracing::info!("任务提交成功，job_id: {}，启动后台后处理任务", job_id);
 
-        // 步骤3: 等待任务完成
-        tracing::info!("等待任务 {} 完成...", job_id);
-        let job_result = wait_for_job_completion(&state, job_id).await?;
-
-        if !job_result.success {
-            return Err(ApiError::Internal(format!("任务执行失败: {}", job_result.message)));
-        }
-
-        tracing::info!("任务 {} 执行完成", job_id);
-
-        // 步骤4: 复制.tex文件到course_data目录
-        let tex_filename = format!("{}_lesson_{}.tex", course_id, video_id);
-        let course_data_dir = format!("./course_data/{}/{}", username, course_id);
-        
-        if let Some(notes_path) = &job_result.notes_path {
-            // notes_path是相对于./data/pkuvideo_jobs/的相对路径，需要转换为完整路径
-            let base_dir = PathBuf::from("./data/pkuvideo_jobs");
-            let src_path = base_dir.join(notes_path);
-            
-            tracing::info!("尝试复制tex文件: {} -> {}", src_path.display(), course_data_dir);
-            
-            if !src_path.exists() {
-                tracing::warn!("源tex文件不存在: {}", src_path.display());
-            } else {
-                let dest_dir = PathBuf::from(&course_data_dir);
-                
-                // 确保目标目录存在
-                std::fs::create_dir_all(&dest_dir).map_err(|e| ApiError::Internal(format!("创建目录失败: {}", e)))?;
-                
-                let dest_path = dest_dir.join(&tex_filename);
-                std::fs::copy(&src_path, &dest_path).map_err(|e| ApiError::Internal(format!("复制文件失败: {}", e)))?;
-                
-                tracing::info!("tex文件已复制到: {}", dest_path.display());
-                
-                // 更新课节的tex文件名
-                lessons[lesson_index].tex_filename = Some(tex_filename.clone());
-                lessons[lesson_index].is_processed = true;
-                lesson_storage::save_lessons(username, &course_id, &lessons)
-                    .map_err(|e| ApiError::Internal(format!("保存课节信息失败: {}", e)))?;
-            }
-        } else {
-            tracing::warn!("任务完成但未生成tex文件");
-        }
-
-        // 步骤5: 删除pkuvideo对应的资源
-        if let Some(artifacts_dir) = &job_result.artifacts_dir {
-            match std::fs::remove_dir_all(artifacts_dir) {
-                Ok(_) => tracing::info!("已清理pkuvideo任务资源: {}", artifacts_dir),
-                Err(e) => tracing::warn!("清理pkuvideo任务资源失败: {}", e),
-            }
-        }
-
-        // 步骤6: 删除内存中的任务记录
-        {
-            let mut jobs = state.pkuvideo_jobs.write().await;
-            jobs.remove(&job_id);
-        }
-        state.store.delete_pkuvideo_job(job_id).await.map_err(|e| ApiError::Internal(format!("删除任务记录失败: {}", e)))?;
-
-        let message = if is_newly_processed {
-            "下载链接已获取并处理完成"
-        } else {
-            "处理完成"
-        };
+        // 步骤3: 启动后台任务等待完成并执行后处理（不受客户端连接影响）
+        tokio::spawn(background_post_process(
+            state.clone(),
+            job_id,
+            username,
+            course_id.clone(),
+            video_id.clone(),
+            current_user.id,
+        ));
 
         Ok(Json(serde_json::json!({
             "success": true,
-            "message": message,
+            "message": "任务已提交，正在后台处理",
             "video_id": video_id,
-            "video_url": video_url,
-            "play_url": play_url,
-            "is_processed": lessons[lesson_index].is_processed,
-            "tex_filename": lessons[lesson_index].tex_filename,
-            "job_id": job_id.to_string()
+            "job_id": job_id.to_string(),
+            "status": "processing"
         })))
     }.await;
 
-    // 无论成功还是失败，都清理处理状态
-    {
+    // 如果在准备阶段就失败了（还没spawn后台任务），需要清理处理状态
+    if result.is_err() {
         let mut processing_users = state.processing_users.write().await;
         processing_users.remove(&current_user.id);
     }
 
     result
+}
+
+/// 查询任务处理状态（供前端轮询）
+async fn get_process_status(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // 检查用户是否正在处理
+    let processing = {
+        let processing_users = state.processing_users.read().await;
+        processing_users.get(&current_user.id).cloned()
+    };
+
+    if let Some(_proc_state) = processing {
+        // 用户有正在处理的任务，查询对应的job状态
+        let jobs = state.pkuvideo_jobs.read().await;
+        // 找到该用户的最新任务
+        let user_job = jobs.values()
+            .filter(|j| j.user_id == current_user.id)
+            .max_by_key(|j| j.created_at);
+
+        if let Some(job) = user_job {
+            let (status_str, message) = match &job.status {
+                PipelineStatus::Pending => ("processing", "任务等待中...".to_string()),
+                PipelineStatus::Running => {
+                    // 找到当前正在执行的步骤
+                    let current_step = job.steps.iter()
+                        .find(|s| s.status == PipelineStatus::Running)
+                        .map(|s| s.message.clone())
+                        .unwrap_or_else(|| "处理中...".to_string());
+                    ("processing", current_step)
+                }
+                PipelineStatus::Succeeded => ("completed", "处理完成".to_string()),
+                PipelineStatus::Failed => ("failed", job.error.clone().unwrap_or_else(|| "未知错误".to_string())),
+            };
+
+            return Ok(Json(serde_json::json!({
+                "status": status_str,
+                "message": message,
+                "job_id": job.id.to_string(),
+                "steps": job.steps.iter().map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "status": format!("{:?}", s.status).to_lowercase(),
+                        "message": s.message,
+                    })
+                }).collect::<Vec<_>>()
+            })));
+        } else {
+            // 有processing状态但找不到job — 可能还在准备阶段
+            return Ok(Json(serde_json::json!({
+                "status": "processing",
+                "message": "正在准备任务...",
+            })));
+        }
+    }
+
+    // 没有正在处理的任务，检查课节是否已处理完成
+    Ok(Json(serde_json::json!({
+        "status": "idle",
+        "message": "无正在处理的任务",
+    })))
 }
 
 async fn enqueue_job_without_limit(
@@ -748,43 +752,164 @@ struct JobResult {
     artifacts_dir: Option<String>,
 }
 
-async fn wait_for_job_completion(state: &AppState, job_id: Uuid) -> Result<JobResult, ApiError> {
-    let max_wait_seconds = 3600; // 最多等待1小时
-    let check_interval_ms = 3000; // 每3秒检查一次
-    
-    for _ in 0..(max_wait_seconds * 1000 / check_interval_ms) {
-        {
-            let jobs = state.pkuvideo_jobs.read().await;
-            if let Some(job) = jobs.get(&job_id) {
-                match job.status {
-                    PipelineStatus::Succeeded => {
-                        return Ok(JobResult {
-                            success: true,
-                            message: "任务成功完成".to_string(),
-                            notes_path: job.notes_path.clone(),
-                            artifacts_dir: Some(job.artifacts_dir.clone()),
-                        });
-                    }
-                    PipelineStatus::Failed => {
-                        let error_msg = job.error.clone().unwrap_or_else(|| "未知错误".to_string());
-                        return Ok(JobResult {
-                            success: false,
-                            message: error_msg,
-                            notes_path: None,
-                            artifacts_dir: Some(job.artifacts_dir.clone()),
-                        });
-                    }
-                    _ => {
-                        // 任务仍在执行，继续等待
+/// 后台任务：等待任务完成并执行后处理（复制tex、清理资源）
+/// 此任务独立于HTTP客户端连接，即使客户端断开也会继续执行
+async fn background_post_process(
+    state: AppState,
+    job_id: Uuid,
+    username: String,
+    course_id: String,
+    video_id: String,
+    user_id: Uuid,
+) {
+    tracing::info!("[后台任务] 开始等待任务 {} 完成...", job_id);
+
+    // 等待任务完成
+    let max_wait_seconds = 3600u64;
+    let check_interval_ms = 3000u64;
+    let max_checks = max_wait_seconds * 1000 / check_interval_ms;
+
+    let job_result = 'wait: {
+        for _ in 0..max_checks {
+            {
+                let jobs = state.pkuvideo_jobs.read().await;
+                if let Some(job) = jobs.get(&job_id) {
+                    match job.status {
+                        PipelineStatus::Succeeded => {
+                            break 'wait Ok(JobResult {
+                                success: true,
+                                message: "任务成功完成".to_string(),
+                                notes_path: job.notes_path.clone(),
+                                artifacts_dir: Some(job.artifacts_dir.clone()),
+                            });
+                        }
+                        PipelineStatus::Failed => {
+                            let error_msg = job.error.clone().unwrap_or_else(|| "未知错误".to_string());
+                            break 'wait Ok(JobResult {
+                                success: false,
+                                message: error_msg,
+                                notes_path: None,
+                                artifacts_dir: Some(job.artifacts_dir.clone()),
+                            });
+                        }
+                        _ => {
+                            // 任务仍在执行，继续等待
+                        }
                     }
                 }
             }
+            tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
         }
-        
-        tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
+        Err(ApiError::Internal("任务执行超时".to_string()))
+    };
+
+    match job_result {
+        Ok(result) if result.success => {
+            tracing::info!("[后台任务] 任务 {} 执行成功，开始后处理", job_id);
+
+            // 复制tex文件到course_data目录
+            let tex_filename = format!("{}_lesson_{}.tex", course_id, video_id);
+            let course_data_dir = format!("./course_data/{}/{}", username, course_id);
+
+            if let Some(notes_path) = &result.notes_path {
+                let base_dir = PathBuf::from("./data/pkuvideo_jobs");
+                let src_path = base_dir.join(notes_path);
+
+                tracing::info!("[后台任务] 尝试复制tex文件: {} -> {}", src_path.display(), course_data_dir);
+
+                if !src_path.exists() {
+                    tracing::warn!("[后台任务] 源tex文件不存在: {}", src_path.display());
+                } else {
+                    let dest_dir = PathBuf::from(&course_data_dir);
+                    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+                        tracing::error!("[后台任务] 创建目录失败: {}", e);
+                    } else {
+                        let dest_path = dest_dir.join(&tex_filename);
+                        match std::fs::copy(&src_path, &dest_path) {
+                            Ok(_) => {
+                                tracing::info!("[后台任务] tex文件已复制到: {}", dest_path.display());
+
+                                // 更新课节的tex文件名和处理状态
+                                if let Ok(mut lessons) = lesson_storage::load_lessons(&username, &course_id) {
+                                    if let Some(lesson) = lessons.iter_mut().find(|l| l.id == video_id) {
+                                        lesson.tex_filename = Some(tex_filename);
+                                        lesson.is_processed = true;
+                                        if let Err(e) = lesson_storage::save_lessons(&username, &course_id, &lessons) {
+                                            tracing::error!("[后台任务] 保存课节信息失败: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::error!("[后台任务] 复制文件失败: {}", e),
+                        }
+                    }
+                }
+            } else {
+                tracing::warn!("[后台任务] 任务完成但未生成tex文件");
+            }
+
+            // 删除pkuvideo对应的资源
+            if let Some(artifacts_dir) = &result.artifacts_dir {
+                match std::fs::remove_dir_all(artifacts_dir) {
+                    Ok(_) => tracing::info!("[后台任务] 已清理pkuvideo任务资源: {}", artifacts_dir),
+                    Err(e) => tracing::warn!("[后台任务] 清理pkuvideo任务资源失败: {}", e),
+                }
+            }
+
+            // 删除内存中的任务记录
+            {
+                let mut jobs = state.pkuvideo_jobs.write().await;
+                jobs.remove(&job_id);
+            }
+            if let Err(e) = state.store.delete_pkuvideo_job(job_id).await {
+                tracing::error!("[后台任务] 删除任务记录失败: {}", e);
+            }
+
+            tracing::info!("[后台任务] 任务 {} 后处理完成", job_id);
+        }
+        Ok(result) => {
+            tracing::error!("[后台任务] 任务 {} 执行失败: {}", job_id, result.message);
+
+            // 失败时也清理资源
+            if let Some(artifacts_dir) = &result.artifacts_dir {
+                match std::fs::remove_dir_all(artifacts_dir) {
+                    Ok(_) => tracing::info!("[后台任务] 已清理失败任务资源: {}", artifacts_dir),
+                    Err(e) => tracing::warn!("[后台任务] 清理失败任务资源出错: {}", e),
+                }
+            }
+            {
+                let mut jobs = state.pkuvideo_jobs.write().await;
+                jobs.remove(&job_id);
+            }
+            let _ = state.store.delete_pkuvideo_job(job_id).await;
+        }
+        Err(e) => {
+            tracing::error!("[后台任务] 等待任务 {} 完成超时: {}", job_id, e);
+
+            // 超时时也清理资源
+            let jobs = state.pkuvideo_jobs.read().await;
+            let artifacts_dir = jobs.get(&job_id).map(|j| j.artifacts_dir.clone());
+            drop(jobs);
+
+            if let Some(artifacts_dir) = artifacts_dir {
+                match std::fs::remove_dir_all(&artifacts_dir) {
+                    Ok(_) => tracing::info!("[后台任务] 已清理超时任务资源: {}", artifacts_dir),
+                    Err(e) => tracing::warn!("[后台任务] 清理超时任务资源出错: {}", e),
+                }
+            }
+            {
+                let mut jobs = state.pkuvideo_jobs.write().await;
+                jobs.remove(&job_id);
+            }
+            let _ = state.store.delete_pkuvideo_job(job_id).await;
+        }
     }
-    
-    Err(ApiError::Internal("任务执行超时".to_string()))
+
+    // 清除用户的处理状态
+    {
+        let mut processing_users = state.processing_users.write().await;
+        processing_users.remove(&user_id);
+    }
 }
 
 async fn download_lesson_pdf(

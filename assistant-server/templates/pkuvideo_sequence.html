@@ -501,28 +501,65 @@
       setProcessing(true);
       processingLessonId = lessonId;
       renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
-      statusEl.textContent = "正在处理课节...";
+      statusEl.textContent = "正在提交任务...";
       statusEl.className = "status loading";
 
       try {
+        // 步骤1: 提交任务（立即返回）
         const resp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/process`, "POST");
-        
-        if (resp.success) {
-          statusEl.textContent = resp.message || "处理完成";
-          statusEl.className = "status success";
-          
-          const lessonIndex = currentLessons.findIndex(l => l.id === lessonId);
-          if (lessonIndex !== -1) {
-            if (resp.video_url) {
-              currentLessons[lessonIndex].video_url = resp.video_url;
-            }
-            currentLessons[lessonIndex].is_processed = true;
-            currentLessons[lessonIndex].tex_filename = resp.tex_filename; // 更新tex文件名
-            renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
-          }
-        } else {
-          statusEl.textContent = resp.message || "处理失败";
+
+        if (!resp.success) {
+          statusEl.textContent = resp.message || "提交失败";
           statusEl.className = "status error";
+          setProcessing(false);
+          processingLessonId = null;
+          return;
+        }
+
+        statusEl.textContent = "任务已提交，正在后台处理...";
+        statusEl.className = "status loading";
+
+        // 步骤2: 轮询等待处理完成
+        const maxPolls = 1200; // 最多轮询1小时 (3秒间隔)
+        for (let i = 0; i < maxPolls; i++) {
+          await new Promise(r => setTimeout(r, 3000));
+
+          try {
+            const statusResp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/process-status`);
+
+            if (statusResp.status === "completed") {
+              statusEl.textContent = "处理完成";
+              statusEl.className = "status success";
+
+              // 重新加载课节数据以获取最新的tex_filename
+              try {
+                const lessonsResp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos`);
+                if (lessonsResp.lessons) {
+                  currentLessons = lessonsResp.lessons;
+                }
+              } catch (e) {
+                // 如果刷新失败，至少标记当前课节为已处理
+                const lessonIndex = currentLessons.findIndex(l => l.id === lessonId);
+                if (lessonIndex !== -1) {
+                  currentLessons[lessonIndex].is_processed = true;
+                }
+              }
+
+              renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+              break;
+            } else if (statusResp.status === "failed") {
+              statusEl.textContent = "处理失败: " + (statusResp.message || "未知错误");
+              statusEl.className = "status error";
+              break;
+            } else {
+              // 仍在处理中，显示当前步骤
+              statusEl.textContent = statusResp.message || "正在处理...";
+              statusEl.className = "status loading";
+            }
+          } catch (pollErr) {
+            // 轮询请求失败，可能是临时网络问题，继续重试
+            console.warn("轮询状态失败:", pollErr);
+          }
         }
       } catch (err) {
         statusEl.textContent = "处理失败: " + err.message;
