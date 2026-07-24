@@ -266,14 +266,23 @@ async fn get_course_videos(
 
     let (total, processed) = lesson_storage::get_lesson_count(username, &course_id);
 
-    tracing::info!("用户 {} 课程 {} 加载了 {} 个课节", username, course_id, lessons.len());
+    // 检查当前是否有正在处理的课节
+    let processing_video_id = {
+        let processing_users = state.processing_users.read().await;
+        processing_users.get(&current_user.id)
+            .filter(|p| p.course_id == course_id)
+            .map(|p| p.video_id.clone())
+    };
+
+    tracing::info!("用户 {} 课程 {} 加载了 {} 个课节, processing: {:?}", username, course_id, lessons.len(), processing_video_id);
 
     Ok(Json(serde_json::json!({
         "success": true,
         "lessons": lessons,
         "total": total,
         "processed": processed,
-        "all_processed": total > 0 && processed == total
+        "all_processed": total > 0 && processed == total,
+        "processing_video_id": processing_video_id
     })))
 }
 
@@ -518,6 +527,7 @@ async fn process_lesson(
         let mut processing_users = state.processing_users.write().await;
         processing_users.insert(current_user.id, ProcessingState {
             course_id: course_id.clone(),
+            video_id: video_id.clone(),
             started_at: chrono::Utc::now(),
         });
     }
@@ -556,7 +566,6 @@ async fn process_lesson(
         }
 
         let lesson_index = lesson_index.unwrap();
-        let mut is_newly_processed = false;
 
         // 步骤1: 获取下载链接（如果为空）
         if lessons[lesson_index].video_url.is_empty() {
@@ -576,7 +585,6 @@ async fn process_lesson(
                 match video_downloader::get_video_download_url(&lessons[lesson_index].play_url, &cookie_file_str, &login_result.user_agent).await {
                     Ok(download_url) => {
                         lessons[lesson_index].video_url = download_url;
-                        is_newly_processed = true;
                         tracing::info!("成功获取下载链接: {}", lessons[lesson_index].video_url);
                     }
                     Err(e) => {

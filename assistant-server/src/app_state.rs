@@ -35,6 +35,7 @@ pub struct RuntimeWechatSession {
 #[derive(Debug, Clone)]
 pub struct ProcessingState {
     pub course_id: String,
+    pub video_id: String,
     pub started_at: DateTime<Utc>,
 }
 
