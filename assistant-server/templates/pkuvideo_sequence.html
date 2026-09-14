@@ -575,6 +575,8 @@
                 ${isProcessingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">处理中...</span>' : ''}
                 ${isDownloadingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">生成中...</span>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && !lesson.tex_filename ? '<button class="ghost small" onclick="handleProcessLesson(\'' + lesson.id + '\')">提交处理</button>' : ''}
+                ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleReprocessLesson(\'' + lesson.id + '\')">重新处理</button>' : ''}
+                ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadTex(\'' + lesson.id + '\')">下载tex</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadPdf(\'' + lesson.id + '\')">下载PDF</button>' : ''}
               </div>
             </div>
@@ -808,6 +810,71 @@
         setProcessing(false);
         downloadingLessonId = null;
         renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+      }
+    }
+
+    async function handleDownloadTex(lessonId) {
+      try {
+        statusEl.textContent = "正在下载tex文件...";
+        statusEl.className = "status loading";
+
+        const response = await fetch(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/download-tex`, {
+          method: 'GET',
+          credentials: 'include'
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.message || '下载失败');
+        }
+
+        const blob = await response.blob();
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let filename = 'lecture_notes.tex';
+
+        if (contentDisposition) {
+          const match = contentDisposition.match(/filename="?([^"]+)"?/);
+          if (match) {
+            filename = match[1];
+          }
+        }
+
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+
+        statusEl.textContent = "tex文件下载完成";
+        statusEl.className = "status success";
+      } catch (error) {
+        console.error('下载tex失败:', error);
+        statusEl.textContent = "下载tex失败: " + error.message;
+        statusEl.className = "status error";
+      }
+    }
+
+    async function handleReprocessLesson(lessonId) {
+      if (!confirm("确定要重新处理该课节吗？旧的tex文件将被删除。")) return;
+
+      try {
+        statusEl.textContent = "正在重置处理状态...";
+        statusEl.className = "status loading";
+
+        const resp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/reprocess`, "POST");
+
+        statusEl.textContent = resp.message || "已重置处理状态";
+        statusEl.className = "status success";
+
+        // 刷新课节列表
+        await handleCourseSelect({ currentTarget: { dataset: { courseId: selectedCourse, courseName: selectedCourseName } } });
+      } catch (error) {
+        console.error('重新处理失败:', error);
+        statusEl.textContent = "重新处理失败: " + error.message;
+        statusEl.className = "status error";
       }
     }
 

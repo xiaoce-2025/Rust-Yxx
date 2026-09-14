@@ -79,8 +79,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideofullclass/courses/:course_id/videos/refresh", post(refresh_lessons))
         .route("/api/pkuvideofullclass/batch-submit", post(batch_submit))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/process", post(process_lesson))
+        .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/reprocess", post(reprocess_lesson))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/process-status", get(get_process_status))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/download-pdf", get(download_lesson_pdf))
+        .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/download-tex", get(download_lesson_tex))
         .route("/api/pkuvideofullclass/courses/:course_id/download-pdf", get(download_course_pdf))
 }
 
@@ -1317,4 +1319,118 @@ async fn download_course_pdf(
 
     // 临时目录会在函数结束时自动删除
     Ok(response)
+}
+
+/// 下载课节的tex文件
+async fn download_lesson_tex(
+    State(state): State<AppState>,
+    axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
+    current_user: CurrentUser,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
+        tracing::error!("用户不存在: {}", current_user.id);
+        ApiError::Internal("用户不存在".to_string())
+    })?;
+
+    let username = user.email.split('@').next().ok_or_else(|| {
+        tracing::error!("邮箱格式无效: {}", user.email);
+        ApiError::BadRequest("无效的邮箱格式".to_string())
+    })?;
+
+    // 加载课节信息
+    let lessons = lesson_storage::load_lessons(username, &course_id)
+        .map_err(|e| {
+            tracing::error!("加载课节信息失败: {}", e);
+            ApiError::Internal(format!("加载课节信息失败: {}", e))
+        })?;
+
+    // 找到对应的课节
+    let lesson = lessons.iter().find(|l| l.id == video_id)
+        .ok_or_else(|| ApiError::BadRequest("课节不存在".to_string()))?;
+
+    // 检查是否存在tex文件
+    let tex_filename = match &lesson.tex_filename {
+        Some(f) => f,
+        None => return Err(ApiError::BadRequest("该课节尚未生成tex文件".to_string())),
+    };
+
+    // 构建tex文件路径
+    let tex_path = PathBuf::from(format!("./course_data/{}/{}/{}", username, course_id, tex_filename));
+
+    if !tex_path.exists() {
+        return Err(ApiError::Internal("tex文件不存在".to_string()));
+    }
+
+    // 读取tex内容
+    let tex_data = tokio::fs::read(&tex_path)
+        .await
+        .map_err(|e| ApiError::Internal(format!("读取tex文件失败: {}", e)))?;
+
+    // 构建响应
+    let response = axum::response::Response::builder()
+        .header("Content-Type", "application/x-tex")
+        .header("Content-Disposition", format!("attachment; filename=\"{}\"", tex_filename))
+        .header("Content-Length", tex_data.len())
+        .body(axum::body::Body::from(tex_data))
+        .map_err(|e| ApiError::Internal(format!("构建响应失败: {}", e)))?;
+
+    Ok(response)
+}
+
+/// 重新处理课节（删除旧的tex文件并重新处理）
+async fn reprocess_lesson(
+    State(state): State<AppState>,
+    axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
+    current_user: CurrentUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
+        tracing::error!("用户不存在: {}", current_user.id);
+        ApiError::Internal("用户不存在".to_string())
+    })?;
+
+    let username = user.email.split('@').next().ok_or_else(|| {
+        tracing::error!("邮箱格式无效: {}", user.email);
+        ApiError::BadRequest("无效的邮箱格式".to_string())
+    })?;
+
+    // 加载课节信息
+    let mut lessons = lesson_storage::load_lessons(username, &course_id)
+        .map_err(|e| {
+            tracing::error!("加载课节信息失败: {}", e);
+            ApiError::Internal(format!("加载课节信息失败: {}", e))
+        })?;
+
+    // 找到对应的课节
+    let lesson_index = lessons.iter().position(|l| l.id == video_id)
+        .ok_or_else(|| ApiError::BadRequest("课节不存在".to_string()))?;
+
+    // 删除旧的tex文件
+    if let Some(old_tex_filename) = &lessons[lesson_index].tex_filename {
+        let old_tex_path = PathBuf::from(format!("./course_data/{}/{}/{}", username, course_id, old_tex_filename));
+        if old_tex_path.exists() {
+            if let Err(e) = tokio::fs::remove_file(&old_tex_path).await {
+                tracing::warn!("删除旧tex文件失败: {}", e);
+            } else {
+                tracing::info!("已删除旧tex文件: {}", old_tex_path.display());
+            }
+        }
+    }
+
+    // 重置课节的处理状态
+    lessons[lesson_index].tex_filename = None;
+    lessons[lesson_index].is_processed = false;
+
+    // 保存更新后的课节信息
+    lesson_storage::save_lessons(username, &course_id, &lessons)
+        .map_err(|e| {
+            tracing::error!("保存课节信息失败: {}", e);
+            ApiError::Internal(format!("保存课节信息失败: {}", e))
+        })?;
+
+    tracing::info!("用户 {} 已重置课节 {} 的处理状态，准备重新处理", username, video_id);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "已重置处理状态，请点击\"提交处理\"重新处理该课节"
+    })))
 }
