@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     auth::{verify_password, CurrentUser},
+    config::Settings,
     error::ApiError,
     services::pkuvideo::{run_pipeline, PipelineStatus, PkuVideoJob},
 };
@@ -368,10 +369,12 @@ async fn enqueue_job(
 
     let state_for_task = state.clone();
     let state_for_error = state.clone();
+    let user_id_for_task = user_id;
     task::spawn(async move {
         if let Err(e) = run_job_pipeline(
             state_for_task,
             job_id,
+            user_id_for_task,
             video_url,
             pku_auth_one,
             pku_auth_two,
@@ -471,6 +474,7 @@ async fn copy_existing_job(
 pub async fn run_job_pipeline(
     state: AppState,
     job_id: Uuid,
+    user_id: Uuid,
     video_url: String,
     pku_auth_one: String,
     pku_auth_two: String,
@@ -478,9 +482,13 @@ pub async fn run_job_pipeline(
     tracing::info!("run_job_pipeline 开始执行, job_id: {}", job_id);
     mark_job_running(&state, job_id).await;
 
+    // 获取用户自定义配置（使用 user_id 而不是 job_id）
+    let user_config = state.store.get_config(user_id).await;
+    let merged_settings = merge_with_user_config(&state.settings, &user_config);
+
     mark_step_running(&state, job_id, 0, "开始下载视频").await;
     let base_dir = PathBuf::from("./data/pkuvideo_jobs");
-    let result = run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two, &state.settings, &state.login_cache).await;
+    let result = run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two, &merged_settings, &state.login_cache).await;
 
     match result {
         Ok((transcript_path, notes_path, pdf_path)) => {
@@ -519,6 +527,41 @@ fn parse_step_error(raw: &str) -> (usize, String) {
         }
     }
     (0, raw.to_string())
+}
+
+/// 合并全局配置和用户自定义配置，用户配置优先
+fn merge_with_user_config(
+    global_settings: &Settings,
+    user_config: &Option<crate::store::FileUserConfig>,
+) -> Settings {
+    let mut merged = global_settings.clone();
+
+    if let Some(user_cfg) = user_config {
+        // 阿里云配置覆盖
+        if let Some(model) = &user_cfg.aliyun_model {
+            if !model.is_empty() {
+                merged.paraformer.model = Some(model.clone());
+            }
+        }
+        if let Some(api_key) = &user_cfg.aliyun_api_key {
+            if !api_key.is_empty() {
+                merged.paraformer.api_key = Some(api_key.clone());
+            }
+        }
+        // DeepSeek配置覆盖
+        if let Some(model) = &user_cfg.deepseek_model {
+            if !model.is_empty() {
+                merged.deepseek.model = Some(model.clone());
+            }
+        }
+        if let Some(api_key) = &user_cfg.deepseek_api_key {
+            if !api_key.is_empty() {
+                merged.deepseek.api_key = Some(api_key.clone());
+            }
+        }
+    }
+
+    merged
 }
 
 async fn mark_job_running(state: &AppState, job_id: Uuid) {

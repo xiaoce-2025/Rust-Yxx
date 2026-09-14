@@ -44,6 +44,15 @@ pub struct FileUserConfig {
     pub default_model: String,
     pub theme: String,
     pub settings: serde_json::Value,
+    // 用户自定义API配置（会覆盖全局配置）
+    #[serde(default)]
+    pub aliyun_model: Option<String>,
+    #[serde(default)]
+    pub aliyun_api_key: Option<String>,
+    #[serde(default)]
+    pub deepseek_model: Option<String>,
+    #[serde(default)]
+    pub deepseek_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

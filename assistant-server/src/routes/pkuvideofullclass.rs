@@ -736,13 +736,14 @@ async fn enqueue_job_without_limit(
 
     // 异步执行任务（不扣除限额）
     let state_clone = state.clone();
+    let user_id_clone = user_id;
     let video_url_clone = video_url.to_string();
     let pku_auth_one_clone = pku_auth_one.to_string();
     let pku_auth_two_clone = pku_auth_two.to_string();
-    
+
     tokio::spawn(async move {
         tracing::info!("开始异步执行任务, job_id: {}", job_id);
-        let result = run_job_pipeline(state_clone, job_id, video_url_clone, pku_auth_one_clone, pku_auth_two_clone).await;
+        let result = run_job_pipeline(state_clone, job_id, user_id_clone, video_url_clone, pku_auth_one_clone, pku_auth_two_clone).await;
         if result.is_ok() {
             tracing::info!("任务执行成功, job_id: {}", job_id);
         } else {

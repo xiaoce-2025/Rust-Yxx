@@ -5,6 +5,7 @@ pub mod pkuvideo;
 pub mod pkuvideofullclass;
 pub mod settings;
 pub mod ui;
+pub mod user_api_config;
 pub mod wechat;
 
 use axum::{http::HeaderValue, routing::get, Router};
@@ -43,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .merge(pkuvideofullclass::routes())
         .merge(settings::routes())
         .merge(wechat::routes())
+        .merge(user_api_config::routes())
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
