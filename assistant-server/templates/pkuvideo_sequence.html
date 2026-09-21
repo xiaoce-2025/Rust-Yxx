@@ -264,6 +264,23 @@
     }
     .config-status.success { color: var(--accent); background: rgba(12,122,87,.1); }
     .config-status.error { color: var(--warn); background: rgba(152,42,61,.1); }
+    .modal-overlay {
+      display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center;
+    }
+    .modal-dialog {
+      background: #fff; border-radius: 16px; padding: 24px; max-width: 520px; width: 90%;
+      box-shadow: 0 20px 60px rgba(0,0,0,.3);
+    }
+    .modal-dialog h3 { margin: 0 0 8px; font-family: "Noto Serif SC", serif; }
+    .modal-dialog p { font-size: 13px; color: #6b7280; margin: 0 0 12px; }
+    .key-url-box { background: #f3f4f6; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+    .key-url-box a { font-size: 12px; word-break: break-all; color: var(--accent); }
+    .modal-dialog textarea {
+      width: 100%; height: 80px; border-radius: 8px; border: 1px solid var(--line);
+      padding: 10px; font: inherit; font-size: 12px; resize: vertical;
+    }
+    .modal-actions { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
   </style>
 </head>
 <body>
@@ -343,6 +360,20 @@
       </div>
       <div id="lessonList" class="lesson-list"></div>
     </div>
+  <div class="modal-overlay" id="keyModal">
+      <div class="modal-dialog">
+        <h3>需要解密密钥</h3>
+        <p>此视频为 m3u8 加密流，请点击下方链接在新页面中打开，将获取到的密钥内容粘贴到输入框中：</p>
+        <div class="key-url-box">
+          <a id="keyUrl" href="#" target="_blank"></a>
+        </div>
+        <textarea id="manualKey" placeholder="在此粘贴密钥内容..."></textarea>
+        <div class="modal-actions">
+          <button id="keyCancelBtn" class="ghost">取消</button>
+          <button id="keyConfirmBtn">提交密钥</button>
+        </div>
+      </div>
+    </div>
   </main>
 
   <script>
@@ -364,6 +395,7 @@
     let isProcessing = false;
     let processingLessonId = null;
     let downloadingLessonId = null;
+    let pendingKeyLessonId = null;
 
     function setProcessing(processing) {
       isProcessing = processing;
@@ -690,7 +722,7 @@
       renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
     }
 
-    async function handleProcessLesson(lessonId) {
+    async function handleProcessLesson(lessonId, manualKey) {
       if (isProcessing) {
         statusEl.textContent = "请等待当前操作完成";
         statusEl.className = "status error";
@@ -711,7 +743,22 @@
 
       try {
         // 步骤1: 提交任务（立即返回）
-        const resp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/process`, "POST");
+        const body = manualKey ? {manual_key: manualKey} : {};
+        const resp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/process`, "POST", body);
+
+        if (resp.needs_key) {
+          document.getElementById("keyUrl").href = resp.key_uri;
+          document.getElementById("keyUrl").textContent = resp.key_uri;
+          document.getElementById("manualKey").value = "";
+          document.getElementById("keyModal").style.display = "flex";
+          pendingKeyLessonId = lessonId;
+          setProcessing(false);
+          processingLessonId = null;
+          renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+          statusEl.textContent = "请粘贴密钥以继续";
+          statusEl.className = "status";
+          return;
+        }
 
         if (!resp.success) {
           statusEl.textContent = resp.message || "提交失败";
@@ -1055,6 +1102,22 @@
       } catch (err) {
         showConfigStatus("清除失败: " + err.message, "error");
       }
+    });
+
+    document.getElementById("keyConfirmBtn").addEventListener("click", () => {
+      const key = document.getElementById("manualKey").value.trim();
+      if (!key) { statusEl.textContent = "请粘贴密钥内容"; statusEl.className = "status error"; return; }
+      if (!pendingKeyLessonId) return;
+      document.getElementById("keyModal").style.display = "none";
+      const lessonId = pendingKeyLessonId;
+      pendingKeyLessonId = null;
+      handleProcessLesson(lessonId, key);
+    });
+    document.getElementById("keyCancelBtn").addEventListener("click", () => {
+      document.getElementById("keyModal").style.display = "none";
+      pendingKeyLessonId = null;
+      statusEl.textContent = "已取消";
+      statusEl.className = "status";
     });
 
     checkLogin();

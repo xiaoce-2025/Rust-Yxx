@@ -134,7 +134,9 @@ pub async fn login_iaaa_and_get_cookies(
             "-b".to_string(),
             cookie_file_str.clone(),
             "-o".to_string(),
-            "/dev/null".to_string(),
+            "/tmp/campus_login_response.html".to_string(),
+            "-D".to_string(),
+            "/tmp/campus_login_headers.txt".to_string(),
             campus_url.clone(),
         ];
 
@@ -220,6 +222,7 @@ pub async fn download_with_pku_cookie(
         "-sS".to_string(),
         "-k".to_string(),
         "-L".to_string(),
+        "--http1.1".to_string(),
         "-A".to_string(),
         login.user_agent,
         "-c".to_string(),
@@ -231,6 +234,55 @@ pub async fn download_with_pku_cookie(
 
     let bytes = run_curl_bytes(&args).map_err(|e| format!("下载请求失败: {e}"));
     bytes
+}
+
+/// 下载资源，同时显式发送 _token Cookie（用于跨域资源如 resourcese.pku.edu.cn）
+pub async fn download_with_token_cookie(
+    url: &str,
+    username: &str,
+    password: &str,
+    login_cache: &LoginCache,
+) -> Result<Vec<u8>, String> {
+    let login = login_iaaa_and_get_cookies_with_cache(username, password, login_cache).await?;
+    let cookie_file_str = login.cookie_file.to_string_lossy().to_string();
+    let token_cookie = read_token_from_cookie_file(&cookie_file_str).unwrap_or_default();
+    tracing::info!("从cookie文件读取_token: len={}, value={}", token_cookie.len(), token_cookie);
+
+    let mut args = vec![
+        "-sS".to_string(),
+        "-k".to_string(),
+        "-L".to_string(),
+        "--http1.1".to_string(),
+        "-A".to_string(),
+        login.user_agent,
+        "-c".to_string(),
+        cookie_file_str.clone(),
+        "-b".to_string(),
+        cookie_file_str,
+    ];
+    if !token_cookie.is_empty() {
+        args.push("-H".to_string());
+        args.push(format!("Cookie: _token={}", token_cookie));
+    }
+    args.push(url.to_string());
+
+    run_curl_bytes(&args).map_err(|e| format!("下载请求失败: {e}"))
+}
+
+fn read_token_from_cookie_file(path: &str) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.ok()?;
+        if line.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 7 && parts[5] == "_token" {
+            return Some(parts[6].to_string());
+        }
+    }
+    None
 }
 
 fn parse_token(body: &str) -> Result<String, String> {
@@ -278,7 +330,7 @@ fn run_curl_text(args: &[String]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
+pub(crate) fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
     let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = Command::new(curl_cmd)
         .args(args)

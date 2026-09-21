@@ -155,6 +155,23 @@
     @media (max-width: 760px) {
       .grid { grid-template-columns: 1fr; }
     }
+    .modal-overlay {
+      display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center;
+    }
+    .modal-dialog {
+      background: #fff; border-radius: 16px; padding: 24px; max-width: 520px; width: 90%;
+      box-shadow: 0 20px 60px rgba(0,0,0,.3);
+    }
+    .modal-dialog h3 { margin: 0 0 8px; font-family: "Noto Serif SC", serif; }
+    .modal-dialog p { font-size: 13px; color: #6b7280; margin: 0 0 12px; }
+    .key-url-box { background: #f3f4f6; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+    .key-url-box a { font-size: 12px; word-break: break-all; color: var(--accent); }
+    .modal-dialog textarea {
+      width: 100%; height: 80px; border-radius: 8px; border: 1px solid var(--line);
+      padding: 10px; font: inherit; font-size: 12px; resize: vertical;
+    }
+    .modal-actions { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
   </style>
 </head>
 <body>
@@ -201,6 +218,20 @@
       <strong>历史任务记录</strong>
       <div id="historyList"></div>
     </section>
+  <div class="modal-overlay" id="keyModal">
+      <div class="modal-dialog">
+        <h3>需要解密密钥</h3>
+        <p>此视频为 m3u8 加密流，请点击下方链接在新页面中打开，将获取到的密钥内容粘贴到输入框中：</p>
+        <div class="key-url-box">
+          <a id="keyUrl" href="#" target="_blank"></a>
+        </div>
+        <textarea id="manualKey" placeholder="在此粘贴密钥内容..."></textarea>
+        <div class="modal-actions">
+          <button id="keyCancelBtn" class="ghost">取消</button>
+          <button id="keyConfirmBtn">提交密钥</button>
+        </div>
+      </div>
+    </div>
   </main>
 
   <script>
@@ -267,32 +298,69 @@
       }
     }
 
-    async function submitJob() {
-      // 检查处理资源限额
+    async function submitJob(manualKey) {
       if (processingQuota <= 0) {
         statusEl.textContent = "提交失败: 处理资源限额不足，请联系管理员获取更多额度（严小希平均处理1小时的回放需要消耗价值0.5r的token，严小希并没有那么充足的应对攻击的资金qwq，设置限额是为了保障正常使用）";
         return;
       }
 
       statusEl.textContent = "提交中...";
+      const body = {
+        video_url: document.getElementById("videoUrl").value.trim(),
+        pku_auth_one: document.getElementById("pkuAuthOne").value.trim(),
+        pku_auth_two: document.getElementById("pkuAuthTwo").value.trim()
+      };
+      if (manualKey) body.manual_key = manualKey;
+
+      api("/api/pkuvideo/submit-web", "POST", body)
+        .then(resp => {
+          activeJobId = resp.job_id;
+          statusEl.textContent = "提交成功，任务已入队。";
+          processingQuota -= 1;
+          quotaInfoEl.innerHTML = `储存资源限额: 3 | 剩余: ${storageQuota}<br/>处理资源限额: 1 | 剩余: ${processingQuota}`;
+          startPolling();
+        })
+        .catch(err => {
+          statusEl.textContent = "提交失败: " + err.message;
+          updateQuotaDisplay();
+        });
+    }
+
+    async function checkM3u8AndSubmit() {
+      const url = document.getElementById("videoUrl").value.trim();
+      if (!url.includes(".m3u8")) return submitJob();
+
+      statusEl.textContent = "正在检测视频加密信息...";
       try {
-        const resp = await api("/api/pkuvideo/submit-web", "POST", {
-          video_url: document.getElementById("videoUrl").value.trim(),
+        const resp = await api("/api/pkuvideo/check-m3u8", "POST", {
+          video_url: url,
           pku_auth_one: document.getElementById("pkuAuthOne").value.trim(),
           pku_auth_two: document.getElementById("pkuAuthTwo").value.trim()
         });
-        activeJobId = resp.job_id;
-        statusEl.textContent = "提交成功，任务已入队。";
-        // 更新处理资源限额显示
-        processingQuota -= 1;
-        quotaInfoEl.innerHTML = `储存资源限额: 3 | 剩余: ${storageQuota}<br/>处理资源限额: 1 | 剩余: ${processingQuota}`;
-        startPolling();
+        if (resp.is_m3u8 && resp.key_uri) {
+          document.getElementById("keyUrl").href = resp.key_uri;
+          document.getElementById("keyUrl").textContent = resp.key_uri;
+          document.getElementById("manualKey").value = "";
+          document.getElementById("keyModal").style.display = "flex";
+        } else {
+          submitJob();
+        }
       } catch (err) {
-        statusEl.textContent = "提交失败: " + err.message;
-        // 刷新限额信息
-        updateQuotaDisplay();
+        statusEl.textContent = "检测失败: " + err.message;
       }
     }
+
+    document.getElementById("keyConfirmBtn").addEventListener("click", () => {
+      const key = document.getElementById("manualKey").value.trim();
+      if (!key) { statusEl.textContent = "请粘贴密钥内容"; return; }
+      document.getElementById("keyModal").style.display = "none";
+      submitJob(key);
+    });
+
+    document.getElementById("keyCancelBtn").addEventListener("click", () => {
+      document.getElementById("keyModal").style.display = "none";
+      statusEl.textContent = "已取消";
+    });
 
     async function pollJob() {
       if (!activeJobId) return;
@@ -410,7 +478,7 @@
     document.getElementById("goAppBtn").addEventListener("click", () => {
       location.href = "/app";
     });
-    document.getElementById("submitBtn").addEventListener("click", submitJob);
+    document.getElementById("submitBtn").addEventListener("click", checkM3u8AndSubmit);
     document.getElementById("historyBtn").addEventListener("click", loadHistory);
 
     checkLogin();

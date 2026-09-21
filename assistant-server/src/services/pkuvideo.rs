@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{fs, process::Command};
 use uuid::Uuid;
 
-use crate::services::pkulogin::download_with_pku_cookie;
+use crate::services::pkulogin::{download_with_pku_cookie, download_with_token_cookie};
 use crate::services::login_cache::LoginCache;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +86,7 @@ pub async fn run_pipeline(
     login_credential_two: String,
     settings: &crate::config::Settings,
     login_cache: &LoginCache,
+    manual_key: Option<&str>,
 ) -> Result<(Option<String>, Option<String>, Option<String>), String> {
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let job_dir = base_dir.join(format!("{}_{}", timestamp, job_id));
@@ -105,6 +106,7 @@ pub async fn run_pipeline(
         &login_credential_one,
         &login_credential_two,
         login_cache,
+        manual_key,
     )
         .await
         .map_err(|e| format!("step=0;{e}"))?;
@@ -148,12 +150,267 @@ pub async fn run_pipeline(
     ))
 }
 
-pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str, login_cache: &LoginCache) -> Result<(), String> {
+pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str, login_cache: &LoginCache, manual_key: Option<&str>) -> Result<(), String> {
+    if url.contains(".m3u8") {
+        return download_m3u8_video(url, video_path, username, password, login_cache, manual_key).await;
+    }
+
     let bytes = download_with_pku_cookie(url, username, password, login_cache).await?;
 
     fs::write(video_path, bytes)
         .await
         .map_err(|e| format!("写入视频文件失败: {e}"))
+}
+
+/// 下载并解析 m3u8，返回密钥 URI（用于前端弹窗展示）
+pub async fn fetch_m3u8_key_uri(
+    m3u8_url: &str,
+    username: &str,
+    password: &str,
+    login_cache: &LoginCache,
+) -> Result<String, String> {
+    let m3u8_bytes = download_with_pku_cookie(m3u8_url, username, password, login_cache).await?;
+    let m3u8_content = String::from_utf8(m3u8_bytes)
+        .map_err(|e| format!("m3u8编码错误: {e}"))?;
+    let (key_uri, _, _) = parse_m3u8(&m3u8_content)?;
+    let base_url = resolve_base_url(m3u8_url);
+    Ok(resolve_url(&base_url, &key_uri))
+}
+
+/// 使用 openssl 进行 AES-128-CBC 解密
+async fn decrypt_aes128_cbc(
+    enc_path: &std::path::Path,
+    dec_path: &std::path::Path,
+    key_hex: &str,
+    iv_hex: &str,
+) -> Result<(), String> {
+    let enc_str = enc_path.to_string_lossy().to_string();
+    let dec_str = dec_path.to_string_lossy().to_string();
+
+    let result = Command::new("openssl")
+        .arg("enc")
+        .arg("-d")
+        .arg("-aes-128-cbc")
+        .arg("-in")
+        .arg(&enc_str)
+        .arg("-out")
+        .arg(&dec_str)
+        .arg("-K")
+        .arg(key_hex)
+        .arg("-iv")
+        .arg(iv_hex)
+        .arg("-nosalt")
+        .output()
+        .await;
+
+    match result {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("openssl解密失败: {}", stderr))
+        }
+        Err(e) => Err(format!("执行openssl失败: {e}")),
+    }
+}
+
+/// 解析 m3u8 播放列表，返回 (密钥URI, 显式IV_hex, 分片URL列表)
+fn parse_m3u8(content: &str) -> Result<(String, Option<String>, Vec<String>), String> {
+    let mut key_uri: Option<String> = None;
+    let mut iv: Option<String> = None;
+    let mut segments: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // 解析 EXT-X-KEY
+        if line.starts_with("#EXT-X-KEY") {
+            // URI="..."
+            if let Some(uri_start) = line.find("URI=\"") {
+                let after_uri = &line[uri_start + 5..];
+                if let Some(uri_end) = after_uri.find('"') {
+                    key_uri = Some(after_uri[..uri_end].to_string());
+                }
+            }
+            // IV=0x... (显式 IV)
+            if let Some(iv_start) = line.find("IV=0x") {
+                let after_iv = &line[iv_start + 5..];
+                let iv_end = after_iv
+                    .find(',')
+                    .unwrap_or(after_iv.len());
+                iv = Some(after_iv[..iv_end].to_string());
+            }
+        }
+
+        // 收集分片 URL（非注释、非空行）
+        if !line.is_empty() && !line.starts_with('#') {
+            segments.push(line.to_string());
+        }
+    }
+
+    let key_uri = key_uri.ok_or("m3u8中未找到 EXT-X-KEY")?;
+
+    Ok((key_uri, iv, segments))
+}
+
+/// 从 m3u8 的完整 URL 中提取 base URL（去掉最后一个 / 之后的部分）
+fn resolve_base_url(m3u8_url: &str) -> String {
+    if let Some(pos) = m3u8_url.rfind('/') {
+        format!("{}/", &m3u8_url[..pos])
+    } else {
+        m3u8_url.to_string()
+    }
+}
+
+/// 将相对路径解析为绝对 URL
+fn resolve_url(base_url: &str, url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("{}{}", base_url, url.trim_start_matches('/'))
+    }
+}
+
+/// 下载 m3u8 视频流并解密保存为 mp4
+async fn download_m3u8_video(
+    m3u8_url: &str,
+    video_path: &Path,
+    username: &str,
+    password: &str,
+    login_cache: &LoginCache,
+    manual_key: Option<&str>,
+) -> Result<(), String> {
+    // 1. 获取 m3u8 播放列表
+    let m3u8_bytes = download_with_pku_cookie(m3u8_url, username, password, login_cache).await?;
+    let m3u8_content = String::from_utf8(m3u8_bytes)
+        .map_err(|e| format!("m3u8播放列表编码错误: {e}"))?;
+    tracing::info!("获取到m3u8播放列表，长度: {}字节", m3u8_content.len());
+
+    // 2. 解析 m3u8
+    let (key_uri, iv_override, segments) = parse_m3u8(&m3u8_content)?;
+    let base_url = resolve_base_url(m3u8_url);
+    let key_uri = resolve_url(&base_url, &key_uri);
+
+    tracing::info!("解析m3u8: 密钥URI={}, 分片数={}", key_uri, segments.len());
+    if segments.is_empty() {
+        return Err("m3u8中未找到分片".to_string());
+    }
+
+    // 3. 下载密钥（跨域，需要显式传 _token Cookie）
+    let key_bytes = if let Some(key_str) = manual_key {
+        tracing::info!("使用手动提供的密钥，长度: {}字节", key_str.len());
+        key_str.as_bytes().to_vec()
+    } else {
+        let bytes = download_with_token_cookie(&key_uri, username, password, login_cache).await?;
+        tracing::info!("密钥下载: {}字节", bytes.len());
+        bytes
+    };
+    tracing::info!("密钥下载: {}字节", key_bytes.len());
+
+    // 密钥文件的内容直接作为 AES-128 的 16 字节密钥，需编码为 hex 传给 openssl
+    let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    tracing::info!("密钥hex: len={}, value={}", key_hex.len(), key_hex);
+
+    // 4. 创建临时目录（保留中间文件，不自动清理）
+    let temp_dir = video_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!(
+            ".m3u8_tmp_{}",
+            chrono::Utc::now().timestamp_millis()
+        ));
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| format!("创建临时目录失败: {e}"))?;
+
+    // 保存密钥和播放列表到调试目录
+    tokio::fs::write(&temp_dir.join("enc.key"), &key_bytes)
+        .await
+        .map_err(|e| format!("保存密钥调试文件失败: {e}"))?;
+    tokio::fs::write(&temp_dir.join("playlist.m3u8"), &m3u8_content)
+        .await
+        .map_err(|e| format!("保存m3u8调试文件失败: {e}"))?;
+    tracing::info!("调试文件已保存到: {}", temp_dir.display());
+
+    // 5. 下载并解密每个分片
+    let mut decrypted_paths: Vec<std::path::PathBuf> = Vec::new();
+    for (i, seg_url) in segments.iter().enumerate() {
+        let full_url = resolve_url(&base_url, seg_url);
+        let enc_path = temp_dir.join(format!("seg_{:04}_enc.ts", i));
+        let dec_path = temp_dir.join(format!("seg_{:04}.ts", i));
+
+        tracing::info!("下载分片 {}/{}: {}", i + 1, segments.len(), full_url);
+
+        let seg_bytes = download_with_token_cookie(&full_url, username, password, login_cache).await?;
+        tokio::fs::write(&enc_path, &seg_bytes)
+            .await
+            .map_err(|e| format!("写入分片文件失败: {e}"))?;
+
+        // IV: 优先使用显式 IV，否则序号转为 128-bit 大端整数
+        let iv_hex = iv_override.clone().unwrap_or_else(|| {
+            format!("{:032x}", i as u64)
+        });
+        tracing::info!(
+            "分片{}: iv_hex={}, key_hex前8位={}...",
+            i,
+            iv_hex,
+            &key_hex[..8.min(key_hex.len())]
+        );
+
+        decrypt_aes128_cbc(&enc_path, &dec_path, &key_hex, &iv_hex)
+            .await
+            .map_err(|e| format!("解密分片 {} 失败: {}", i, e))?;
+
+        // 保留加密分片供调试
+        decrypted_paths.push(dec_path);
+    }
+
+    // 6. 创建 ffmpeg concat 文件列表
+    let concat_list_path = temp_dir.join("concat_list.txt");
+    let mut concat_list = String::new();
+    for p in &decrypted_paths {
+        concat_list.push_str(&format!(
+            "file '{}'\n",
+            p.file_name().unwrap_or_default().to_string_lossy().replace('\'', "'\\''")
+        ));
+    }
+    tokio::fs::write(&concat_list_path, concat_list)
+        .await
+        .map_err(|e| format!("写入concat列表失败: {e}"))?;
+
+    // 7. ffmpeg 本地合并分片为 mp4
+    let video_path_str = video_path.to_string_lossy().to_string();
+    let concat_path_str = concat_list_path.to_string_lossy().to_string();
+
+    let ffmpeg_result = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-f")
+        .arg("concat")
+        .arg("-safe")
+        .arg("0")
+        .arg("-i")
+        .arg(&concat_path_str)
+        .arg("-c")
+        .arg("copy")
+        .arg(&video_path_str)
+        .output()
+        .await;
+
+    match ffmpeg_result {
+        Ok(output) if output.status.success() => {
+            tracing::info!("m3u8→mp4转换成功: {}", video_path_str);
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            Ok(())
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!(
+                "ffmpeg合并失败，调试文件保留在: {}",
+                temp_dir.display()
+            );
+            Err(format!("ffmpeg合并分片失败: {}", stderr))
+        }
+        Err(e) => Err(format!("执行ffmpeg失败: {e}")),
+    }
 }
 
 pub async fn extract_mp3(video_path: &Path, mp3_path: &Path) -> Result<(), String> {

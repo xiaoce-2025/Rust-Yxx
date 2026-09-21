@@ -67,6 +67,11 @@ struct BatchSubmitRequest {
     video_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProcessLessonRequest {
+    manual_key: Option<String>,
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/pkuvideofullclass/binding-status", get(get_binding_status))
@@ -515,6 +520,7 @@ async fn process_lesson(
     State(state): State<AppState>,
     axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
+    Json(req): Json<ProcessLessonRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // 后端防并发控制：检查用户是否正在处理
     {
@@ -617,12 +623,37 @@ async fn process_lesson(
 
         tracing::info!("提交pkuvideo任务，视频URL: {}", video_url);
 
+        // 如果是 m3u8 且未提供手动密钥，先获取密钥 URI 返回给前端
+        if video_url.contains(".m3u8") && req.manual_key.is_none() {
+            match crate::services::pkuvideo::fetch_m3u8_key_uri(
+                &video_url,
+                &username,
+                &password,
+                &state.login_cache,
+            ).await {
+                Ok(key_uri) => {
+                    let mut processing_users = state.processing_users.write().await;
+                    processing_users.remove(&current_user.id);
+                    return Ok(Json(serde_json::json!({
+                        "success": true,
+                        "needs_key": true,
+                        "key_uri": key_uri,
+                        "video_url": video_url,
+                    })));
+                }
+                Err(e) => {
+                    tracing::warn!("获取m3u8密钥URI失败: {}", e);
+                }
+            }
+        }
+
         let job_id = enqueue_job_without_limit(
             &state,
             current_user.id,
             &video_url,
             &username,
             &password,
+            req.manual_key.as_deref(),
         ).await?;
 
         tracing::info!("任务提交成功，job_id: {}，启动后台后处理任务", job_id);
@@ -723,6 +754,7 @@ async fn enqueue_job_without_limit(
     video_url: &str,
     pku_auth_one: &str,
     pku_auth_two: &str,
+    manual_key: Option<&str>,
 ) -> Result<Uuid, ApiError> {
     let job_id = Uuid::new_v4();
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
@@ -743,9 +775,11 @@ async fn enqueue_job_without_limit(
     let pku_auth_one_clone = pku_auth_one.to_string();
     let pku_auth_two_clone = pku_auth_two.to_string();
 
+    let manual_key_clone = manual_key.map(|s| s.to_string());
+
     tokio::spawn(async move {
         tracing::info!("开始异步执行任务, job_id: {}", job_id);
-        let result = run_job_pipeline(state_clone, job_id, user_id_clone, video_url_clone, pku_auth_one_clone, pku_auth_two_clone).await;
+        let result = run_job_pipeline(state_clone, job_id, user_id_clone, video_url_clone, pku_auth_one_clone, pku_auth_two_clone, manual_key_clone).await;
         if result.is_ok() {
             tracing::info!("任务执行成功, job_id: {}", job_id);
         } else {

@@ -113,35 +113,18 @@ async fn fetch_with_cookie_direct(url: &str, cookie_file: &str, user_agent: &str
 
 fn extract_download_url_from_api_response(response: &str) -> Result<String, String> {
     let json: Result<Value, _> = serde_json::from_str(response);
-    
+
     if let Ok(data) = json {
         if let Some(list) = data.get("list").and_then(|v| v.as_array()) {
             if let Some(first_item) = list.first() {
                 if let Some(sub_content) = first_item.get("sub_content").and_then(|v| v.as_str()) {
                     let film_content: Result<Value, _> = serde_json::from_str(sub_content);
-                    
+
                     if let Ok(film) = film_content {
                         if let Some(playback) = film.get("save_playback") {
-                            if let Some(is_m3u8) = playback.get("is_m3u8").and_then(|v| v.as_str()) {
-                                if is_m3u8 == "yes" || is_m3u8 == "1" {
-                                    if let Some(contents) = playback.get("contents").and_then(|v| v.as_str()) {
-                                        let m3u8_pattern = Regex::new(r"https://resourcese\.pku\.edu\.cn/play/0/harpocrates/\d+/\d+/\d+/([a-zA-Z0-9]+)(/.+)/playlist\.m3u8.*").unwrap();
-                                        if let Some(match_result) = m3u8_pattern.captures(contents) {
-                                            let hash = match_result.get(1).map(|m| m.as_str()).unwrap_or("");
-                                            let download_url = format!("https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/downloadVideo.action?resourceId={}", hash);
-                                            return Ok(download_url);
-                                        }
-                                        
-                                        tracing::info!("m3u8链接未匹配模式，尝试直接使用contents");
-                                        return Ok(contents.to_string());
-                                    }
-                                } else {
-                                    if let Some(contents) = playback.get("contents").and_then(|v| v.as_str()) {
-                                        return Ok(contents.to_string());
-                                    }
-                                }
-                            } else {
-                                if let Some(contents) = playback.get("contents").and_then(|v| v.as_str()) {
+                            if let Some(contents) = playback.get("contents").and_then(|v| v.as_str()) {
+                                if !contents.is_empty() {
+                                    tracing::info!("提取到下载链接: {}", contents);
                                     return Ok(contents.to_string());
                                 }
                             }
@@ -151,7 +134,7 @@ fn extract_download_url_from_api_response(response: &str) -> Result<String, Stri
             }
         }
     }
-    
+
     Err("无法从API响应中提取下载链接".to_string())
 }
 
@@ -165,28 +148,19 @@ struct PlayerParams {
 
 pub async fn extract_download_url_from_sub_info(sub_info_json: &str) -> Option<String> {
     let sub_info: Result<Value, _> = serde_json::from_str(sub_info_json);
-    
+
     if let Ok(info) = sub_info {
         if let Some(list) = info.get("list").and_then(|v| v.as_array()) {
             if let Some(first_item) = list.first() {
                 if let Some(sub_content) = first_item.get("sub_content").and_then(|v| v.as_str()) {
                     let film_content: Result<Value, _> = serde_json::from_str(sub_content);
-                    
+
                     if let Ok(film) = film_content {
                         if let Some(playback) = film.get("save_playback") {
-                            if let Some(is_m3u8) = playback.get("is_m3u8").and_then(|v| v.as_str()) {
-                                if is_m3u8 == "yes" {
-                                    if let Some(contents) = playback.get("contents").and_then(|v| v.as_str()) {
-                                        let m3u8_pattern = Regex::new(r"https://resourcese\.pku\.edu\.cn/play/0/harpocrates/\d+/\d+/\d+/([a-zA-Z0-9]+)(/.+)/playlist\.m3u8.*").unwrap();
-                                        if let Some(match_result) = m3u8_pattern.captures(contents) {
-                                            let hash = match_result.get(1).map(|m| m.as_str()).unwrap_or("");
-                                            return Some(format!("https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/downloadVideo.action?resourceId={}", hash));
-                                        }
-                                    }
-                                } else {
-                                    if let Some(contents) = playback.get("contents").and_then(|v| v.as_str()) {
-                                        return Some(contents.to_string());
-                                    }
+                            if let Some(contents) = playback.get("contents").and_then(|v| v.as_str()) {
+                                if !contents.is_empty() {
+                                    tracing::info!("提取到下载链接: {}", contents);
+                                    return Some(contents.to_string());
                                 }
                             }
                         }
@@ -195,6 +169,6 @@ pub async fn extract_download_url_from_sub_info(sub_info_json: &str) -> Option<S
             }
         }
     }
-    
+
     None
 }

@@ -25,6 +25,7 @@ struct SubmitApiRequest {
     pku_auth_one: String,
     pku_auth_two: String,
     video_url: String,
+    manual_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -32,6 +33,14 @@ struct SubmitWebRequest {
     pku_auth_one: String,
     pku_auth_two: String,
     video_url: String,
+    manual_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckM3u8Request {
+    video_url: String,
+    pku_auth_one: String,
+    pku_auth_two: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,6 +53,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/pkuvideo/submit", post(submit_api))
         .route("/api/pkuvideo/submit-web", post(submit_web))
+        .route("/api/pkuvideo/check-m3u8", post(check_m3u8))
         .route("/api/pkuvideo/jobs/:id", get(job_detail))
         .route("/api/pkuvideo/jobs", get(job_list))
         .route("/api/pkuvideo/jobs/:id/reexecute", post(reexecute_step))
@@ -73,6 +83,7 @@ async fn submit_api(
         req.video_url,
         req.pku_auth_one,
         req.pku_auth_two,
+        req.manual_key,
     )
     .await?;
 
@@ -95,6 +106,7 @@ async fn submit_web(
         req.video_url,
         req.pku_auth_one,
         req.pku_auth_two,
+        req.manual_key,
     )
     .await?;
 
@@ -102,6 +114,35 @@ async fn submit_web(
         job_id,
         status: "queued".to_string(),
     }))
+}
+
+async fn check_m3u8(
+    State(state): State<AppState>,
+    current_user: CurrentUser,
+    Json(req): Json<CheckM3u8Request>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    validate_input(&req.video_url, &req.pku_auth_one, &req.pku_auth_two)?;
+
+    if !req.video_url.contains(".m3u8") {
+        return Ok(Json(serde_json::json!({"is_m3u8": false})));
+    }
+
+    match crate::services::pkuvideo::fetch_m3u8_key_uri(
+        &req.video_url,
+        &req.pku_auth_one,
+        &req.pku_auth_two,
+        &state.login_cache,
+    ).await {
+        Ok(key_uri) => Ok(Json(serde_json::json!({
+            "is_m3u8": true,
+            "key_uri": key_uri,
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "is_m3u8": true,
+            "key_uri": "",
+            "error": e,
+        }))),
+    }
 }
 
 async fn job_detail(
@@ -172,6 +213,7 @@ async fn reexecute_step(
                 "",
                 "",
                 &state.login_cache,
+                None,
             )
                 .await
                 .map_err(|e| ApiError::Internal(e))?;
@@ -316,6 +358,7 @@ async fn enqueue_job(
     video_url: String,
     pku_auth_one: String,
     pku_auth_two: String,
+    manual_key: Option<String>,
 ) -> Result<Uuid, ApiError> {
     // 获取用户信息，校验学号与邮箱匹配
     let user = state.store.get_user(user_id).await.ok_or(ApiError::Unauthorized)?;
@@ -378,6 +421,7 @@ async fn enqueue_job(
             video_url,
             pku_auth_one,
             pku_auth_two,
+            manual_key,
         )
         .await
         {
@@ -478,6 +522,7 @@ pub async fn run_job_pipeline(
     video_url: String,
     pku_auth_one: String,
     pku_auth_two: String,
+    manual_key: Option<String>,
 ) -> Result<(), String> {
     tracing::info!("run_job_pipeline 开始执行, job_id: {}", job_id);
     mark_job_running(&state, job_id).await;
@@ -488,7 +533,7 @@ pub async fn run_job_pipeline(
 
     mark_step_running(&state, job_id, 0, "开始下载视频").await;
     let base_dir = PathBuf::from("./data/pkuvideo_jobs");
-    let result = run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two, &merged_settings, &state.login_cache).await;
+    let result = run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two, &merged_settings, &state.login_cache, manual_key.as_deref()).await;
 
     match result {
         Ok((transcript_path, notes_path, pdf_path)) => {
