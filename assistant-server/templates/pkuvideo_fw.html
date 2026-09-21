@@ -274,7 +274,7 @@
         submitBtn.style.display = "none";
 
         // 视频预览
-        const videoUrl = `/api/pkuvideo_fw/jobs/${job.id}/video`;
+        const videoUrl = `/api/pkuvideo_fw/jobs/${job.id}/video.mp4`;
         videoPreview.style.display = "block";
         videoPreview.innerHTML = `
           <video controls>
@@ -493,26 +493,12 @@
     }
 
     async function downloadVideo(jobId) {
-      try {
-        const response = await fetch(`/api/pkuvideo_fw/jobs/${jobId}/video`, {
-          method: "GET",
-          credentials: "include"
-        });
-        if (!response.ok) {
-          throw new Error("下载失败");
-        }
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `video_${jobId}.mp4`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-      } catch (err) {
-        alert("下载视频失败: " + err.message);
-      }
+      const a = document.createElement("a");
+      a.href = `/api/pkuvideo_fw/jobs/${jobId}/video.mp4?download=1`;
+      a.download = `video_${jobId}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
     }
 
     document.getElementById("goAppBtn").addEventListener("click", () => {

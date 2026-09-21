@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
+    http::{self, HeaderMap, StatusCode},
     routing::{delete, get, post},
     Json, Router,
 };
-use tokio_util::io::ReaderStream;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::task;
@@ -78,7 +79,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideo_fw/jobs/:id", get(job_detail))
         .route("/api/pkuvideo_fw/jobs", get(job_list))
         .route("/api/pkuvideo_fw/jobs/:id", delete(delete_job))
-        .route("/api/pkuvideo_fw/jobs/:id/video", get(download_video))
+        .route("/api/pkuvideo_fw/jobs/:id/video", get(serve_video))
+        .route("/api/pkuvideo_fw/jobs/:id/video.mp4", get(serve_video))
 }
 
 async fn submit(
@@ -358,10 +360,17 @@ async fn run_download_job(
     }
 }
 
-async fn download_video(
+#[derive(Debug, Deserialize)]
+struct VideoQuery {
+    download: Option<String>,
+}
+
+async fn serve_video(
     State(state): State<AppState>,
     current_user: CurrentUser,
     Path(job_id): Path<Uuid>,
+    Query(query): Query<VideoQuery>,
+    headers: HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     let video_full_path = {
         let jobs = state.pkuvideo_fw_jobs.read().await;
@@ -376,23 +385,109 @@ async fn download_video(
             .ok_or(ApiError::NotFound)?
     };
 
-    let file = tokio::fs::File::open(&video_full_path)
+    let mut file = tokio::fs::File::open(&video_full_path)
         .await
         .map_err(|_| ApiError::NotFound)?;
     let metadata = file.metadata().await.map_err(|_| ApiError::NotFound)?;
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
+    let file_size = metadata.len();
 
     let filename = format!("video_{}.mp4", job_id);
-    let response = axum::response::Response::builder()
+    let force_download = query.download.as_deref() == Some("1");
+
+    // Parse Range header
+    if let Some(range_header) = headers.get(http::header::RANGE) {
+        if let Ok(range_str) = range_header.to_str() {
+            if let Some((start, end)) = parse_byte_range(range_str, file_size) {
+                let length = end - start + 1;
+
+                file.seek(SeekFrom::Start(start))
+                    .await
+                    .map_err(|_| ApiError::Internal("seek失败".to_string()))?;
+
+                let mut handle = file.take(length);
+                let mut buf = vec![0u8; length as usize];
+                handle
+                    .read_exact(&mut buf)
+                    .await
+                    .map_err(|_| ApiError::Internal("读取视频数据失败".to_string()))?;
+
+                let response = axum::response::Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header("Content-Type", "video/mp4")
+                    .header(
+                        "Content-Range",
+                        format!("bytes {}-{}/{}", start, end, file_size),
+                    )
+                    .header("Content-Length", length)
+                    .header("Accept-Ranges", "bytes")
+                    .body(Body::from(buf))
+                    .map_err(|_| ApiError::Internal("构建响应失败".to_string()))?;
+
+                return Ok(response);
+            }
+        }
+    }
+
+    // Full file response (no Range, or invalid Range)
+    let mut buf = Vec::with_capacity(file_size as usize);
+    file.read_to_end(&mut buf)
+        .await
+        .map_err(|_| ApiError::Internal("读取视频文件失败".to_string()))?;
+
+    let mut builder = axum::response::Response::builder()
         .header("Content-Type", "video/mp4")
-        .header(
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", file_size);
+
+    if force_download {
+        builder = builder.header(
             "Content-Disposition",
             format!("attachment; filename=\"{}\"", filename),
-        )
-        .header("Content-Length", metadata.len())
-        .body(body)
-        .map_err(|_| ApiError::Internal("构建响应失败".to_string()))?;
+        );
+    } else {
+        builder = builder.header(
+            "Content-Disposition",
+            format!("inline; filename=\"{}\"", filename),
+        );
+    }
 
-    Ok(response)
+    builder
+        .body(Body::from(buf))
+        .map_err(|_| ApiError::Internal("构建响应失败".to_string()))
+}
+
+fn parse_byte_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
+    let range_str = range_str.strip_prefix("bytes=")?;
+    let parts: Vec<&str> = range_str.split(',').collect();
+    let first = parts.first()?;
+    let range_parts: Vec<&str> = first.split('-').collect();
+
+    if range_parts.len() != 2 {
+        return None;
+    }
+
+    let start: u64 = if range_parts[0].is_empty() {
+        // suffix range: "bytes=-500" means last 500 bytes
+        let suffix: u64 = range_parts[1].parse().ok()?;
+        if suffix > file_size {
+            return Some((0, file_size - 1));
+        }
+        return Some((file_size - suffix, file_size - 1));
+    } else {
+        range_parts[0].parse().ok()?
+    };
+
+    let end: u64 = if range_parts[1].is_empty() {
+        // open-ended: "bytes=0-"
+        file_size - 1
+    } else {
+        range_parts[1].parse().ok()?
+    };
+
+    if start > end || start >= file_size {
+        return None;
+    }
+
+    let end = end.min(file_size - 1);
+    Some((start, end))
 }
