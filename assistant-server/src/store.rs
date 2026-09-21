@@ -125,6 +125,7 @@ pub struct FileStore {
     wechat_channels: Arc<RwLock<HashMap<Uuid, FileUserWeChatChannel>>>,
     oauth_states: Arc<RwLock<Vec<FileWeChatOAuthState>>>,
     pkuvideo_jobs: Arc<RwLock<HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob>>>,
+    pkuvideo_fw_jobs: Arc<RwLock<HashMap<Uuid, crate::services::pkuvideo_fw::PkuVideoFwJob>>>,
     whitelist: Arc<RwLock<RegistrationWhitelist>>,
 }
 
@@ -143,6 +144,7 @@ impl FileStore {
             wechat_channels: Arc::new(RwLock::new(HashMap::new())),
             oauth_states: Arc::new(RwLock::new(Vec::new())),
             pkuvideo_jobs: Arc::new(RwLock::new(HashMap::new())),
+            pkuvideo_fw_jobs: Arc::new(RwLock::new(HashMap::new())),
             whitelist: Arc::new(RwLock::new(RegistrationWhitelist { allowed_emails: Vec::new() })),
         };
 
@@ -160,6 +162,7 @@ impl FileStore {
         self.load_wechat_channels().await.ok();
         self.load_oauth_states().await.ok();
         self.load_pkuvideo_jobs().await.ok();
+        self.load_pkuvideo_fw_jobs().await.ok();
         self.load_whitelist().await.ok();
         Ok(())
     }
@@ -638,5 +641,46 @@ impl FileStore {
 
     pub async fn get_all_pkuvideo_jobs(&self) -> HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob> {
         self.pkuvideo_jobs.read().await.clone()
+    }
+
+    // ===== PKU Video FW Jobs =====
+    async fn load_pkuvideo_fw_jobs(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = self.data_dir.join("pkuvideo_fw_jobs.json");
+        if path.exists() {
+            let data = tokio::fs::read_to_string(&path).await?;
+            let jobs: HashMap<Uuid, crate::services::pkuvideo_fw::PkuVideoFwJob> = serde_json::from_str(&data)?;
+            *self.pkuvideo_fw_jobs.write().await = jobs;
+        }
+        Ok(())
+    }
+
+    async fn save_pkuvideo_fw_jobs(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let path = self.data_dir.join("pkuvideo_fw_jobs.json");
+        let data = self.pkuvideo_fw_jobs.read().await;
+        let json = serde_json::to_string_pretty(&*data)?;
+        tokio::fs::write(&path, json).await?;
+        Ok(())
+    }
+
+    pub async fn insert_pkuvideo_fw_job(&self, job: crate::services::pkuvideo_fw::PkuVideoFwJob) -> Result<(), Box<dyn std::error::Error>> {
+        self.pkuvideo_fw_jobs.write().await.insert(job.id, job);
+        self.save_pkuvideo_fw_jobs().await?;
+        Ok(())
+    }
+
+    pub async fn update_pkuvideo_fw_job(&self, job: crate::services::pkuvideo_fw::PkuVideoFwJob) -> Result<(), Box<dyn std::error::Error>> {
+        self.pkuvideo_fw_jobs.write().await.insert(job.id, job);
+        self.save_pkuvideo_fw_jobs().await?;
+        Ok(())
+    }
+
+    pub async fn delete_pkuvideo_fw_job(&self, job_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
+        self.pkuvideo_fw_jobs.write().await.remove(&job_id);
+        self.save_pkuvideo_fw_jobs().await?;
+        Ok(())
+    }
+
+    pub async fn get_all_pkuvideo_fw_jobs(&self) -> HashMap<Uuid, crate::services::pkuvideo_fw::PkuVideoFwJob> {
+        self.pkuvideo_fw_jobs.read().await.clone()
     }
 }

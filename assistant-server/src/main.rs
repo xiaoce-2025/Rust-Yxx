@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_state = AppState::new(settings, store);
     // 从FileStore加载pkuvideo_jobs到内存
     app_state.load_pkuvideo_jobs().await;
+    app_state.load_pkuvideo_fw_jobs().await;
 
     services::scheduler::start_wechat_listener_scheduler(app_state.clone());
 

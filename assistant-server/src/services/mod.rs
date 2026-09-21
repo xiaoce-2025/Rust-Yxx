@@ -4,6 +4,7 @@ pub mod lesson_parser;
 pub mod lesson_storage;
 pub mod login_cache;
 pub mod pkuvideo;
+pub mod pkuvideo_fw;
 pub mod pkulogin;
 pub mod scheduler;
 pub mod video_downloader;

@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>「严小希」小助手-视频下载</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #13241d;
+      --line: rgba(19,36,29,.18);
+      --accent: #0c7a57;
+      --warn: #982a3d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Manrope", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(50rem 20rem at -10% -10%, rgba(181,91,35,.2), transparent 60%),
+        radial-gradient(60rem 26rem at 110% 110%, rgba(12,122,87,.2), transparent 60%),
+        #edf3ed;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.82);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 18px 38px rgba(0,0,0,.1);
+      padding: 20px;
+    }
+    h1 {
+      margin: 0;
+      font-family: "Noto Serif SC", serif;
+      font-size: 30px;
+    }
+    .sub { margin-top: 6px; color: #4f645b; font-size: 13px; }
+    .toolbar { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-weight: 700;
+      background: var(--accent);
+      color: #fff;
+    }
+    button.ghost {
+      color: var(--ink);
+      background: rgba(255,255,255,.8);
+      border: 1px solid var(--line);
+    }
+    .grid {
+      margin-top: 14px;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 1fr 1fr;
+    }
+    .field label { font-size: 12px; display: block; margin-bottom: 4px; color: #4f635b; }
+    .field input {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      padding: 10px;
+      font: inherit;
+      background: #fff;
+    }
+    .full { grid-column: 1 / -1; }
+    .status { margin-top: 10px; color: var(--warn); min-height: 18px; font-size: 12px; }
+    .card {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,.7);
+      padding: 12px;
+    }
+    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+    @media (max-width: 760px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .modal-overlay {
+      display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center;
+    }
+    .modal-dialog {
+      background: #fff; border-radius: 16px; padding: 24px; max-width: 520px; width: 90%;
+      box-shadow: 0 20px 60px rgba(0,0,0,.3);
+    }
+    .modal-dialog h3 { margin: 0 0 8px; font-family: "Noto Serif SC", serif; }
+    .modal-dialog p { font-size: 13px; color: #6b7280; margin: 0 0 12px; }
+    .key-url-box { background: #f3f4f6; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+    .key-url-box a { font-size: 12px; word-break: break-all; color: var(--accent); }
+    .modal-dialog textarea {
+      width: 100%; height: 80px; border-radius: 8px; border: 1px solid var(--line);
+      padding: 10px; font: inherit; font-size: 12px; resize: vertical;
+    }
+    .modal-actions { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
+    .drop-zone {
+      border: 2px dashed var(--line); border-radius: 10px; padding: 20px;
+      text-align: center; color: #9ca3af; font-size: 13px; margin-bottom: 12px;
+      transition: border-color .2s, background .2s; cursor: pointer;
+    }
+    .drop-zone.drag-over { border-color: var(--accent); background: rgba(12,122,87,.06); }
+    .drop-zone.loaded { border-color: var(--accent); border-style: solid; background: rgba(12,122,87,.04); }
+    .drop-zone.loaded .drop-icon { color: var(--accent); }
+    .key-hint { font-size: 12px; min-height: 18px; margin: -8px 0 8px; }
+    .key-hint.ok { color: var(--accent); }
+    .key-hint.err { color: var(--warn); }
+    .job-result {
+      margin-top: 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,.7);
+      padding: 12px;
+    }
+    .result-actions {
+      margin-top: 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .action-btn {
+      padding: 8px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.8);
+      color: var(--ink);
+      font-size: 12px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .action-btn:hover {
+      background: var(--accent);
+      color: #fff;
+    }
+    .action-btn.delete {
+      border-color: var(--warn);
+      color: var(--warn);
+    }
+    .action-btn.delete:hover {
+      background: var(--warn);
+      color: #fff;
+    }
+    video {
+      width: 100%;
+      max-height: 480px;
+      border-radius: 10px;
+      background: #000;
+    }
+    .progress-wrap {
+      margin-top: 12px;
+      background: #e5e7eb;
+      border-radius: 8px;
+      height: 24px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #0c7a57, #22c55e);
+      border-radius: 8px;
+      transition: width .3s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 700;
+      color: #fff;
+      min-width: 0;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>PKU Video 视频下载</h1>
+    <div class="sub">输入课程回放的下载链接和你的门户账密，下载视频后可直接在线预览。每个用户同时只能处理一个视频。（IAAA账密用于教学网登陆鉴权，你的账密会被直接发送至北大IAAA验证服务器，我们不会储存您的账密）</div>
+
+    <div class="toolbar">
+      <button id="goAppBtn" class="ghost">返回聊天主页</button>
+      <button id="submitBtn">提交下载任务</button>
+    </div>
+
+    <section class="grid" id="inputSection">
+      <div class="field full">
+        <label for="videoUrl">视频下载链接</label>
+        <input id="videoUrl" placeholder="https://..." />
+        <div style="font-size: 12px; margin-top: 4px; color: #6b7280;">如何获取课程回放下载链接？<a href="https://www.cxxdgc.cn/blog/project/videodownload2025autumn_addition" target="_blank" style="color: #0c7a57;">点此查看</a></div>
+      </div>
+      <div class="field">
+        <label for="pkuAuthOne">IAAA账号</label>
+        <input id="pkuAuthOne" placeholder="2x000xxxxx" />
+      </div>
+      <div class="field">
+        <label for="pkuAuthTwo">IAAA密码</label>
+        <input id="pkuAuthTwo" type="password" placeholder="xxxxx" />
+      </div>
+    </section>
+
+    <div id="status" class="status"></div>
+
+    <section class="job-result" id="jobResult" style="display: none;">
+      <strong>任务状态</strong>
+      <div class="mono" id="jobMeta">加载中...</div>
+      <div class="progress-wrap" id="progressWrap" style="display: none;">
+        <div class="progress-bar" id="progressBar" style="width: 0%;">0%</div>
+      </div>
+      <div id="videoPreview" style="display: none; margin-top: 12px;"></div>
+      <div class="result-actions" id="resultActions"></div>
+    </section>
+
+    <div class="modal-overlay" id="keyModal">
+      <div class="modal-dialog">
+        <h3>需要解密密钥</h3>
+        <p>此视频为 m3u8 加密流，请点击下方链接在新页面中打开，或将下载的密钥文件拖入下方区域：</p>
+        <div class="key-url-box">
+          <a id="keyUrl" href="#" target="_blank"></a>
+        </div>
+        <div class="drop-zone" id="dropZone">
+          <span id="dropHint">拖拽密钥文件到此处</span>
+        </div>
+        <textarea id="manualKey" placeholder="或在此粘贴密钥内容..." oninput="validateKey()"></textarea>
+        <div id="keyHint" class="key-hint"></div>
+        <div class="modal-actions">
+          <button id="keyCancelBtn" class="ghost">取消</button>
+          <button id="keyConfirmBtn">提交密钥</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const jobMetaEl = document.getElementById("jobMeta");
+    const jobResultEl = document.getElementById("jobResult");
+    const inputSection = document.getElementById("inputSection");
+    const submitBtn = document.getElementById("submitBtn");
+    const videoPreview = document.getElementById("videoPreview");
+    const resultActions = document.getElementById("resultActions");
+    const progressWrap = document.getElementById("progressWrap");
+    const progressBar = document.getElementById("progressBar");
+    let activeJobId = "";
+    let pollTimer = null;
+
+    async function api(path, method = "GET", body) {
+      const res = await fetch(path, {
+        method,
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const txt = await res.text();
+      let payload = {};
+      try { payload = txt ? JSON.parse(txt) : {}; } catch { payload = { raw: txt }; }
+      if (!res.ok) throw new Error(payload.error || payload.raw || ("HTTP " + res.status));
+      return payload;
+    }
+
+    function esc(s) {
+      return String(s || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+    }
+
+    function renderJob(job) {
+      if (job.status === "succeeded") {
+        jobMetaEl.textContent = "下载完成！";
+        progressWrap.style.display = "none";
+        jobResultEl.style.display = "block";
+        inputSection.style.display = "none";
+        submitBtn.style.display = "none";
+
+        // 视频预览
+        const videoUrl = `/api/pkuvideo_fw/jobs/${job.id}/video`;
+        videoPreview.style.display = "block";
+        videoPreview.innerHTML = `
+          <video controls>
+            <source src="${videoUrl}" type="video/mp4">
+            您的浏览器不支持 video 标签
+          </video>
+        `;
+
+        resultActions.innerHTML = `
+          <button class="action-btn" onclick="downloadVideo('${job.id}')" style="background: var(--accent); color: #fff;">下载 MP4</button>
+          <button class="action-btn delete" onclick="deleteJob('${job.id}')">删除任务</button>
+        `;
+      } else if (job.status === "failed") {
+        jobMetaEl.textContent = "下载失败: " + esc(job.error || "未知错误");
+        progressWrap.style.display = "none";
+        jobResultEl.style.display = "block";
+        videoPreview.style.display = "none";
+        resultActions.innerHTML = `
+          <button class="action-btn delete" onclick="deleteJob('${job.id}')">删除任务</button>
+        `;
+      } else if (job.status === "running" || job.status === "pending") {
+        const pct = job.progress != null ? job.progress : 0;
+        jobMetaEl.textContent = "正在下载中，请稍后...";
+        progressWrap.style.display = "block";
+        progressBar.style.width = pct + "%";
+        progressBar.textContent = pct + "%";
+        jobResultEl.style.display = "block";
+        inputSection.style.display = "none";
+        submitBtn.style.display = "none";
+        videoPreview.style.display = "none";
+        resultActions.innerHTML = "";
+      }
+    }
+
+    async function checkLogin() {
+      try {
+        await api("/api/auth/me");
+      } catch {
+        location.href = "/auth?next=/pkuvideo_fw";
+      }
+    }
+
+    async function checkExistingJob() {
+      try {
+        const jobs = await api("/api/pkuvideo_fw/jobs");
+        if (jobs.length > 0) {
+          const job = jobs[0];
+          activeJobId = job.id;
+          renderJob(job);
+          if (job.status === "running" || job.status === "pending") {
+            startPolling();
+          }
+        } else {
+          // 没有任务，显示输入表单
+          inputSection.style.display = "";
+          submitBtn.style.display = "";
+          jobResultEl.style.display = "none";
+        }
+      } catch (err) {
+        statusEl.textContent = "加载任务状态失败: " + err.message;
+      }
+    }
+
+    async function submitJob(manualKey) {
+      statusEl.textContent = "提交中...";
+      const body = {
+        video_url: document.getElementById("videoUrl").value.trim(),
+        pku_auth_one: document.getElementById("pkuAuthOne").value.trim(),
+        pku_auth_two: document.getElementById("pkuAuthTwo").value.trim()
+      };
+      if (manualKey) body.manual_key = manualKey;
+
+      api("/api/pkuvideo_fw/submit", "POST", body)
+        .then(resp => {
+          activeJobId = resp.job_id;
+          statusEl.textContent = "提交成功，任务已入队。";
+          inputSection.style.display = "none";
+          submitBtn.style.display = "none";
+          jobResultEl.style.display = "block";
+          jobMetaEl.textContent = "正在下载中，请稍后...";
+          startPolling();
+        })
+        .catch(err => {
+          statusEl.textContent = "提交失败: " + err.message;
+        });
+    }
+
+    async function checkM3u8AndSubmit() {
+      const url = document.getElementById("videoUrl").value.trim();
+      if (!url.includes(".m3u8")) return submitJob();
+
+      statusEl.textContent = "正在检测视频加密信息...";
+      try {
+        const resp = await api("/api/pkuvideo_fw/check-m3u8", "POST", {
+          video_url: url,
+          pku_auth_one: document.getElementById("pkuAuthOne").value.trim(),
+          pku_auth_two: document.getElementById("pkuAuthTwo").value.trim()
+        });
+        if (resp.is_m3u8 && resp.key_uri) {
+          document.getElementById("keyUrl").href = resp.key_uri;
+          document.getElementById("keyUrl").textContent = resp.key_uri;
+          document.getElementById("manualKey").value = "";
+          document.getElementById("keyModal").style.display = "flex";
+        } else {
+          submitJob();
+        }
+      } catch (err) {
+        statusEl.textContent = "检测失败: " + err.message;
+      }
+    }
+
+    document.getElementById("keyConfirmBtn").addEventListener("click", () => {
+      const hint = document.getElementById("keyHint");
+      const key = document.getElementById("manualKey").value.trim();
+      if (!key) { hint.textContent = "请粘贴密钥内容或拖入文件"; hint.className = "key-hint err"; return; }
+      if (new TextEncoder().encode(key).length > 20) {
+        hint.textContent = "密钥过长（超过20字节）"; hint.className = "key-hint err";
+        return;
+      }
+      document.getElementById("keyModal").style.display = "none";
+      submitJob(key);
+    });
+
+    document.getElementById("keyCancelBtn").addEventListener("click", () => {
+      document.getElementById("keyModal").style.display = "none";
+      statusEl.textContent = "已取消";
+    });
+
+    function validateKey() {
+      const key = document.getElementById("manualKey").value.trim();
+      const hint = document.getElementById("keyHint");
+      if (!key) { hint.textContent = ""; hint.className = "key-hint"; return; }
+      const size = new TextEncoder().encode(key).length;
+      if (size > 20) {
+        hint.textContent = `密钥过长（${size} 字节，超过20字节上限）`;
+        hint.className = "key-hint err";
+      } else {
+        hint.textContent = `密钥长度 ${size} 字节，格式正确`;
+        hint.className = "key-hint ok";
+      }
+    }
+
+    // --- 拖拽上传 ---
+    const dropZone = document.getElementById("dropZone");
+    const dropHint = document.getElementById("dropHint");
+    const textarea = document.getElementById("manualKey");
+
+    function handleDropFile(file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = reader.result.trim();
+        textarea.value = text;
+        validateKey();
+        dropHint.textContent = file.name;
+        dropZone.classList.add("loaded");
+      };
+      reader.readAsText(file);
+    }
+
+    ['dragenter','dragover'].forEach(ev => {
+      dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+    });
+    ['dragleave','drop'].forEach(ev => {
+      dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.remove("drag-over"); });
+    });
+    dropZone.addEventListener("drop", e => {
+      if (e.dataTransfer.files.length) handleDropFile(e.dataTransfer.files[0]);
+    });
+    dropZone.addEventListener("click", () => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.onchange = () => { if (input.files.length) handleDropFile(input.files[0]); };
+      input.click();
+    });
+
+    async function pollJob() {
+      if (!activeJobId) return;
+      try {
+        const job = await api("/api/pkuvideo_fw/jobs/" + activeJobId);
+        renderJob(job);
+        if (job.status === "succeeded" || job.status === "failed") {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+      } catch (err) {
+        statusEl.textContent = "查询任务失败: " + err.message;
+      }
+    }
+
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollJob();
+      pollTimer = setInterval(pollJob, 2000);
+    }
+
+    async function deleteJob(jobId) {
+      if (!confirm("确定要删除此任务吗？删除后将无法恢复，视频文件也会被删除。")) {
+        return;
+      }
+
+      try {
+        statusEl.textContent = "正在删除任务...";
+        await api("/api/pkuvideo_fw/jobs/" + jobId, "DELETE");
+        statusEl.textContent = "任务删除成功";
+        activeJobId = "";
+        // 重新显示输入表单
+        inputSection.style.display = "";
+        submitBtn.style.display = "";
+        jobResultEl.style.display = "none";
+        videoPreview.style.display = "none";
+        videoPreview.innerHTML = "";
+        resultActions.innerHTML = "";
+      } catch (err) {
+        statusEl.textContent = "删除任务失败: " + err.message;
+      }
+    }
+
+    async function downloadVideo(jobId) {
+      try {
+        const response = await fetch(`/api/pkuvideo_fw/jobs/${jobId}/video`, {
+          method: "GET",
+          credentials: "include"
+        });
+        if (!response.ok) {
+          throw new Error("下载失败");
+        }
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `video_${jobId}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+      } catch (err) {
+        alert("下载视频失败: " + err.message);
+      }
+    }
+
+    document.getElementById("goAppBtn").addEventListener("click", () => {
+      location.href = "/app";
+    });
+    document.getElementById("submitBtn").addEventListener("click", checkM3u8AndSubmit);
+
+    checkLogin().then(() => checkExistingJob());
+  </script>
+</body>
+</html>

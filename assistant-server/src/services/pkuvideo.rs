@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -112,6 +113,7 @@ pub async fn run_pipeline(
         manual_key,
         settings.pkuvideo.m3u8_concurrency,
         settings.pkuvideo.m3u8_segment_timeout_seconds,
+        None,
     )
         .await
         .map_err(|e| format!("step=0;{e}"))?;
@@ -155,16 +157,21 @@ pub async fn run_pipeline(
     ))
 }
 
-pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str, login_cache: &LoginCache, manual_key: Option<&str>, concurrency: usize, segment_timeout_secs: u64) -> Result<(), String> {
+pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str, login_cache: &LoginCache, manual_key: Option<&str>, concurrency: usize, segment_timeout_secs: u64, progress: Option<Arc<AtomicU8>>) -> Result<(), String> {
     if url.contains(".m3u8") {
-        return download_m3u8_video(url, video_path, username, password, login_cache, manual_key, concurrency, segment_timeout_secs).await;
+        return download_m3u8_video(url, video_path, username, password, login_cache, manual_key, concurrency, segment_timeout_secs, progress).await;
     }
 
     let bytes = download_with_pku_cookie(url, username, password, login_cache).await?;
 
     fs::write(video_path, bytes)
         .await
-        .map_err(|e| format!("写入视频文件失败: {e}"))
+        .map_err(|e| format!("写入视频文件失败: {e}"))?;
+
+    if let Some(p) = progress {
+        p.store(100, Ordering::SeqCst);
+    }
+    Ok(())
 }
 
 /// 下载并解析 m3u8，返回密钥 URI（用于前端弹窗展示）
@@ -285,6 +292,7 @@ async fn download_m3u8_video(
     manual_key: Option<&str>,
     concurrency: usize,
     segment_timeout_secs: u64,
+    progress: Option<Arc<AtomicU8>>,
 ) -> Result<(), String> {
     // 1. 获取 m3u8 播放列表
     let m3u8_bytes = download_with_pku_cookie(m3u8_url, username, password, login_cache).await?;
@@ -395,6 +403,10 @@ async fn download_m3u8_video(
         }
     }
 
+    if let Some(ref p) = progress {
+        p.store((successes.len() * 85 / total) as u8, Ordering::SeqCst);
+    }
+
     // Phase 2: 重试失败的分片
     for (idx, err) in &failures {
         tracing::warn!("重试失败分片 {} (原因: {})", idx, err);
@@ -428,6 +440,10 @@ async fn download_m3u8_video(
     // 按 index 排序
     successes.sort_by_key(|(i, _)| *i);
     let decrypted_paths: Vec<std::path::PathBuf> = successes.into_iter().map(|(_, p)| p).collect();
+
+    if let Some(ref p) = progress {
+        p.store(90, Ordering::SeqCst);
+    }
 
     // 6. 创建 ffmpeg concat 文件列表
     let concat_list_path = temp_dir.join("concat_list.txt");
@@ -463,7 +479,12 @@ async fn download_m3u8_video(
     match ffmpeg_result {
         Ok(output) if output.status.success() => {
             tracing::info!("m3u8→mp4转换成功: {}", video_path_str);
-            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            if let Some(ref p) = progress {
+                p.store(100, Ordering::SeqCst);
+            }
+            if let Err(e) = tokio::fs::remove_dir_all(&temp_dir).await {
+                tracing::warn!("清理临时目录失败 ({}): {}", temp_dir.display(), e);
+            }
             Ok(())
         }
         Ok(output) => {
