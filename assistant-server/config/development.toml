@@ -38,3 +38,8 @@ max_retries = 120
 api_key = "sk-d4928af4b4c84efda129cf3a904d41da"
 base_url = "https://api.deepseek.com"
 model = "deepseek-v4-flash"
+
+# PKU Video 配置
+[pkuvideo]
+m3u8_concurrency = 4
+m3u8_segment_timeout_seconds = 120

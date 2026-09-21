@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::{fs, process::Command};
+use tokio::sync::Semaphore;
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use crate::services::pkulogin::{download_with_pku_cookie, download_with_token_cookie};
@@ -107,6 +110,8 @@ pub async fn run_pipeline(
         &login_credential_two,
         login_cache,
         manual_key,
+        settings.pkuvideo.m3u8_concurrency,
+        settings.pkuvideo.m3u8_segment_timeout_seconds,
     )
         .await
         .map_err(|e| format!("step=0;{e}"))?;
@@ -150,9 +155,9 @@ pub async fn run_pipeline(
     ))
 }
 
-pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str, login_cache: &LoginCache, manual_key: Option<&str>) -> Result<(), String> {
+pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str, login_cache: &LoginCache, manual_key: Option<&str>, concurrency: usize, segment_timeout_secs: u64) -> Result<(), String> {
     if url.contains(".m3u8") {
-        return download_m3u8_video(url, video_path, username, password, login_cache, manual_key).await;
+        return download_m3u8_video(url, video_path, username, password, login_cache, manual_key, concurrency, segment_timeout_secs).await;
     }
 
     let bytes = download_with_pku_cookie(url, username, password, login_cache).await?;
@@ -278,6 +283,8 @@ async fn download_m3u8_video(
     password: &str,
     login_cache: &LoginCache,
     manual_key: Option<&str>,
+    concurrency: usize,
+    segment_timeout_secs: u64,
 ) -> Result<(), String> {
     // 1. 获取 m3u8 播放列表
     let m3u8_bytes = download_with_pku_cookie(m3u8_url, username, password, login_cache).await?;
@@ -331,38 +338,96 @@ async fn download_m3u8_video(
         .map_err(|e| format!("保存m3u8调试文件失败: {e}"))?;
     tracing::info!("调试文件已保存到: {}", temp_dir.display());
 
-    // 5. 下载并解密每个分片
-    let mut decrypted_paths: Vec<std::path::PathBuf> = Vec::new();
+    // 5. 并行下载并解密每个分片（带超时和重试）
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let total = segments.len();
+    let mut tasks = Vec::with_capacity(total);
+
     for (i, seg_url) in segments.iter().enumerate() {
         let full_url = resolve_url(&base_url, seg_url);
         let enc_path = temp_dir.join(format!("seg_{:04}_enc.ts", i));
         let dec_path = temp_dir.join(format!("seg_{:04}.ts", i));
+        let iv_hex = iv_override
+            .clone()
+            .unwrap_or_else(|| format!("{:032x}", i as u64));
+        let key_hex = key_hex.clone();
+        let username = username.to_string();
+        let password = password.to_string();
+        let login_cache = login_cache.clone();
+        let sem = semaphore.clone();
+        let dur = Duration::from_secs(segment_timeout_secs);
 
-        tracing::info!("下载分片 {}/{}: {}", i + 1, segments.len(), full_url);
+        tasks.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await;
+            tracing::info!(
+                "下载分片 {}/{}: {} (并发许可获取)",
+                i + 1, total, full_url
+            );
 
-        let seg_bytes = download_with_token_cookie(&full_url, username, password, login_cache).await?;
-        tokio::fs::write(&enc_path, &seg_bytes)
-            .await
-            .map_err(|e| format!("写入分片文件失败: {e}"))?;
+            let result = timeout(dur, async {
+                let seg_bytes = download_with_token_cookie(&full_url, &username, &password, &login_cache).await?;
+                tokio::fs::write(&enc_path, &seg_bytes)
+                    .await
+                    .map_err(|e| format!("写入分片文件失败: {e}"))?;
 
-        // IV: 优先使用显式 IV，否则序号转为 128-bit 大端整数
-        let iv_hex = iv_override.clone().unwrap_or_else(|| {
-            format!("{:032x}", i as u64)
-        });
-        tracing::info!(
-            "分片{}: iv_hex={}, key_hex前8位={}...",
-            i,
-            iv_hex,
-            &key_hex[..8.min(key_hex.len())]
-        );
+                decrypt_aes128_cbc(&enc_path, &dec_path, &key_hex, &iv_hex).await
+            }).await;
 
-        decrypt_aes128_cbc(&enc_path, &dec_path, &key_hex, &iv_hex)
-            .await
-            .map_err(|e| format!("解密分片 {} 失败: {}", i, e))?;
+            drop(_permit);
 
-        // 保留加密分片供调试
-        decrypted_paths.push(dec_path);
+            let inner = match result {
+                Ok(inner) => inner,
+                Err(_elapsed) => Err(format!("分片 {} 超时({}s)", i, segment_timeout_secs)),
+            };
+
+            (i, inner.map(|_| dec_path))
+        }));
     }
+
+    // 收集结果
+    let mut successes: Vec<(usize, std::path::PathBuf)> = Vec::new();
+    let mut failures: Vec<(usize, String)> = Vec::new();
+    for task in tasks {
+        let (idx, result) = task.await.map_err(|e| format!("分片任务 panic: {e}"))?;
+        match result {
+            Ok(path) => successes.push((idx, path)),
+            Err(e) => failures.push((idx, e)),
+        }
+    }
+
+    // Phase 2: 重试失败的分片
+    for (idx, err) in &failures {
+        tracing::warn!("重试失败分片 {} (原因: {})", idx, err);
+        let seg_url = &segments[*idx];
+        let full_url = resolve_url(&base_url, seg_url);
+        let enc_path = temp_dir.join(format!("seg_{:04}_enc.ts", *idx));
+        let dec_path = temp_dir.join(format!("seg_{:04}.ts", *idx));
+        let iv_hex = iv_override
+            .clone()
+            .unwrap_or_else(|| format!("{:032x}", *idx as u64));
+        let dur = Duration::from_secs(segment_timeout_secs);
+
+        let retry_result = timeout(dur, async {
+            let seg_bytes = download_with_token_cookie(&full_url, username, password, login_cache).await?;
+            tokio::fs::write(&enc_path, &seg_bytes)
+                .await
+                .map_err(|e| format!("写入分片文件失败: {e}"))?;
+            decrypt_aes128_cbc(&enc_path, &dec_path, &key_hex, &iv_hex).await
+        }).await;
+
+        match retry_result {
+            Ok(Ok(())) => {
+                tracing::info!("分片 {} 重试成功", idx);
+                successes.push((*idx, dec_path));
+            }
+            Ok(Err(e)) => return Err(format!("分片 {} 重试失败: {}", idx, e)),
+            Err(_) => return Err(format!("分片 {} 重试超时", idx)),
+        }
+    }
+
+    // 按 index 排序
+    successes.sort_by_key(|(i, _)| *i);
+    let decrypted_paths: Vec<std::path::PathBuf> = successes.into_iter().map(|(_, p)| p).collect();
 
     // 6. 创建 ffmpeg concat 文件列表
     let concat_list_path = temp_dir.join("concat_list.txt");

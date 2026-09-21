@@ -11,6 +11,8 @@ pub struct Settings {
     pub paraformer: ParaformerConfig,
     #[serde(rename = "llm_deepseek")]
     pub deepseek: DeepSeekConfig,
+    #[serde(default)]
+    pub pkuvideo: PkuVideoConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +57,26 @@ pub struct DeepSeekConfig {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PkuVideoConfig {
+    #[serde(default = "default_m3u8_concurrency")]
+    pub m3u8_concurrency: usize,
+    #[serde(default = "default_m3u8_segment_timeout")]
+    pub m3u8_segment_timeout_seconds: u64,
+}
+
+fn default_m3u8_concurrency() -> usize { 3 }
+fn default_m3u8_segment_timeout() -> u64 { 120 }
+
+impl Default for PkuVideoConfig {
+    fn default() -> Self {
+        PkuVideoConfig {
+            m3u8_concurrency: 3,
+            m3u8_segment_timeout_seconds: 120,
+        }
+    }
 }
 
 impl Settings {

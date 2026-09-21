@@ -12,6 +12,7 @@ pub struct LoginCacheEntry {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone)]
 pub struct LoginCache {
     cache: Arc<RwLock<HashMap<String, LoginCacheEntry>>>,
     ttl_minutes: i64,
