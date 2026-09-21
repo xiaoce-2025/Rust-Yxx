@@ -172,6 +172,17 @@
       padding: 10px; font: inherit; font-size: 12px; resize: vertical;
     }
     .modal-actions { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
+    .drop-zone {
+      border: 2px dashed var(--line); border-radius: 10px; padding: 20px;
+      text-align: center; color: #9ca3af; font-size: 13px; margin-bottom: 12px;
+      transition: border-color .2s, background .2s; cursor: pointer;
+    }
+    .drop-zone.drag-over { border-color: var(--accent); background: rgba(12,122,87,.06); }
+    .drop-zone.loaded { border-color: var(--accent); border-style: solid; background: rgba(12,122,87,.04); }
+    .drop-zone.loaded .drop-icon { color: var(--accent); }
+    .key-hint { font-size: 12px; min-height: 18px; margin: -8px 0 8px; }
+    .key-hint.ok { color: var(--accent); }
+    .key-hint.err { color: var(--warn); }
   </style>
 </head>
 <body>
@@ -221,11 +232,15 @@
   <div class="modal-overlay" id="keyModal">
       <div class="modal-dialog">
         <h3>需要解密密钥</h3>
-        <p>此视频为 m3u8 加密流，请点击下方链接在新页面中打开，将获取到的密钥内容粘贴到输入框中：</p>
+        <p>此视频为 m3u8 加密流，请点击下方链接在新页面中打开，或将下载的密钥文件拖入下方区域：</p>
         <div class="key-url-box">
           <a id="keyUrl" href="#" target="_blank"></a>
         </div>
-        <textarea id="manualKey" placeholder="在此粘贴密钥内容..."></textarea>
+        <div class="drop-zone" id="dropZone">
+          <span id="dropHint">拖拽密钥文件到此处</span>
+        </div>
+        <textarea id="manualKey" placeholder="或在此粘贴密钥内容..." oninput="validateKey()"></textarea>
+        <div id="keyHint" class="key-hint"></div>
         <div class="modal-actions">
           <button id="keyCancelBtn" class="ghost">取消</button>
           <button id="keyConfirmBtn">提交密钥</button>
@@ -351,8 +366,13 @@
     }
 
     document.getElementById("keyConfirmBtn").addEventListener("click", () => {
+      const hint = document.getElementById("keyHint");
       const key = document.getElementById("manualKey").value.trim();
-      if (!key) { statusEl.textContent = "请粘贴密钥内容"; return; }
+      if (!key) { hint.textContent = "请粘贴密钥内容或拖入文件"; hint.className = "key-hint err"; return; }
+      if (new TextEncoder().encode(key).length > 20) {
+        hint.textContent = "密钥过长（超过20字节）"; hint.className = "key-hint err";
+        return;
+      }
       document.getElementById("keyModal").style.display = "none";
       submitJob(key);
     });
@@ -360,6 +380,53 @@
     document.getElementById("keyCancelBtn").addEventListener("click", () => {
       document.getElementById("keyModal").style.display = "none";
       statusEl.textContent = "已取消";
+    });
+
+    function validateKey() {
+      const key = document.getElementById("manualKey").value.trim();
+      const hint = document.getElementById("keyHint");
+      if (!key) { hint.textContent = ""; hint.className = "key-hint"; return; }
+      const size = new TextEncoder().encode(key).length;
+      if (size > 20) {
+        hint.textContent = `密钥过长（${size} 字节，超过20字节上限）`;
+        hint.className = "key-hint err";
+      } else {
+        hint.textContent = `密钥长度 ${size} 字节，格式正确`;
+        hint.className = "key-hint ok";
+      }
+    }
+
+    // --- 拖拽上传 ---
+    const dropZone = document.getElementById("dropZone");
+    const dropHint = document.getElementById("dropHint");
+    const textarea = document.getElementById("manualKey");
+
+    function handleDropFile(file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = reader.result.trim();
+        textarea.value = text;
+        validateKey();
+        dropHint.textContent = file.name;
+        dropZone.classList.add("loaded");
+      };
+      reader.readAsText(file);
+    }
+
+    ['dragenter','dragover'].forEach(ev => {
+      dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+    });
+    ['dragleave','drop'].forEach(ev => {
+      dropZone.addEventListener(ev, e => { e.preventDefault(); dropZone.classList.remove("drag-over"); });
+    });
+    dropZone.addEventListener("drop", e => {
+      if (e.dataTransfer.files.length) handleDropFile(e.dataTransfer.files[0]);
+    });
+    dropZone.addEventListener("click", () => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.onchange = () => { if (input.files.length) handleDropFile(input.files[0]); };
+      input.click();
     });
 
     async function pollJob() {
