@@ -24,6 +24,25 @@ pub struct PkuLoginResult {
     pub user_agent: String,
 }
 
+fn null_device() -> &'static str {
+    if cfg!(windows) { "NUL" } else { "/dev/null" }
+}
+
+/// Use the browser-style cookie jar, including domain/path scoped and HttpOnly cookies.
+/// Do not replace it with a manually constructed Cookie header.
+pub fn download_in_session(login: &PkuLoginResult, url: &str) -> Result<Vec<u8>, String> {
+    let cookie_file = login.cookie_file.to_string_lossy().to_string();
+    run_curl_bytes(&vec![
+        "-sS".into(), "-k".into(), "-L".into(),
+        "--connect-timeout".into(), "15".into(),
+        "--max-time".into(), "60".into(),
+        "-A".into(), login.user_agent.clone(),
+        "-b".into(), cookie_file.clone(),
+        "-c".into(), cookie_file,
+        url.into(),
+    ])
+}
+
 pub async fn login_iaaa_and_get_cookies_with_cache(
     username: &str,
     password: &str,
@@ -134,9 +153,8 @@ pub async fn login_iaaa_and_get_cookies(
             "-b".to_string(),
             cookie_file_str.clone(),
             "-o".to_string(),
-            "/tmp/campus_login_response.html".to_string(),
-            "-D".to_string(),
-            "/tmp/campus_login_headers.txt".to_string(),
+            null_device().to_string(),
+            "--fail".to_string(),
             campus_url.clone(),
         ];
 
@@ -199,7 +217,7 @@ pub fn fetch_with_cookie_redirect(cookie_file: &str, user_agent: &str, url: &str
         "-b".to_string(),
         cookie_file.to_string(),
         "-o".to_string(),
-        "/dev/null".to_string(),
+        null_device().to_string(),
         "-w".to_string(),
         "%{url_effective}".to_string(),
         url.to_string(),
@@ -246,7 +264,6 @@ pub async fn download_with_token_cookie(
     let login = login_iaaa_and_get_cookies_with_cache(username, password, login_cache).await?;
     let cookie_file_str = login.cookie_file.to_string_lossy().to_string();
     let token_cookie = read_token_from_cookie_file(&cookie_file_str).unwrap_or_default();
-    tracing::info!("从cookie文件读取_token: len={}, value={}", token_cookie.len(), token_cookie);
 
     let mut args = vec![
         "-sS".to_string(),
@@ -274,6 +291,7 @@ fn read_token_from_cookie_file(path: &str) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     for line in std::io::BufReader::new(file).lines() {
         let line = line.ok()?;
+        let line = line.strip_prefix("#HttpOnly_").unwrap_or(&line);
         if line.starts_with('#') {
             continue;
         }
@@ -283,6 +301,61 @@ fn read_token_from_cookie_file(path: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    #[test]
+    fn watching_page_cookies_reach_key_request_and_401_is_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for response in [
+                "HTTP/1.1 200 OK\r\nSet-Cookie: login=yes; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 302 Found\r\nLocation: /player\r\nSet-Cookie: _token=watch-token; Path=/; HttpOnly\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\n0123456789abcdef",
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndenied",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let len = stream.read(&mut buffer).unwrap();
+                    assert!(len > 0);
+                    request.extend_from_slice(&buffer[..len]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            requests
+        });
+        let dir = tempdir::TempDir::new("pku-session-test").unwrap();
+        let login = PkuLoginResult {
+            token: String::new(),
+            cookie_file: dir.path().join("cookies.txt"),
+            user_agent: "session-test-agent".into(),
+        };
+        download_in_session(&login, &format!("{base}/login")).unwrap();
+        fetch_with_cookie_redirect(
+            login.cookie_file.to_str().unwrap(), &login.user_agent, &format!("{base}/watch"),
+        ).unwrap();
+        assert_eq!(read_token_from_cookie_file(login.cookie_file.to_str().unwrap()).as_deref(), Some("watch-token"));
+        assert_eq!(download_in_session(&login, &format!("{base}/key")).unwrap(), b"0123456789abcdef");
+        assert!(download_in_session(&login, &format!("{base}/denied")).unwrap_err().contains("401"));
+        let requests = server.join().unwrap();
+        assert!(requests[1].contains("login=yes"));
+        assert!(requests[3].contains("login=yes"));
+        assert!(requests[3].contains("_token=watch-token"));
+        assert!(requests.iter().all(|r| r.contains("session-test-agent")));
+    }
 }
 
 fn parse_token(body: &str) -> Result<String, String> {
@@ -318,6 +391,7 @@ fn parse_token(body: &str) -> Result<String, String> {
 fn run_curl_text(args: &[String]) -> Result<String, String> {
     let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = Command::new(curl_cmd)
+        .arg("--fail")
         .args(args)
         .output()
         .map_err(|e| format!("调用 {} 失败: {}", curl_cmd, e))?;
@@ -333,6 +407,7 @@ fn run_curl_text(args: &[String]) -> Result<String, String> {
 pub(crate) fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
     let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = Command::new(curl_cmd)
+        .arg("--fail")
         .args(args)
         .output()
         .map_err(|e| format!("调用 {} 失败: {}", curl_cmd, e))?;

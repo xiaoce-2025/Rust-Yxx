@@ -575,9 +575,10 @@ async fn process_lesson(
 
         let lesson_index = lesson_index.unwrap();
 
-        // 步骤1: 获取下载链接（如果为空）
-        if lessons[lesson_index].video_url.is_empty() {
-            tracing::info!("课节 {} 下载链接为空，开始获取下载链接", video_id);
+        // 每次自动获取密钥前都访问观看页，不能因缓存了下载链接而跳过鉴权。
+        let mut playback_session = None;
+        if lessons[lesson_index].video_url.is_empty() || req.manual_key.is_none() {
+            tracing::info!("课节 {} 访问观看页并刷新下载链接", video_id);
 
             let login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
                 .map_err(|e| {
@@ -605,6 +606,7 @@ async fn process_lesson(
                 return Err(ApiError::BadRequest("播放链接为空，请先刷新课节列表".to_string()));
             }
 
+            playback_session = Some(login_result);
             lesson_storage::save_lessons(&username, &course_id, &lessons)
                 .map_err(|e| {
                     tracing::error!("保存课节信息失败: {}", e);
@@ -623,15 +625,18 @@ async fn process_lesson(
 
         tracing::info!("提交pkuvideo任务，视频URL: {}", video_url);
 
-        // 如果是 m3u8 且未提供手动密钥，先获取密钥 URI 返回给前端
-        if video_url.contains(".m3u8") && req.manual_key.is_none() {
-            match crate::services::pkuvideo::fetch_m3u8_key_uri(
-                &video_url,
-                &username,
-                &password,
-                &state.login_cache,
-            ).await {
-                Ok(key_uri) => {
+        // 登录、观看页、播放列表和密钥请求使用同一个 Cookie jar 和 User-Agent。
+        let mut resolved_key = req.manual_key.clone();
+        if video_url.contains(".m3u8") && resolved_key.is_none() {
+            let login = playback_session.as_ref().ok_or_else(||
+                ApiError::Internal("缺少观看页登录会话".to_string()))?;
+            let (key_uri, key_result) = crate::services::pkuvideo::fetch_m3u8_key_in_session(
+                &video_url, login,
+            ).map_err(|e| ApiError::BadRequest(format!("获取播放列表失败: {}", e)))?;
+            match key_result {
+                Ok(key) => resolved_key = Some(key),
+                Err(e) => {
+                    tracing::warn!("自动获取密钥失败: {}", e);
                     let mut processing_users = state.processing_users.write().await;
                     processing_users.remove(&current_user.id);
                     return Ok(Json(serde_json::json!({
@@ -640,9 +645,6 @@ async fn process_lesson(
                         "key_uri": key_uri,
                         "video_url": video_url,
                     })));
-                }
-                Err(e) => {
-                    tracing::warn!("获取m3u8密钥URI失败: {}", e);
                 }
             }
         }
@@ -653,7 +655,7 @@ async fn process_lesson(
             &video_url,
             &username,
             &password,
-            req.manual_key.as_deref(),
+            resolved_key.as_deref(),
         ).await?;
 
         tracing::info!("任务提交成功，job_id: {}，启动后台后处理任务", job_id);

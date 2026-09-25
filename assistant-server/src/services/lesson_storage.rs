@@ -116,6 +116,7 @@ mod tests {
             LessonInfo {
                 id: "1".to_string(),
                 video_url: "http://example.com/video1.mp4".to_string(),
+                play_url: "http://example.com/watch/1".to_string(),
                 date: "2025-03-01".to_string(),
                 time: "09:00".to_string(),
                 day_of_week: "周六".to_string(),
@@ -125,6 +126,7 @@ mod tests {
             LessonInfo {
                 id: "2".to_string(),
                 video_url: "http://example.com/video2.mp4".to_string(),
+                play_url: "http://example.com/watch/2".to_string(),
                 date: "2025-03-08".to_string(),
                 time: "09:00".to_string(),
                 day_of_week: "周六".to_string(),

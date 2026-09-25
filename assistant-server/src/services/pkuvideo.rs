@@ -189,6 +189,29 @@ pub async fn fetch_m3u8_key_uri(
     Ok(resolve_url(&base_url, &key_uri))
 }
 
+/// Fetch the playlist and its key using the session that visited the watching page.
+pub fn fetch_m3u8_key_in_session(
+    m3u8_url: &str,
+    login: &crate::services::pkulogin::PkuLoginResult,
+) -> Result<(String, Result<String, String>), String> {
+    let playlist = crate::services::pkulogin::download_in_session(login, m3u8_url)?;
+    let playlist = String::from_utf8(playlist).map_err(|_| "m3u8编码错误".to_string())?;
+    let (key_uri, _, _) = parse_m3u8(&playlist)?;
+    let key_uri = reqwest::Url::parse(m3u8_url)
+        .and_then(|url| url.join(&key_uri))
+        .map_err(|_| "m3u8密钥地址无效".to_string())?
+        .to_string();
+    let key = crate::services::pkulogin::download_in_session(login, &key_uri)
+        .and_then(|bytes| {
+            if bytes.len() != 16 {
+                return Err(format!("密钥应为16字节，实际为{}字节", bytes.len()));
+            }
+            // The teaching site's key is 16 ASCII bytes, not a hex-encoded key.
+            String::from_utf8(bytes).map_err(|_| "密钥不是有效的UTF-8文本".to_string())
+        });
+    Ok((key_uri, key))
+}
+
 /// 使用 openssl 进行 AES-128-CBC 解密
 async fn decrypt_aes128_cbc(
     enc_path: &std::path::Path,
@@ -323,7 +346,6 @@ async fn download_m3u8_video(
 
     // 密钥文件的内容直接作为 AES-128 的 16 字节密钥，需编码为 hex 传给 openssl
     let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    tracing::info!("密钥hex: len={}, value={}", key_hex.len(), key_hex);
 
     // 4. 创建临时目录（保留中间文件，不自动清理）
     let temp_dir = video_path
