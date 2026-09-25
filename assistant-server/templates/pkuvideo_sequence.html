@@ -264,6 +264,46 @@
     }
     .config-status.success { color: var(--accent); background: rgba(12,122,87,.1); }
     .config-status.error { color: var(--warn); background: rgba(152,42,61,.1); }
+    /* 大弹窗样式 */
+    .big-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.55);
+      backdrop-filter: blur(6px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    .big-dialog {
+      background: #fff;
+      border-radius: 20px;
+      padding: 40px 36px 32px;
+      max-width: 520px;
+      width: 90%;
+      text-align: center;
+      box-shadow: 0 20px 60px rgba(0,0,0,.25);
+    }
+    .big-dialog .icon-warn {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    .big-dialog h2 {
+      font-family: "Noto Serif SC", serif;
+      font-size: 22px;
+      margin: 0 0 12px;
+      color: var(--ink);
+    }
+    .big-dialog p {
+      font-size: 14px;
+      color: #6b7280;
+      line-height: 1.7;
+      margin: 0 0 20px;
+    }
+    .big-dialog button {
+      padding: 10px 28px;
+      font-size: 14px;
+    }
     .modal-overlay {
       display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
       background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center;
@@ -297,6 +337,16 @@
   <main class="wrap">
     <h1>课程回放批量处理</h1>
     <div class="sub">自动获取北大教学网课程列表，批量处理课程的全部回放视频。</div>
+
+    <!-- 功能暂不可用弹窗 -->
+    <div class="big-overlay" id="bigOverlay">
+      <div class="big-dialog">
+        <div class="icon-warn">&#9888;</div>
+        <h2>功能暂不可用</h2>
+        <p>由于教学网2026年9月20日更新对回放视频进行了多重手段加密，本功能模块暂不可用，敬请期待。</p>
+        <button onclick="document.getElementById('bigOverlay').remove()">我知道了</button>
+      </div>
+    </div>
 
     <div class="toolbar">
       <button id="goAppBtn" class="ghost">返回聊天主页</button>
