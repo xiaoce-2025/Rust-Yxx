@@ -44,6 +44,8 @@ pub struct PkuVideoJob {
     pub notes_path: Option<String>,
     pub pdf_path: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub manual_replay: Option<super::app_replay::ManualReplay>,
 }
 
 impl PkuVideoJob {
@@ -78,6 +80,7 @@ impl PkuVideoJob {
             notes_path: None,
             pdf_path: None,
             error: None,
+            manual_replay: None,
         }
     }
 }
@@ -91,6 +94,7 @@ pub async fn run_pipeline(
     settings: &crate::config::Settings,
     login_cache: &LoginCache,
     manual_key: Option<&str>,
+    app_download: Option<(Arc<tokio::sync::Mutex<super::app_replay::AppReplayClient>>, super::app_replay::ManualReplay)>,
 ) -> Result<(Option<String>, Option<String>, Option<String>), String> {
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let job_dir = base_dir.join(format!("{}_{}", timestamp, job_id));
@@ -104,6 +108,10 @@ pub async fn run_pipeline(
     let notes_path = job_dir.join("lecture_notes.tex");
     let pdf_path = job_dir.join("lecture_notes.pdf");
 
+    if let Some((client, replay)) = app_download {
+        client.lock().await.download(&replay, &video_path).await
+            .map_err(|e| format!("step=0;{e}"))?;
+    } else {
     download_video(
         &video_url,
         &video_path,
@@ -117,6 +125,7 @@ pub async fn run_pipeline(
     )
         .await
         .map_err(|e| format!("step=0;{e}"))?;
+    }
     extract_mp3(&video_path, &mp3_path)
         .await
         .map_err(|e| format!("step=1;{e}"))?;
@@ -371,7 +380,7 @@ async fn download_m3u8_video(
     // 5. 并行下载并解密每个分片（带超时和重试）
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let total = segments.len();
-    let mut tasks = Vec::with_capacity(total);
+    let mut tasks = futures_util::stream::FuturesUnordered::new();
 
     for (i, seg_url) in segments.iter().enumerate() {
         let full_url = resolve_url(&base_url, seg_url);
@@ -417,16 +426,19 @@ async fn download_m3u8_video(
     // 收集结果
     let mut successes: Vec<(usize, std::path::PathBuf)> = Vec::new();
     let mut failures: Vec<(usize, String)> = Vec::new();
-    for task in tasks {
-        let (idx, result) = task.await.map_err(|e| format!("分片任务 panic: {e}"))?;
+    while let Some(task) = futures_util::StreamExt::next(&mut tasks).await {
+        let (idx, result) = task.map_err(|e| format!("分片任务 panic: {e}"))?;
         match result {
-            Ok(path) => successes.push((idx, path)),
+            Ok(path) => {
+                successes.push((idx, path));
+                if let Some(ref p) = progress { p.store((successes.len() * 100 / total) as u8, Ordering::SeqCst); }
+            },
             Err(e) => failures.push((idx, e)),
         }
     }
 
     if let Some(ref p) = progress {
-        p.store((successes.len() * 85 / total) as u8, Ordering::SeqCst);
+        p.store((successes.len() * 100 / total) as u8, Ordering::SeqCst);
     }
 
     // Phase 2: 重试失败的分片
@@ -453,6 +465,7 @@ async fn download_m3u8_video(
             Ok(Ok(())) => {
                 tracing::info!("分片 {} 重试成功", idx);
                 successes.push((*idx, dec_path));
+                if let Some(ref p) = progress { p.store((successes.len() * 100 / total) as u8, Ordering::SeqCst); }
             }
             Ok(Err(e)) => return Err(format!("分片 {} 重试失败: {}", idx, e)),
             Err(_) => return Err(format!("分片 {} 重试超时", idx)),
@@ -464,7 +477,7 @@ async fn download_m3u8_video(
     let decrypted_paths: Vec<std::path::PathBuf> = successes.into_iter().map(|(_, p)| p).collect();
 
     if let Some(ref p) = progress {
-        p.store(90, Ordering::SeqCst);
+        p.store(100, Ordering::SeqCst);
     }
 
     // 6. 创建 ffmpeg concat 文件列表

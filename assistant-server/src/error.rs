@@ -41,9 +41,12 @@ impl IntoResponse for ApiError {
             }
         };
 
-        let body = Json(ErrorBody {
-            error: self.to_string(),
-        });
+        let message = match &self {
+            ApiError::Http(error) => format!("上游请求失败（HTTP {:?}，超时：{}）", error.status().map(|s|s.as_u16()), error.is_timeout()),
+            _ => self.to_string(),
+        };
+        tracing::error!(status=status.as_u16(), error=%message, "API request failed");
+        let body = Json(ErrorBody { error: message });
 
         (status, body).into_response()
     }

@@ -311,6 +311,7 @@
     .modal-dialog {
       background: #fff; border-radius: 16px; padding: 24px; max-width: 520px; width: 90%;
       box-shadow: 0 20px 60px rgba(0,0,0,.3);
+      max-height: 90vh; overflow-y: auto;
     }
     .modal-dialog h3 { margin: 0 0 8px; font-family: "Noto Serif SC", serif; }
     .modal-dialog p { font-size: 13px; color: #6b7280; margin: 0 0 12px; }
@@ -414,11 +415,56 @@
         <div class="section-title" id="lessonSectionTitle">课节列表</div>
         <div style="display: flex; gap: 8px; align-items: center;">
           <button id="backBtn" class="ghost small">返回</button>
+          <button id="manualAddBtn" class="ghost small">手动添加课节</button>
           <button id="processAllBtn" class="ghost small">处理全部课节</button>
           <button id="downloadAllBtn" class="ghost small" style="display: none;">下载完整PDF</button>
         </div>
       </div>
       <div id="lessonList" class="lesson-list"></div>
+      <details id="manualRecords" style="margin-top:16px;display:none"><summary>手动查询记录（成功和失败均会保留）</summary><div id="manualRecordList"></div></details>
+    </div>
+  </main>
+    <div class="modal-overlay" id="manualAddModal">
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="manualAddTitle">
+        <h3 id="manualAddTitle">手动添加课节</h3>
+        <p id="manualRange">正在读取学期范围...</p>
+        <label>添加方式 <select id="manualMode"><option value="weekdays">按星期批量添加</option><option value="date">指定一天</option></select></label>
+        <div id="manualWeekdays" style="display:flex;flex-wrap:wrap;gap:12px;margin:16px 0">
+          <label><input type="checkbox" value="1">周一</label><label><input type="checkbox" value="2">周二</label>
+          <label><input type="checkbox" value="3">周三</label><label><input type="checkbox" value="4">周四</label>
+          <label><input type="checkbox" value="5">周五</label><label><input type="checkbox" value="6">周六</label>
+          <label><input type="checkbox" value="7">周日</label>
+        </div>
+        <div id="manualDateRow" style="display:none;margin:16px 0"><label>上课日期 <input type="date" id="manualDate"></label></div>
+        <div style="margin:16px 0">上课节次：第 <select id="manualLessonStart"></select> 节至第 <select id="manualLessonEnd"></select> 节</div><label><input type="checkbox" id="manualRetry">重试所选日期中失败或中断的查询</label>
+        <p class="hint">默认跳过已有查询记录。新增课节将标记为“手动添加”，通过好学 App 下载。</p>
+        <button id="appRelogin" class="ghost small">重新登录好学 App</button>
+        <div id="manualAddStatus" class="status" role="status"></div>
+        <div class="modal-actions"><button id="manualAddCancel" class="ghost">关闭</button><button id="manualAddSubmit">提交添加</button></div>
+      </div>
+    </div>
+    <div class="modal-overlay" id="appLoginModal">
+      <form class="modal-dialog" id="appLoginForm" role="dialog" aria-modal="true" aria-labelledby="appLoginTitle">
+        <h3 id="appLoginTitle">登录好学 App</h3>
+        <p>自动使用已绑定的 IAAA 账号和密码。登录会话加密保存；需要额外验证时，请填写验证码。</p>
+
+        <div id="appCaptchaRow" hidden><img id="appCaptchaImage" alt="图形验证码" style="max-width:200px"><button id="appCaptchaRefresh" type="button" class="ghost small">刷新验证码</button><input id="appRandCode" placeholder="图形验证码" autocomplete="off"></div>
+        <div id="appSmsRow" hidden><input id="appSmsCode" placeholder="短信或邮件验证码" autocomplete="off"><button id="appSendSms" type="button" class="ghost small">发送验证码</button></div>
+        <div id="appOtpRow" hidden><input id="appOtpCode" placeholder="动态口令" autocomplete="off"></div>
+        <div id="appLoginStatus" class="status" role="status"></div>
+        <details id="appDiagnosticsBox" hidden><summary>认证诊断</summary><pre id="appDiagnostics" style="white-space:pre-wrap;max-height:180px;overflow:auto"></pre></details>
+        <div class="modal-actions"><button id="appLoginCancel" type="button" class="ghost">取消</button><button id="appLoginSubmit" type="submit">登录并继续</button></div>
+      </form>
+    </div>
+    <div class="modal-overlay" id="deleteLessonModal">
+      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="deleteLessonTitle">
+        <h3 id="deleteLessonTitle">删除手动课节</h3>
+        <p id="deleteLessonDescription"></p>
+        <p>删除后，后续课节和笔记文件将重新编号。请输入“确认删除”完成二次确认。</p>
+        <input id="deleteLessonConfirmation" type="text" autocomplete="off" placeholder="确认删除" aria-label="输入确认删除">
+        <div id="deleteLessonStatus" class="status" role="status"></div>
+        <div class="modal-actions"><button id="deleteLessonCancel" class="ghost">取消</button><button id="deleteLessonSubmit" disabled>确认删除课节</button></div>
+      </div>
     </div>
   <div class="modal-overlay" id="keyModal">
       <div class="modal-dialog">
@@ -438,8 +484,6 @@
         </div>
       </div>
     </div>
-  </main>
-
   <script>
     const statusEl = document.getElementById("status");
     const courseListEl = document.getElementById("courseList");
@@ -456,6 +500,10 @@
     let selectedCourseName = null;
     let allCourses = [];
     let currentLessons = [];
+    let currentManualAttempts = [];
+    let appLoginResolve = null;
+    let manualAddCourse = null;
+    let pendingDeleteLesson = null;
     let isProcessing = false;
     let processingLessonId = null;
     let downloadingLessonId = null;
@@ -466,7 +514,7 @@
       document.querySelectorAll('button').forEach(btn => {
         const id = btn.id;
         // 允许刷新和返回按钮始终可用
-        if (id !== 'refreshBtn' && id !== 'backBtn' && id !== 'goAppBtn') {
+        if (id !== 'refreshBtn' && id !== 'backBtn' && id !== 'goAppBtn' && id !== 'manualAddCancel') {
           btn.disabled = processing;
         }
       });
@@ -589,6 +637,207 @@
       return String(s || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
     }
 
+    async function appAuth(action, body = {}) {
+      const response = await api(`/api/pkuvideofullclass/app-auth/${action}`, 'POST', body);
+      if (!response.ok) {
+        if (response.diagnostics) {
+          document.getElementById('appDiagnosticsBox').hidden = false;
+          document.getElementById('appDiagnostics').textContent = JSON.stringify(response.diagnostics, null, 2);
+        }
+        throw new Error(response.error || '好学 App 认证失败');
+      }
+      return response.data;
+    }
+
+    function handleDeleteManualLesson(lessonId) {
+      if (isProcessing) return;
+      const lesson = currentLessons.find(l => l.id === lessonId);
+      if (!lesson?.manual_replay) return;
+      pendingDeleteLesson = {courseId:selectedCourse,lessonId};
+      document.getElementById('deleteLessonDescription').textContent = `${selectedCourseName} · 第${currentLessons.indexOf(lesson) + 1}节 · ${lesson.date} ${lesson.time}`;
+      document.getElementById('deleteLessonConfirmation').value = '';
+      document.getElementById('deleteLessonStatus').textContent = '';
+      document.getElementById('deleteLessonSubmit').disabled = true;
+      document.getElementById('deleteLessonModal').style.display = 'flex';
+      document.getElementById('deleteLessonConfirmation').focus();
+    }
+    document.getElementById('deleteLessonConfirmation').addEventListener('input', event => {
+      document.getElementById('deleteLessonSubmit').disabled = event.target.value !== '确认删除';
+    });
+    document.getElementById('deleteLessonCancel').addEventListener('click', () => {
+      pendingDeleteLesson = null;
+      document.getElementById('deleteLessonModal').style.display = 'none';
+    });
+    document.getElementById('deleteLessonSubmit').addEventListener('click', async () => {
+      const confirmation = document.getElementById('deleteLessonConfirmation').value;
+      if (!pendingDeleteLesson || confirmation !== '确认删除' || isProcessing) return;
+      const {courseId,lessonId} = pendingDeleteLesson;
+      setProcessing(true);
+      document.getElementById('deleteLessonStatus').textContent = '正在删除并更新笔记编号...';
+      try {
+        const response = await api(`/api/pkuvideofullclass/courses/${courseId}/manual-lessons/${lessonId}`, 'DELETE', {confirmation});
+        const data = await api(`/api/pkuvideofullclass/courses/${courseId}/videos`);
+        if (selectedCourse === courseId) { currentLessons = data.lessons || []; renderLessonList(data); }
+        document.getElementById('deleteLessonModal').style.display = 'none';
+        pendingDeleteLesson = null;
+        statusEl.textContent = response.message;
+        statusEl.className = 'status success';
+      } catch (error) { document.getElementById('deleteLessonStatus').textContent = error.message; }
+      finally {
+        setProcessing(false);
+        document.getElementById('deleteLessonSubmit').disabled = document.getElementById('deleteLessonConfirmation').value !== '确认删除';
+      }
+    });
+
+    async function refreshAppCaptcha() {
+      const data = await appAuth('captcha');
+      document.getElementById('appCaptchaImage').src = data.image;
+      document.getElementById('appRandCode').value = '';
+    }
+
+    async function prepareAppLogin() {
+      const policy = await appAuth('prepare');
+      document.getElementById('appCaptchaRow').hidden = !policy.needCaptcha;
+      document.getElementById('appSmsRow').hidden = policy.factor !== 'SMS';
+      document.getElementById('appOtpRow').hidden = policy.factor !== 'OTP';
+      if (policy.needCaptcha) await refreshAppCaptcha();
+    }
+
+    async function ensureAppLogin() {
+      try {
+        try { if ((await appAuth('status')).logged_in) return true; } catch (error) { if (/重新绑定|未绑定|公钥/.test(error.message)) throw error; }
+        document.getElementById('appLoginModal').style.display = 'flex';
+        document.getElementById('appLoginForm').reset();
+        document.getElementById('appDiagnosticsBox').hidden = true;
+        document.getElementById('appLoginStatus').textContent = '正在检查认证要求...';
+        document.getElementById('appLoginSubmit').disabled = true;
+        const completion = new Promise(resolve => { appLoginResolve = resolve; });
+        try {
+          await prepareAppLogin();
+          document.getElementById('appLoginStatus').textContent = '';
+        } catch (error) {
+          document.getElementById('appLoginStatus').textContent = error.message;
+        } finally {
+          document.getElementById('appLoginSubmit').disabled = false;
+        }
+        return await completion;
+      } catch (error) {
+        statusEl.textContent = error.message;
+        statusEl.className = 'status error';
+        return false;
+      }
+    }
+
+    function finishAppLogin(result) {
+      document.getElementById('appLoginModal').style.display = 'none';
+      document.getElementById('appLoginForm').reset();
+      const resolve = appLoginResolve;
+      appLoginResolve = null;
+      if (resolve) resolve(result);
+    }
+    document.getElementById('appLoginCancel').addEventListener('click', () => finishAppLogin(false));
+    document.getElementById('appCaptchaRefresh').addEventListener('click', () => refreshAppCaptcha().catch(error => {
+      document.getElementById('appLoginStatus').textContent = error.message;
+    }));
+    document.getElementById('appSendSms').addEventListener('click', async event => {
+      event.target.disabled = true;
+      try { document.getElementById('appLoginStatus').textContent = (await appAuth('sms')).message; }
+      catch (error) { document.getElementById('appLoginStatus').textContent = error.message; }
+      finally { event.target.disabled = false; }
+    });
+    document.getElementById('appLoginForm').addEventListener('submit', async event => {
+      event.preventDefault();
+      document.getElementById('appLoginSubmit').disabled = true;
+      document.getElementById('appLoginCancel').disabled = true;
+      document.getElementById('appLoginStatus').textContent = '正在通过统一认证获取 App 会话...';
+      try {
+        await appAuth('login', {
+          randCode:document.getElementById('appRandCode').value,
+          smsCode:document.getElementById('appSmsCode').value,
+          otpCode:document.getElementById('appOtpCode').value});
+        finishAppLogin(true);
+      } catch (error) {
+        document.getElementById('appLoginStatus').textContent = error.message;
+        try { await prepareAppLogin(); } catch (_) { /* Retain original diagnostic. */ }
+      } finally {
+
+        document.getElementById('appLoginSubmit').disabled = false;
+        document.getElementById('appLoginCancel').disabled = false;
+      }
+    });
+
+    for (const id of ['manualLessonStart','manualLessonEnd']) { const select = document.getElementById(id); for (let n=1;n<=12;n++) select.add(new Option(n,n)); }
+    document.getElementById('manualLessonEnd').value = '2';
+    document.getElementById('manualMode').addEventListener('change', event => {
+      const single = event.target.value === 'date';
+      document.getElementById('manualWeekdays').style.display = single ? 'none' : 'flex';
+      document.getElementById('manualDateRow').style.display = single ? 'block' : 'none';
+    });
+    document.getElementById('manualAddBtn').addEventListener('click', async () => {
+      if (!selectedCourse || isProcessing) return;
+      manualAddCourse = selectedCourse;
+      document.getElementById('manualAddModal').style.display = 'flex';
+      document.getElementById('manualAddSubmit').disabled = true;
+      document.getElementById('manualAddStatus').textContent = '';
+      try {
+        const range = await api(`/api/pkuvideofullclass/courses/${manualAddCourse}/manual-options`);
+        document.getElementById('manualRange').textContent = `${selectedCourseName} · ${range.term}：${range.start} 至 ${range.end}（截止今天）`;
+        const date = document.getElementById('manualDate');
+        date.min = range.start; date.max = range.end; date.value = range.end;
+        document.getElementById('manualAddSubmit').disabled = false;
+      } catch (error) { document.getElementById('manualAddStatus').textContent = error.message; }
+    });
+    document.getElementById('manualAddCancel').addEventListener('click', () => {
+      document.getElementById('manualAddModal').style.display = 'none';
+      if (isProcessing) statusEl.innerHTML = '<span class="loading-spinner" aria-hidden="true"></span>正在尝试添加课节，关闭弹窗后仍会继续，请稍候…';
+    });
+    document.getElementById('appRelogin').addEventListener('click', async () => {
+      try {
+        await appAuth('reset');
+        const loggedIn = await ensureAppLogin();
+        document.getElementById('manualAddStatus').textContent = loggedIn ? '好学 App 登录成功' : '登录已取消';
+      } catch (error) { document.getElementById('manualAddStatus').textContent = error.message; }
+    });
+    document.getElementById('manualAddSubmit').addEventListener('click', async () => {
+      const courseId = manualAddCourse;
+      const body = {retry_failed:document.getElementById('manualRetry').checked, lesson_start:Number(document.getElementById('manualLessonStart').value), lesson_end:Number(document.getElementById('manualLessonEnd').value)};
+      if (body.lesson_start > body.lesson_end) { document.getElementById('manualAddStatus').textContent = '结束节次不能小于开始节次'; return; }
+      if (document.getElementById('manualMode').value === 'date') {
+        body.date = document.getElementById('manualDate').value;
+        if (!body.date) { document.getElementById('manualAddStatus').textContent = '请选择日期'; return; }
+      } else {
+        body.weekdays = Array.from(document.querySelectorAll('#manualWeekdays input:checked'), item => Number(item.value));
+        if (!body.weekdays.length) { document.getElementById('manualAddStatus').textContent = '请至少选择一个星期'; return; }
+      }
+      document.getElementById('manualAddSubmit').disabled = true;
+      document.getElementById('manualAddStatus').innerHTML = '<span class="loading-spinner" aria-hidden="true"></span>正在尝试添加课节，请稍候…';
+      if (!(await ensureAppLogin())) {
+        if (document.querySelector('#manualAddStatus .loading-spinner')) document.getElementById('manualAddStatus').textContent = '添加尚未提交，请完成认证后重试';
+        document.getElementById('manualAddSubmit').disabled = false; return;
+      }
+      setProcessing(true);
+      document.getElementById('manualAddStatus').innerHTML = '<span class="loading-spinner" aria-hidden="true"></span>正在尝试添加：查询所选日期的回放，请稍候…';
+      let message = '';
+      try {
+        const response = await api(`/api/pkuvideofullclass/courses/${courseId}/manual-lessons`, 'POST', body);
+        if (!response.success) throw new Error(response.message || '手动添加失败');
+        message = response.message;
+        const lessons = await api(`/api/pkuvideofullclass/courses/${courseId}/videos`);
+        if (selectedCourse === courseId) { currentLessons = lessons.lessons; renderLessonList(lessons); }
+        document.getElementById('manualAddStatus').textContent = message;
+        statusEl.textContent = message;
+      } catch (error) {
+        document.getElementById('manualAddStatus').textContent = error.message;
+        statusEl.textContent = '手动添加失败：' + error.message;
+      } finally { setProcessing(false); document.getElementById('manualAddSubmit').disabled = false; }
+    });
+
+    async function handleWatchManualReplay(lessonId) {
+      const courseId = selectedCourse;
+      if (!(await ensureAppLogin())) return;
+      location.href = '/pkuvideo_fw?' + new URLSearchParams({course_id:courseId,lesson_id:lessonId});
+    }
+
     async function handleCourseSelect(e) {
       const courseItem = e.currentTarget;
       const courseId = courseItem.dataset.courseId;
@@ -596,6 +845,7 @@
 
       selectedCourse = courseId;
       selectedCourseName = courseName;
+      currentManualAttempts = [];
 
       statusEl.textContent = "正在加载课节列表...";
       statusEl.className = "status loading";
@@ -618,7 +868,9 @@
               if (processingLessonId === resp.processing_video_id) {
                 processingLessonId = null;
               }
-              renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+              const feedback = statusEl.textContent, feedbackClass = statusEl.className;
+        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+        statusEl.textContent = feedback; statusEl.className = feedbackClass;
             });
           } else {
             processingLessonId = null;
@@ -639,6 +891,10 @@
     }
 
     function renderLessonList(resp) {
+      if (resp.manual_attempts) currentManualAttempts = resp.manual_attempts;
+      document.getElementById('manualRecords').style.display = currentManualAttempts.length ? 'block' : 'none';
+      document.getElementById('manualRecordList').innerHTML = currentManualAttempts.map(a =>
+        `<p>${esc(a.date)} · 手动查询 · ${a.status === 'success' ? '成功' : a.status === 'pending' ? '查询已提交／可重试' : '失败'}：${esc(a.message)}</p>`).join('');
       const lessons = resp.lessons || [];
       const total = resp.total || 0;
       const processed = resp.processed || 0;
@@ -662,18 +918,20 @@
                 </div>
               </div>
               <div class="lesson-info">
-                <div class="lesson-title">第${index + 1}节</div>
+                <div class="lesson-title">第${index + 1}节 ${lesson.manual_replay ? '<span class="hint">手动添加 · 好学 App</span>' : ''}</div>
                 <div class="lesson-status">
                   ${isProcessingThisLesson ? '处理中...' : (isDownloadingThisLesson ? '生成PDF中...' : (lesson.is_processed ? '已处理' : '未处理'))}
                 </div>
               </div>
               <div class="lesson-actions">
+                ${lesson.manual_replay ? '<button class="ghost small" onclick="handleWatchManualReplay(\'' + lesson.id + '\')">观看回放</button>' : ''}
                 ${isProcessingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">处理中...</span>' : ''}
                 ${isDownloadingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">生成中...</span>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && !lesson.tex_filename ? '<button class="ghost small" onclick="handleProcessLesson(\'' + lesson.id + '\')">提交处理</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleReprocessLesson(\'' + lesson.id + '\')">重新处理</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadTex(\'' + lesson.id + '\')">下载tex</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadPdf(\'' + lesson.id + '\')">下载PDF</button>' : ''}
+                ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.manual_replay ? '<button class="ghost small" onclick="handleDeleteManualLesson(\'' + lesson.id + '\')">删除课节</button>' : ''}
               </div>
             </div>
           `;
@@ -693,6 +951,7 @@
       selectedCourse = null;
       selectedCourseName = null;
       currentLessons = [];
+      currentManualAttempts = [];
 
       lessonSectionEl.style.display = "none";
       document.getElementById("courseSection").style.display = "block";
@@ -754,7 +1013,9 @@
             statusEl.textContent = "处理失败: " + (statusResp.message || "未知错误");
             statusEl.className = "status error";
             processingLessonId = null;
-            renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+            const feedback = statusEl.textContent, feedbackClass = statusEl.className;
+        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+        statusEl.textContent = feedback; statusEl.className = feedbackClass;
             return;
           } else if (statusResp.status === "idle") {
             // 后端已无处理状态，刷新列表确认最终结果
@@ -768,7 +1029,9 @@
             if (!processingLessonId) {
               statusEl.textContent = "处理完成";
               statusEl.className = "status success";
-              renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+              const feedback = statusEl.textContent, feedbackClass = statusEl.className;
+        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+        statusEl.textContent = feedback; statusEl.className = feedbackClass;
               return;
             }
           } else {
@@ -798,6 +1061,7 @@
         return;
       }
 
+      if (currentLessons.find(l => l.id === lessonId)?.manual_replay && !(await ensureAppLogin())) return;
       // 立即更新UI，显示处理中
       setProcessing(true);
       processingLessonId = lessonId;
@@ -818,7 +1082,9 @@
           pendingKeyLessonId = lessonId;
           setProcessing(false);
           processingLessonId = null;
-          renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+          const feedback = statusEl.textContent, feedbackClass = statusEl.className;
+        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+        statusEl.textContent = feedback; statusEl.className = feedbackClass;
           statusEl.textContent = "请粘贴密钥以继续";
           statusEl.className = "status";
           return;
@@ -829,7 +1095,9 @@
           statusEl.className = "status error";
           setProcessing(false);
           processingLessonId = null;
-          renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+          const feedback = statusEl.textContent, feedbackClass = statusEl.className;
+        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+        statusEl.textContent = feedback; statusEl.className = feedbackClass;
           return;
         }
 
@@ -848,7 +1116,9 @@
         if (processingLessonId === lessonId) {
           processingLessonId = null;
         }
+        const feedback = statusEl.textContent, feedbackClass = statusEl.className;
         renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+        statusEl.textContent = feedback; statusEl.className = feedbackClass;
       }
     }
 
@@ -858,36 +1128,36 @@
         statusEl.className = "status error";
         return;
       }
-      
+
       // 立即更新UI，显示生成中
       setProcessing(true);
       downloadingLessonId = lessonId;
       renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
       statusEl.textContent = "正在生成PDF...";
       statusEl.className = "status processing";
-      
+
       try {
         const response = await fetch(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/download-pdf`, {
           method: 'GET',
           credentials: 'include'
         });
-        
+
         if (!response.ok) {
           const error = await response.json();
           throw new Error(error.message || '下载失败');
         }
-        
+
         const blob = await response.blob();
         const contentDisposition = response.headers.get('Content-Disposition');
         let filename = 'lecture_notes.pdf';
-        
+
         if (contentDisposition) {
           const match = contentDisposition.match(/filename="?([^"]+)"?/);
           if (match) {
             filename = match[1];
           }
         }
-        
+
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -896,7 +1166,7 @@
         a.click();
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
-        
+
         statusEl.textContent = "PDF下载完成";
         statusEl.className = "status success";
       } catch (error) {
@@ -906,7 +1176,9 @@
       } finally {
         setProcessing(false);
         downloadingLessonId = null;
+        const feedback = statusEl.textContent, feedbackClass = statusEl.className;
         renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+        statusEl.textContent = feedback; statusEl.className = feedbackClass;
       }
     }
 

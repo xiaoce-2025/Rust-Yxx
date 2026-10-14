@@ -38,8 +38,9 @@ struct BindingStatusResponse {
     current_iaaa_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct BindRequest {
+    password: Option<String>,
     username: String,
     encrypted_password: String,
     iaaa_public_key: String,
@@ -162,8 +163,15 @@ async fn get_binding_status(
 async fn bind(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(req): Json<BindRequest>,
+    Json(mut req): Json<BindRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if let Some(password) = req.password.as_ref() {
+        let response = reqwest::Client::new().get(IAAA_PUBLIC_KEY_URL)
+            .timeout(std::time::Duration::from_secs(10)).send().await?;
+        let key: IaaaPublicKeyResponse = response.error_for_status()?.json().await?;
+        req.iaaa_public_key = key.key.filter(|_|key.success).ok_or_else(||ApiError::BadRequest("无法获取当前 IAAA 公钥".into()))?;
+        req.encrypted_password = crate::services::app_replay::encrypt_binding_password(&req.iaaa_public_key, password).map_err(ApiError::BadRequest)?;
+    }
     if req.username.is_empty() || req.encrypted_password.is_empty() || req.iaaa_public_key.is_empty() {
         return Err(ApiError::BadRequest("Missing required fields".to_string()));
     }
@@ -175,6 +183,12 @@ async fn bind(
             tracing::info!("IAAA authentication succeeded for user {}, token obtained", req.username);
 
             let _ = std::fs::remove_file(&login_result.cookie_file);
+
+            crate::services::app_replay::clear_binding(current_user.id).map_err(ApiError::Internal)?;
+            if let Some(password) = req.password.as_ref() {
+                crate::services::app_replay::save_binding(current_user.id, &req.username, password).map_err(ApiError::Internal)?;
+            }
+            state.app_replay_clients.lock().await.remove(&current_user.id);
 
             state
                 .store
@@ -203,6 +217,8 @@ async fn unbind(
     State(state): State<AppState>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::services::app_replay::clear_binding(current_user.id).map_err(ApiError::Internal)?;
+    state.app_replay_clients.lock().await.remove(&current_user.id);
     state
         .store
         .remove_iaaa_binding(current_user.id)
@@ -255,6 +271,8 @@ async fn get_course_videos(
     axum::extract::Path((course_id,)): axum::extract::Path<(String,)>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let lesson_mutex = state.lesson_mutation(current_user.id).await;
+    let _guard = lesson_mutex.lock().await;
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
         ApiError::Internal("用户不存在".to_string())
@@ -272,6 +290,7 @@ async fn get_course_videos(
         })?;
 
     let (total, processed) = lesson_storage::get_lesson_count(username, &course_id);
+    let manual_attempts = lesson_storage::load_manual_attempts(username, &course_id).map_err(ApiError::Internal)?;
 
     // 检查当前是否有正在处理的课节
     let processing_video_id = {
@@ -286,6 +305,7 @@ async fn get_course_videos(
     Ok(Json(serde_json::json!({
         "success": true,
         "lessons": lessons,
+        "manual_attempts": manual_attempts,
         "total": total,
         "processed": processed,
         "all_processed": total > 0 && processed == total,
@@ -298,6 +318,11 @@ async fn refresh_lessons(
     axum::extract::Path((course_id,)): axum::extract::Path<(String,)>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let lesson_mutex = state.lesson_mutation(current_user.id).await;
+    let _guard = lesson_mutex.lock().await;
+    if state.processing_users.read().await.contains_key(&current_user.id) {
+        return Err(ApiError::BadRequest("请等待当前课节处理完成后刷新".into()));
+    }
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
         ApiError::Internal("用户不存在".to_string())
@@ -308,7 +333,7 @@ async fn refresh_lessons(
         ApiError::BadRequest("无效的邮箱格式".to_string())
     })?;
 
-    let password = match user.iaaa_encrypted_password {
+    let password = match user.iaaa_encrypted_password.clone() {
         Some(p) => p,
         None => {
             tracing::warn!("用户未绑定IAAA账号: {}", current_user.id);
@@ -408,13 +433,12 @@ async fn refresh_lessons(
     }
 
     // 合并已有的课节数据：保留 video_url, is_processed, tex_filename，只更新 play_url
-    merge_lesson_data(&mut all_lessons, &existing_lessons);
-
     lesson_parser::assign_lesson_numbers(&mut all_lessons);
+    merge_lesson_data(&mut all_lessons, &existing_lessons);
 
     lesson_storage::init_course_dir(username, &course_id)
         .map_err(|e| ApiError::Internal(format!("创建课节目录失败: {}", e)))?;
-    lesson_storage::save_lessons(username, &course_id, &all_lessons)
+    lesson_storage::save_ordered_lessons(username, &course_id, &existing_lessons, &mut all_lessons)
         .map_err(|e| {
             tracing::error!("保存课节信息失败: {}", e);
             ApiError::Internal(format!("保存课节信息失败: {}", e))
@@ -430,16 +454,54 @@ async fn refresh_lessons(
 }
 
 fn merge_lesson_data(new_lessons: &mut Vec<LessonInfo>, existing_lessons: &Vec<LessonInfo>) {
-    for new_lesson in new_lessons {
+    let mut matched_ids = HashSet::new();
+    for new_lesson in new_lessons.iter_mut() {
         // 查找日期和时间相同的已有课节
-        if let Some(existing) = existing_lessons.iter().find(|l| l.date == new_lesson.date && l.time == new_lesson.time) {
+        if let Some(existing) = existing_lessons.iter().find(|l| l.manual_replay.is_none() && !matched_ids.contains(&l.id) && l.date == new_lesson.date && l.time == new_lesson.time) {
+            matched_ids.insert(existing.id.clone());
             tracing::info!("找到匹配的课节: {} {}，保留原有数据", new_lesson.date, new_lesson.time);
             // 保留原有数据，只更新播放链接
             new_lesson.video_url = existing.video_url.clone();
             new_lesson.is_processed = existing.is_processed;
             new_lesson.tex_filename = existing.tex_filename.clone();
+            new_lesson.id = existing.id.clone();
             // play_url 从新解析结果中获取（可能已更新）
+        } else if !existing_lessons.is_empty() {
+            new_lesson.id = format!("lesson_{}", Uuid::new_v4());
         }
+    }
+    new_lessons.extend(existing_lessons.iter().filter(|l| l.manual_replay.is_some()).cloned());
+    lesson_parser::sort_lessons(new_lessons);
+}
+
+#[cfg(test)]
+mod manual_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_retains_manual_origin_and_processed_ids() {
+        let regular = LessonInfo {id:"lesson_9".into(), video_url:"saved".into(), play_url:"old".into(),
+            date:"2026-10-12".into(), time:"第1-2节".into(), day_of_week:"周一".into(),
+            is_processed:true, tex_filename:Some("saved.tex".into()), manual_replay:None};
+        let manual = LessonInfo {id:"app_stable".into(), manual_replay:Some(crate::services::app_replay::ManualReplay {
+            course_id:"app-course".into(), sub_id:"app-sub".into(),date:"2026-10-12".into(),lesson_start:Some(1),lesson_end:Some(2)}), ..regular.clone()};
+        let fresh = LessonInfo {id:"lesson_1".into(), video_url:String::new(), play_url:"new".into(),
+            is_processed:false, tex_filename:None, ..regular.clone()};
+        let mut new = vec![fresh];
+        merge_lesson_data(&mut new, &vec![regular, manual]);
+        assert_eq!(new.len(), 2);
+        let regular = new.iter().find(|l| l.manual_replay.is_none()).unwrap();
+        assert_eq!(regular.id, "lesson_9");
+        assert_eq!(regular.play_url, "new");
+        assert_eq!(regular.video_url, "saved");
+        assert!(regular.is_processed);
+        assert_eq!(regular.tex_filename.as_deref(), Some("saved.tex"));
+        let manual = new.iter().find(|l| l.manual_replay.is_some()).unwrap();
+        assert_eq!(manual.id, "app_stable");
+        let mut empty = Vec::new();
+        merge_lesson_data(&mut empty, &new);
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].id, "app_stable");
     }
 }
 
@@ -457,7 +519,7 @@ async fn refresh_courses(
         ApiError::BadRequest("无效的邮箱格式".to_string())
     })?;
 
-    let password = match user.iaaa_encrypted_password {
+    let password = match user.iaaa_encrypted_password.clone() {
         Some(p) => p,
         None => {
             tracing::warn!("用户未绑定IAAA账号: {}", current_user.id);
@@ -522,6 +584,8 @@ async fn process_lesson(
     current_user: CurrentUser,
     Json(req): Json<ProcessLessonRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let lesson_mutex = state.lesson_mutation(current_user.id).await;
+    let _mutation_guard = lesson_mutex.lock().await;
     // 后端防并发控制：检查用户是否正在处理
     {
         let processing_users = state.processing_users.read().await;
@@ -553,7 +617,7 @@ async fn process_lesson(
             ApiError::BadRequest("无效的邮箱格式".to_string())
         })?.to_string();
 
-        let password = match user.iaaa_encrypted_password {
+        let password = match user.iaaa_encrypted_password.clone() {
             Some(p) => p,
             None => {
                 tracing::warn!("用户未绑定IAAA账号: {}", current_user.id);
@@ -574,6 +638,23 @@ async fn process_lesson(
         }
 
         let lesson_index = lesson_index.unwrap();
+
+        if let Some(mut replay) = lessons[lesson_index].manual_replay.clone() {
+            if replay.date.is_empty() { replay.date = lessons[lesson_index].date.clone(); }
+            let client = state.app_replay_client(current_user.id).await.map_err(ApiError::Internal)?;
+            let status = client.lock().await.login_bound(&user, &serde_json::json!({})).await.map_err(ApiError::Internal)?;
+            if status["data"]["logged_in"] != true {
+                state.processing_users.write().await.remove(&current_user.id);
+                return Ok(Json(serde_json::json!({"success":false,"needs_app_login":true,
+                    "message":status["error"].as_str().unwrap_or("好学认证需要验证码")})));
+            }
+            let job_id = enqueue_job_without_limit(&state, current_user.id,
+                &lessons[lesson_index].video_url, &username, &password, None, Some(replay)).await?;
+            tokio::spawn(background_post_process(state.clone(), job_id, username,
+                course_id.clone(), video_id.clone(), current_user.id));
+            return Ok(Json(serde_json::json!({"success":true,"video_id":video_id,
+                "job_id":job_id.to_string(),"status":"processing","message":"正在通过好学 App 下载并处理"})));
+        }
 
         // 每次自动获取密钥前都访问观看页，不能因缓存了下载链接而跳过鉴权。
         let mut playback_session = None;
@@ -656,6 +737,7 @@ async fn process_lesson(
             &username,
             &password,
             resolved_key.as_deref(),
+            None,
         ).await?;
 
         tracing::info!("任务提交成功，job_id: {}，启动后台后处理任务", job_id);
@@ -757,12 +839,14 @@ async fn enqueue_job_without_limit(
     pku_auth_one: &str,
     pku_auth_two: &str,
     manual_key: Option<&str>,
+    manual_replay: Option<crate::services::app_replay::ManualReplay>,
 ) -> Result<Uuid, ApiError> {
     let job_id = Uuid::new_v4();
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
     let artifacts_dir = format!("./data/pkuvideo_jobs/{}_{}", timestamp, job_id);
     
-    let job = PkuVideoJob::new(job_id, user_id, video_url.to_string(), artifacts_dir.clone());
+    let mut job = PkuVideoJob::new(job_id, user_id, video_url.to_string(), artifacts_dir.clone());
+    job.manual_replay = manual_replay;
     
     // 保存到内存和文件存储
     state.pkuvideo_jobs.write().await.insert(job_id, job.clone());
@@ -855,41 +939,21 @@ async fn background_post_process(
             tracing::info!("[后台任务] 任务 {} 执行成功，开始后处理", job_id);
 
             // 复制tex文件到course_data目录
-            let tex_filename = format!("{}_lesson_{}.tex", course_id, video_id);
-            let course_data_dir = format!("./course_data/{}/{}", username, course_id);
-
             if let Some(notes_path) = &result.notes_path {
                 let base_dir = PathBuf::from("./data/pkuvideo_jobs");
                 let src_path = base_dir.join(notes_path);
-
-                tracing::info!("[后台任务] 尝试复制tex文件: {} -> {}", src_path.display(), course_data_dir);
-
-                if !src_path.exists() {
-                    tracing::warn!("[后台任务] 源tex文件不存在: {}", src_path.display());
-                } else {
-                    let dest_dir = PathBuf::from(&course_data_dir);
-                    if let Err(e) = std::fs::create_dir_all(&dest_dir) {
-                        tracing::error!("[后台任务] 创建目录失败: {}", e);
-                    } else {
-                        let dest_path = dest_dir.join(&tex_filename);
-                        match std::fs::copy(&src_path, &dest_path) {
-                            Ok(_) => {
-                                tracing::info!("[后台任务] tex文件已复制到: {}", dest_path.display());
-
-                                // 更新课节的tex文件名和处理状态
-                                if let Ok(mut lessons) = lesson_storage::load_lessons(&username, &course_id) {
-                                    if let Some(lesson) = lessons.iter_mut().find(|l| l.id == video_id) {
-                                        lesson.tex_filename = Some(tex_filename);
-                                        lesson.is_processed = true;
-                                        if let Err(e) = lesson_storage::save_lessons(&username, &course_id, &lessons) {
-                                            tracing::error!("[后台任务] 保存课节信息失败: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => tracing::error!("[后台任务] 复制文件失败: {}", e),
-                        }
+                let lesson_mutex = state.lesson_mutation(user_id).await;
+                let _guard = lesson_mutex.lock().await;
+                if let Err(error) = lesson_storage::install_lesson_notes(&username, &course_id, &video_id, &src_path) {
+                    tracing::error!("[后台任务] 保存顺序笔记失败，保留任务资源: {}", error);
+                    let mut jobs = state.pkuvideo_jobs.write().await;
+                    if let Some(job) = jobs.get_mut(&job_id) {
+                        job.status = PipelineStatus::Failed;
+                        job.error = Some(error);
+                        let _ = state.store.update_pkuvideo_job(job.clone()).await;
                     }
+                    state.processing_users.write().await.remove(&user_id);
+                    return;
                 }
             } else {
                 tracing::warn!("[后台任务] 任务完成但未生成tex文件");
@@ -964,6 +1028,8 @@ async fn download_lesson_pdf(
     axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
 ) -> Result<impl IntoResponse, ApiError> {
+    let lesson_mutex = state.lesson_mutation(current_user.id).await;
+    let _guard = lesson_mutex.lock().await;
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
         ApiError::Internal("用户不存在".to_string())
@@ -1118,6 +1184,8 @@ async fn download_course_pdf(
     axum::extract::Path(course_id): axum::extract::Path<String>,
     current_user: CurrentUser,
 ) -> Result<impl IntoResponse, ApiError> {
+    let lesson_mutex = state.lesson_mutation(current_user.id).await;
+    let _guard = lesson_mutex.lock().await;
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
         ApiError::Internal("用户不存在".to_string())
@@ -1135,21 +1203,17 @@ async fn download_course_pdf(
             ApiError::Internal(format!("加载课节信息失败: {}", e))
         })?;
 
+    // 使用课节列表本身的顺序，避免字符串排序把第10节排在第2节之前。
+    let mut lessons = lessons;
+    lesson_parser::sort_lessons(&mut lessons);
     // 筛选已处理的课节（有tex文件）
-    let mut processed_lessons: Vec<&LessonInfo> = lessons.iter()
+    let processed_lessons: Vec<&LessonInfo> = lessons.iter()
         .filter(|l| l.tex_filename.is_some())
         .collect();
 
     if processed_lessons.is_empty() {
         return Err(ApiError::BadRequest("没有已处理的课节".to_string()));
     }
-
-    // 按时间先后排序（日期+时间）
-    processed_lessons.sort_by(|a, b| {
-        let a_datetime = format!("{} {}", a.date, a.time);
-        let b_datetime = format!("{} {}", b.date, b.time);
-        a_datetime.cmp(&b_datetime)
-    });
 
     // 获取课程信息
     let courses = course_storage::load_courses(username)
@@ -1363,6 +1427,8 @@ async fn download_lesson_tex(
     axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
 ) -> Result<impl IntoResponse, ApiError> {
+    let lesson_mutex = state.lesson_mutation(current_user.id).await;
+    let _guard = lesson_mutex.lock().await;
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
         ApiError::Internal("用户不存在".to_string())
@@ -1419,6 +1485,11 @@ async fn reprocess_lesson(
     axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let lesson_mutex = state.lesson_mutation(current_user.id).await;
+    let _guard = lesson_mutex.lock().await;
+    if state.processing_users.read().await.contains_key(&current_user.id) {
+        return Err(ApiError::BadRequest("请等待当前课节处理完成".into()));
+    }
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
         ApiError::Internal("用户不存在".to_string())
@@ -1440,24 +1511,14 @@ async fn reprocess_lesson(
     let lesson_index = lessons.iter().position(|l| l.id == video_id)
         .ok_or_else(|| ApiError::BadRequest("课节不存在".to_string()))?;
 
-    // 删除旧的tex文件
-    if let Some(old_tex_filename) = &lessons[lesson_index].tex_filename {
-        let old_tex_path = PathBuf::from(format!("./course_data/{}/{}/{}", username, course_id, old_tex_filename));
-        if old_tex_path.exists() {
-            if let Err(e) = tokio::fs::remove_file(&old_tex_path).await {
-                tracing::warn!("删除旧tex文件失败: {}", e);
-            } else {
-                tracing::info!("已删除旧tex文件: {}", old_tex_path.display());
-            }
-        }
-    }
+    let old_lessons = lessons.clone();
 
     // 重置课节的处理状态
     lessons[lesson_index].tex_filename = None;
     lessons[lesson_index].is_processed = false;
 
     // 保存更新后的课节信息
-    lesson_storage::save_lessons(username, &course_id, &lessons)
+    lesson_storage::save_ordered_lessons(username, &course_id, &old_lessons, &mut lessons)
         .map_err(|e| {
             tracing::error!("保存课节信息失败: {}", e);
             ApiError::Internal(format!("保存课节信息失败: {}", e))

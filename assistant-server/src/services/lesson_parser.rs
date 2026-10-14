@@ -53,6 +53,7 @@ pub fn parse_lessons(html: &str, course_id: &str) -> Vec<LessonInfo> {
             day_of_week,
             is_processed: false,
             tex_filename: None,
+            manual_replay: None,
         };
 
         lessons.push(lesson);
@@ -122,6 +123,13 @@ fn is_video_list_url(url: &str) -> bool {
 }
 
 pub fn assign_lesson_numbers(lessons: &mut Vec<LessonInfo>) {
+    sort_lessons(lessons);
+    for (index, lesson) in lessons.iter_mut().enumerate() {
+        lesson.id = format!("lesson_{}", index + 1);
+    }
+}
+
+pub fn sort_lessons(lessons: &mut [LessonInfo]) {
     lessons.sort_by(|a, b| {
         let date_a = NaiveDate::parse_from_str(&a.date, "%Y-%m-%d").unwrap_or(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
         let date_b = NaiveDate::parse_from_str(&b.date, "%Y-%m-%d").unwrap_or(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
@@ -135,17 +143,20 @@ pub fn assign_lesson_numbers(lessons: &mut Vec<LessonInfo>) {
         }
     });
     
-    for (index, lesson) in lessons.iter_mut().enumerate() {
-        let lesson_number = index + 1;
-        lesson.id = format!("lesson_{}", lesson_number);
-    }
 }
 
 fn parse_time_order(time_str: &str) -> i32 {
-    let re = regex::Regex::new(r"第(\d+)节").unwrap();
+    let re = regex::Regex::new(r"第(\d+)").unwrap();
     if let Some(captures) = re.captures(time_str) {
         if let Ok(num) = captures[1].parse::<i32>() {
-            return num;
+            let starts = [480, 540, 610, 670, 780, 840, 910, 970, 1030, 1120, 1180, 1240];
+            return starts.get(num.saturating_sub(1) as usize).copied().unwrap_or(num * 60);
+        }
+    }
+    let clock = regex::Regex::new(r"(\d{1,2}):(\d{2})").unwrap();
+    if let Some(c) = clock.captures(time_str) {
+        if let (Ok(hours), Ok(minutes)) = (c[1].parse::<i32>(), c[2].parse::<i32>()) {
+            return hours * 60 + minutes;
         }
     }
     0
@@ -215,6 +226,7 @@ mod tests {
                 day_of_week: "周五".to_string(),
                 is_processed: false,
                 tex_filename: None,
+                manual_replay: None,
             },
             LessonInfo {
                 id: "test_2".to_string(),
@@ -225,6 +237,7 @@ mod tests {
                 day_of_week: "周三".to_string(),
                 is_processed: false,
                 tex_filename: None,
+                manual_replay: None,
             },
             LessonInfo {
                 id: "test_3".to_string(),
@@ -235,6 +248,7 @@ mod tests {
                 day_of_week: "周五".to_string(),
                 is_processed: false,
                 tex_filename: None,
+                manual_replay: None,
             },
         ];
         

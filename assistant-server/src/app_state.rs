@@ -21,8 +21,11 @@ pub struct AppState {
     pub in_memory_sessions: Arc<RwLock<HashMap<Uuid, RuntimeWechatSession>>>,
     pub pkuvideo_jobs: Arc<RwLock<HashMap<Uuid, PkuVideoJob>>>,
     pub pkuvideo_fw_jobs: Arc<RwLock<HashMap<Uuid, PkuVideoFwJob>>>,
+    pub fw_slots: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
     pub login_cache: Arc<LoginCache>,
     pub processing_users: Arc<RwLock<HashMap<Uuid, ProcessingState>>>,
+    pub app_replay_clients: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<crate::services::app_replay::AppReplayClient>>>>>,
+    pub lesson_mutations: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +44,20 @@ pub struct ProcessingState {
 }
 
 impl AppState {
+    pub async fn fw_slot(&self, user_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        self.fw_slots.lock().await.entry(user_id).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+    }
+    pub async fn lesson_mutation(&self, user_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        self.lesson_mutations.lock().await.entry(user_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+    }
+    pub async fn app_replay_client(&self, user_id: Uuid) -> Result<Arc<tokio::sync::Mutex<crate::services::app_replay::AppReplayClient>>, String> {
+        let mut clients = self.app_replay_clients.lock().await;
+        if let Some(client) = clients.get(&user_id) { return Ok(client.clone()); }
+        let client = Arc::new(tokio::sync::Mutex::new(crate::services::app_replay::AppReplayClient::for_user(user_id).await?));
+        clients.insert(user_id, client.clone());
+        Ok(client)
+    }
     pub fn new(settings: Settings, store: Arc<FileStore>) -> Self {
         let wechat_service = WeChatService::new(settings.wechat.clone());
 
@@ -59,8 +76,11 @@ impl AppState {
             in_memory_sessions: Arc::new(RwLock::new(HashMap::new())),
             pkuvideo_jobs,
             pkuvideo_fw_jobs,
+            fw_slots: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             login_cache,
             processing_users,
+            app_replay_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            lesson_mutations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 

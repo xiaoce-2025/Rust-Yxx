@@ -206,6 +206,14 @@ async fn reexecute_step(
     // 根据步骤索引重新执行
     match req.step {
         0 => {
+            if let Some(replay) = &job.manual_replay {
+                let client = state.app_replay_client(current_user.id).await.map_err(ApiError::Internal)?;
+                let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
+                let mut client = client.lock().await;
+                let login = client.login_bound(&user, &serde_json::json!({})).await.map_err(ApiError::Internal)?;
+                if login["ok"] != true { return Err(ApiError::BadRequest(login["error"].as_str().unwrap_or("好学认证失败").into())); }
+                client.download(replay, &video_path).await.map_err(ApiError::Internal)?;
+            } else {
             // 重新执行 视频下载（需要原始URL）
             crate::services::pkuvideo::download_video(
                 &job.video_url,
@@ -220,6 +228,7 @@ async fn reexecute_step(
             )
                 .await
                 .map_err(|e| ApiError::Internal(e))?;
+            }
             job.steps[0].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
             job.steps[0].message = "视频下载完成".to_string();
             job.steps[0].finished_at = Some(chrono::Utc::now());
@@ -536,7 +545,17 @@ pub async fn run_job_pipeline(
 
     mark_step_running(&state, job_id, 0, "开始下载视频").await;
     let base_dir = PathBuf::from("./data/pkuvideo_jobs");
-    let result = run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two, &merged_settings, &state.login_cache, manual_key.as_deref()).await;
+    let replay = state.pkuvideo_jobs.read().await.get(&job_id).and_then(|j| j.manual_replay.clone());
+    let result = async {
+        let app_download = if let Some(replay) = replay {
+            let client = state.app_replay_client(user_id).await?;
+            let user = state.store.get_user(user_id).await.ok_or("用户不存在")?;
+            let status = client.lock().await.login_bound(&user, &serde_json::json!({})).await?;
+            if status["ok"] != true { return Err(status["error"].as_str().unwrap_or("好学认证失败").to_string()); }
+            Some((client, replay))
+        } else { None };
+        run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two, &merged_settings, &state.login_cache, manual_key.as_deref(), app_download).await
+    }.await;
 
     match result {
         Ok((transcript_path, notes_path, pdf_path)) => {
@@ -559,6 +578,7 @@ pub async fn run_job_pipeline(
             Ok(())
         }
         Err(err) => {
+            tracing::error!(%job_id, error=%err, "course processing failed");
             let (index, message) = parse_step_error(&err);
             mark_step_failed(&state, job_id, index, &message).await;
             Err(message)

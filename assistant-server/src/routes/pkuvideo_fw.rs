@@ -9,9 +9,9 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::task;
 use uuid::Uuid;
 
@@ -54,6 +54,7 @@ struct JobDetailResponse {
     video_path: Option<String>,
     error: Option<String>,
     progress: Option<u8>,
+    merging: bool,
 }
 
 impl JobDetailResponse {
@@ -67,7 +68,18 @@ impl JobDetailResponse {
             video_url: job.video_url.clone(),
             video_path: job.video_path.clone(),
             error: job.error.clone(),
-            progress: job.get_progress(),
+            merging: job.status == PipelineStatus::Running
+                && job.get_progress().is_some_and(|p| p >= 100),
+            progress: job.get_progress().map(|p| {
+                if matches!(
+                    job.status,
+                    PipelineStatus::Pending | PipelineStatus::Running
+                ) {
+                    p.min(99)
+                } else {
+                    p
+                }
+            }),
         }
     }
 }
@@ -75,6 +87,7 @@ impl JobDetailResponse {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/pkuvideo_fw/submit", post(submit))
+        .route("/api/pkuvideo_fw/manual-replay", post(submit_manual_replay))
         .route("/api/pkuvideo_fw/check-m3u8", post(check_m3u8))
         .route("/api/pkuvideo_fw/jobs/:id", get(job_detail))
         .route("/api/pkuvideo_fw/jobs", get(job_list))
@@ -88,6 +101,8 @@ async fn submit(
     current_user: CurrentUser,
     Json(req): Json<SubmitRequest>,
 ) -> Result<Json<SubmitResponse>, ApiError> {
+    let slot = state.fw_slot(current_user.id).await;
+    let _guard = slot.lock().await;
     validate_input(&req.video_url, &req.pku_auth_one, &req.pku_auth_two)?;
 
     // 检查用户是否已有任务（每个用户只有一个槽位）
@@ -167,6 +182,123 @@ async fn submit(
     }))
 }
 
+#[derive(Deserialize)]
+struct ManualReplayRequest {
+    course_id: String,
+    lesson_id: String,
+}
+
+async fn submit_manual_replay(
+    State(state): State<AppState>,
+    current: CurrentUser,
+    Json(request): Json<ManualReplayRequest>,
+) -> Result<Json<SubmitResponse>, ApiError> {
+    let slot = state.fw_slot(current.id).await;
+    let _guard = slot.lock().await;
+    let user = state
+        .store
+        .get_user(current.id)
+        .await
+        .ok_or(ApiError::Unauthorized)?;
+    let username = user.email.split('@').next().unwrap_or_default();
+    let lessons = crate::services::lesson_storage::load_lessons(username, &request.course_id)
+        .map_err(ApiError::BadRequest)?;
+    let lesson = lessons
+        .iter()
+        .find(|l| l.id == request.lesson_id)
+        .ok_or(ApiError::NotFound)?;
+    let mut replay = lesson
+        .manual_replay
+        .clone()
+        .ok_or_else(|| ApiError::BadRequest("只有手动添加课节可以通过好学 App 观看".into()))?;
+    if replay.date.is_empty() {
+        replay.date = lesson.date.clone();
+    }
+    let old_jobs: Vec<_> = state
+        .pkuvideo_fw_jobs
+        .read()
+        .await
+        .values()
+        .filter(|j| j.user_id == current.id)
+        .cloned()
+        .collect();
+    if old_jobs
+        .iter()
+        .any(|j| matches!(j.status, PipelineStatus::Pending | PipelineStatus::Running))
+    {
+        return Err(ApiError::Conflict(
+            "已有视频正在下载，请等待完成后再观看其他回放".into(),
+        ));
+    }
+    // Both download sources use the same single slot. Clear only this user's
+    // terminal jobs after validating the lesson, before reserving the new slot.
+    for job in old_jobs {
+        remove_job(&state, job.id).await?;
+    }
+    let id = Uuid::new_v4();
+    let mut job = PkuVideoFwJob::new(id, current.id, String::new());
+    job.progress = Some(Arc::new(AtomicU8::new(0)));
+    state
+        .store
+        .insert_pkuvideo_fw_job(job.clone())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let progress = job.progress.clone();
+    state.pkuvideo_fw_jobs.write().await.insert(id, job);
+    task::spawn(async move {
+        if let Some(job) = state.pkuvideo_fw_jobs.write().await.get_mut(&id) {
+            job.status = PipelineStatus::Running;
+            job.updated_at = Utc::now();
+        }
+        let result: Result<PathBuf, String> = async {
+            let client = state.app_replay_client(current.id).await?;
+            let mut client = client.lock().await;
+            let login = client.login_bound(&user, &serde_json::json!({})).await?;
+            if login["ok"] != true {
+                return Err(login["error"]
+                    .as_str()
+                    .unwrap_or("好学认证失败，请返回课节页完成验证")
+                    .into());
+            }
+            let dir = PathBuf::from("./data/pkuvideo_fw_jobs").join(id.to_string());
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|_| "创建回放目录失败")?;
+            let path = dir.join("video.mp4");
+            client
+                .download_with_progress(&replay, &path, progress)
+                .await?;
+            Ok(path)
+        }
+        .await;
+        let mut jobs = state.pkuvideo_fw_jobs.write().await;
+        if let Some(job) = jobs.get_mut(&id) {
+            job.updated_at = Utc::now();
+            match result {
+                Ok(path) => {
+                    job.status = PipelineStatus::Succeeded;
+                    job.video_path = Some(path.to_string_lossy().into());
+                    if let Some(progress) = &job.progress {
+                        progress.store(100, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(target:"app_replay_download",job_id=%id,%error,"manual replay viewing failed");
+                    job.status = PipelineStatus::Failed;
+                    job.error = Some(error);
+                }
+            }
+            if let Err(error) = state.store.update_pkuvideo_fw_job(job.clone()).await {
+                tracing::error!(job_id=%id,%error,"saving replay job failed");
+            }
+        }
+    });
+    Ok(Json(SubmitResponse {
+        job_id: id,
+        status: "queued".into(),
+    }))
+}
+
 async fn check_m3u8(
     State(state): State<AppState>,
     current_user: CurrentUser,
@@ -232,55 +364,69 @@ async fn delete_job(
     current_user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let job_info = {
+    let slot = state.fw_slot(current_user.id).await;
+    let _guard = slot.lock().await;
+    {
         let jobs = state.pkuvideo_fw_jobs.read().await;
         let job = jobs.get(&id).ok_or(ApiError::NotFound)?;
-
         if job.user_id != current_user.id {
-            return Err(ApiError::Forbidden("无权访问".to_string()));
+            return Err(ApiError::Forbidden("无权访问".into()));
         }
-
-        job.video_path.clone()
-    };
-
-    // 删除任务目录中的文件
-    if let Some(vp) = job_info {
-        let artifacts_path = PathBuf::from(&vp)
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("./data/pkuvideo_fw_jobs"));
-
-        if artifacts_path.exists() {
-            if let Err(e) = tokio::fs::remove_dir_all(&artifacts_path).await {
-                eprintln!("删除任务目录失败: {}", e);
-            }
+        if matches!(
+            job.status,
+            PipelineStatus::Pending | PipelineStatus::Running
+        ) {
+            return Err(ApiError::Conflict("视频正在下载，请等待完成后删除".into()));
         }
     }
-
-    // 从内存中删除
-    {
-        let mut jobs = state.pkuvideo_fw_jobs.write().await;
-        jobs.remove(&id);
-    }
-
-    // 从文件存储中删除
-    state
-        .store
-        .delete_pkuvideo_fw_job(id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
+    remove_job(&state, id).await?;
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "任务删除成功"
     })))
 }
 
-fn validate_input(
-    video_url: &str,
-    pku_auth_one: &str,
-    pku_auth_two: &str,
-) -> Result<(), ApiError> {
+async fn remove_job(state: &AppState, id: Uuid) -> Result<(), ApiError> {
+    remove_job_files(std::path::Path::new("./data/pkuvideo_fw_jobs"), id).await?;
+    state
+        .store
+        .delete_pkuvideo_fw_job(id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    state.pkuvideo_fw_jobs.write().await.remove(&id);
+    Ok(())
+}
+async fn remove_job_files(root: &std::path::Path, id: Uuid) -> Result<(), ApiError> {
+    if root.exists() {
+        let root = tokio::fs::canonicalize(root)
+            .await
+            .map_err(|_| ApiError::Internal("读取回放存储目录失败".into()))?;
+        let mut entries = tokio::fs::read_dir(&root)
+            .await
+            .map_err(|_| ApiError::Internal("读取回放目录失败".into()))?;
+        let suffix = format!("_{id}");
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|_| ApiError::Internal("读取回放目录失败".into()))?
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == id.to_string() || name.ends_with(&suffix) {
+                let path = tokio::fs::canonicalize(entry.path())
+                    .await
+                    .map_err(|_| ApiError::Internal("读取旧回放路径失败".into()))?;
+                if path == root || !path.starts_with(&root) {
+                    return Err(ApiError::Internal("旧回放路径超出存储目录".into()));
+                }
+                tokio::fs::remove_dir_all(path)
+                    .await
+                    .map_err(|_| ApiError::Internal("删除旧回放文件失败".into()))?;
+            }
+        }
+    }
+    Ok(())
+}
+fn validate_input(video_url: &str, pku_auth_one: &str, pku_auth_two: &str) -> Result<(), ApiError> {
     if video_url.trim().is_empty()
         || pku_auth_one.trim().is_empty()
         || pku_auth_two.trim().is_empty()
@@ -380,9 +526,7 @@ async fn serve_video(
             return Err(ApiError::Forbidden("无权访问此视频".to_string()));
         }
 
-        job.video_path
-            .clone()
-            .ok_or(ApiError::NotFound)?
+        job.video_path.clone().ok_or(ApiError::NotFound)?
     };
 
     let mut file = tokio::fs::File::open(&video_full_path)
@@ -490,4 +634,53 @@ fn parse_byte_range(range_str: &str, file_size: u64) -> Option<(u64, u64)> {
 
     let end = end.min(file_size - 1);
     Some((start, end))
+}
+
+#[cfg(test)]
+mod replay_view_tests {
+    #[test]
+    fn completed_segments_show_ninety_nine_until_merging_finishes() {
+        let mut job =
+            super::PkuVideoFwJob::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), String::new());
+        job.status = super::PipelineStatus::Running;
+        job.progress = Some(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(50)));
+        let detail = super::JobDetailResponse::from_job(&job);
+        assert_eq!(detail.progress, Some(50));
+        assert!(!detail.merging);
+        job.progress
+            .as_ref()
+            .unwrap()
+            .store(100, std::sync::atomic::Ordering::SeqCst);
+        let detail = super::JobDetailResponse::from_job(&job);
+        assert_eq!(detail.progress, Some(99));
+        assert!(detail.merging);
+        job.status = super::PipelineStatus::Succeeded;
+        let detail = super::JobDetailResponse::from_job(&job);
+        assert_eq!(detail.progress, Some(100));
+        assert!(!detail.merging);
+    }
+    #[tokio::test]
+    async fn replacing_video_removes_only_that_jobs_files() {
+        let dir = tempdir::TempDir::new_in("target", "fw-replace").unwrap();
+        let old = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        for name in [
+            old.to_string(),
+            format!("20261014_120000_{old}"),
+            other.to_string(),
+            "unrelated".into(),
+        ] {
+            std::fs::create_dir(dir.path().join(&name)).unwrap();
+            std::fs::write(dir.path().join(name).join("video.mp4"), b"test").unwrap();
+        }
+        super::remove_job_files(dir.path(), old).await.unwrap();
+        assert!(!dir.path().join(old.to_string()).exists());
+        assert!(!dir.path().join(format!("20261014_120000_{old}")).exists());
+        assert!(dir
+            .path()
+            .join(other.to_string())
+            .join("video.mp4")
+            .exists());
+        assert!(dir.path().join("unrelated").exists());
+    }
 }

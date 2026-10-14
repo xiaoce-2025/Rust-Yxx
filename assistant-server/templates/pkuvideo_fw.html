@@ -297,7 +297,7 @@
         `;
       } else if (job.status === "running" || job.status === "pending") {
         const pct = job.progress != null ? job.progress : 0;
-        jobMetaEl.textContent = "正在下载中，请稍后...";
+        jobMetaEl.textContent = job.merging ? "分片下载完成，正在合并视频（99%）…" : "正在下载中，请稍后...";
         progressWrap.style.display = "block";
         progressBar.style.width = pct + "%";
         progressBar.textContent = pct + "%";
@@ -506,7 +506,25 @@
     });
     document.getElementById("submitBtn").addEventListener("click", checkM3u8AndSubmit);
 
-    checkLogin().then(() => checkExistingJob());
+    async function openManualReplay() {
+      const query = new URLSearchParams(location.search);
+      const courseId = query.get('course_id'), lessonId = query.get('lesson_id');
+      if (!courseId || !lessonId) return checkExistingJob();
+      inputSection.style.display = 'none';
+      submitBtn.style.display = 'none';
+      statusEl.textContent = '正在准备好学回放，清理旧视频并获取最新地址，请稍候…';
+      history.replaceState(null, '', '/pkuvideo_fw');
+      try {
+        const result = await api('/api/pkuvideo_fw/manual-replay','POST',{course_id:courseId,lesson_id:lessonId});
+        activeJobId = result.job_id;
+        statusEl.textContent = '正在通过好学 App 拉取回放，下载完成后可观看。';
+        startPolling();
+      } catch (error) {
+        await checkExistingJob();
+        statusEl.textContent = '准备回放失败：' + error.message;
+      }
+    }
+    checkLogin().then(() => openManualReplay());
   </script>
 </body>
 </html>

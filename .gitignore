@@ -34,5 +34,7 @@ assistant-server/course_data/
 *.dll
 
 *.dylib
+__pycache__/
+*.pyc
 # 配置文件
 # assistant-server/config/

@@ -1,7 +1,13 @@
 pub mod course_parser;
+pub mod app_replay;
+mod app_replay_auth;
+mod app_replay_client;
+mod app_replay_media;
+mod app_replay_vault;
 pub mod course_storage;
 pub mod lesson_parser;
 pub mod lesson_storage;
+mod lesson_order;
 pub mod login_cache;
 pub mod pkuvideo;
 pub mod pkuvideo_fw;
