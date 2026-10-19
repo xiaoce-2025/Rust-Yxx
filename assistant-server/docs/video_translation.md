@@ -1,0 +1,74 @@
+# pkuvideo_fw 视频翻译
+
+视频下载完成后点击“视频翻译”。后端使用 Paraformer-v2 识别英文，DeepSeek 翻译，MiMo 生成中文配音，再调用服务器原有 FFmpeg 对轴及封装。
+
+## 运行要求
+
+后端全部使用 Rust 和仓库已有 Rust 依赖，没有新增 Cargo 依赖。唯一外部媒体程序是现有 `ffmpeg`，无需 ffprobe、Python、GPU、模型权重、Node.js 服务或新数据库。浏览器继续使用现有 HTML/JavaScript。
+
+服务工作目录及数据位置沿用原部署方式。请确保运行账号能写入 `data/`，服务器 FFmpeg 在 PATH 中并具备 `pcm_s16le`、AAC、`atempo`、`aresample` 和 MP4/mov_text 支持。源视频需能直接封入 MP4；本功能使用 `-c:v copy`，不自动转码画面。
+
+## 配置
+
+现有阿里云、DeepSeek 凭证继续生效，也支持已有用户 API 设置。新任务固定使用 `paraformer-v2`，不修改其他流程的模型配置；DeepSeek 模型沿用已有配置。
+
+MiMo 模型名称与 API Key 可在课程页原有“API配置”区域设置，无需新增入口。密钥只显示是否已设置，不会回显；保存时密钥留空保留旧值，模型留空恢复服务器默认。点击原有“清除自定义配置”会同时清除 MiMo 模型与密钥。
+
+MiMo 密钥优先级：用户自定义 > 服务器环境变量 `MIMO_API_KEY` > 服务器配置。模型优先级：用户自定义 > 服务器 `video_translation.mimo_model`。不要把真实密钥提交到 Git。服务器配置节支持：
+
+```toml
+[video_translation]
+enabled = true
+mimo_base_url = "https://api.xiaomimimo.com/v1"
+mimo_model = "mimo-v2.5-tts"
+voice = "苏打"
+max_speed = 1.15
+asr_timeout_seconds = 21600
+refine_subtitles = true
+```
+
+也可通过现有配置加载器的 `VIDEO_TRANSLATION__...` 环境变量覆盖服务器默认字段。若确有需要，可设置 `mimo_api_key`，服务器密钥优先推荐 `MIMO_API_KEY`。用户修改模型在新建翻译任务时生效；已创建任务保留原模型与配音缓存，防止课程中途混用模型。
+
+`refine_subtitles=true` 会使用同一 Paraformer-v2 再识别最终中文配音，增加一次中文 ASR 用量。它使用已知配音文本匹配词时间戳，低覆盖块回退至实际配音块边界；不是本地强制对齐，也不保证逐字准确。关闭后直接使用块级字幕。英文和双语字幕按语义块映射。
+
+## 页面行为
+
+- 翻译期间继续播放原视频，显示当前阶段与已完成配音块数。
+- 翻译成功后自动切为中文配音视频，保留原播放位置、暂停状态、倍速和音量；浏览器阻止恢复播放时可手动点击播放。
+- 可切回原声，字幕可选中文、英文、双语或关闭。
+- “下载原视频”保持原文件；“下载翻译视频”下载默认中文配音、备用英文原声并含软字幕的 MP4。
+- 删除任务会先中止翻译及其 FFmpeg，再清理原文件、成品、字幕、识别响应、所有配音版本与缓存。手动回放替换旧任务也使用同一清理入口。
+
+## 对轴和失败处理
+
+语义块约 5–15 秒，优先句界、词界及停顿；固定原始起点，最多借用后方 1 秒空白并保留保护间隔。音频按实际 PCM 数据测长，默认最多 1.15 倍音频加速，不改变视频画面或速度。
+
+过长块最多自动压缩译文两次，再合成测量；仍不合格进入 `needs_review`，保留已有结果且不发布残缺成品。不截断有声内容，也不将后续块顺延。
+
+网络失败、限流和服务错误有有界重试。页面“重试翻译”继续未完成阶段，已经确认的翻译和配音块不再调用供应商。若是内容过密导致 `needs_review`，同一文本及音色可能仍无法通过；它不是网络重试能够保证解决的问题。
+
+## 存储与重启
+
+每个原任务在 `data/pkuvideo_fw_translations/{job_id}/` 下有独立 `manifest.json`、完整 ASR JSON、翻译与配音版本、字幕、`quality-report.json` 和成品。源视频路径来自原任务记录，兼容两个既有下载入口。
+
+启动恢复排队/运行中的翻译，优先查询已持久化的外部 ASR task_id，逐块复用已完成结果。供应商任务过期后可能重新提交；网络响应成功但本地尚未保存时发生崩溃，仍可能产生重复计费，不提供跨供应商 exactly-once 保证。
+
+当前使用单进程、全局一个翻译 worker，以限制长课的 CPU、磁盘和 API 占用，不影响已有下载队列。不要同时用多个服务实例写同一个翻译数据目录。
+
+删除标记持久化后才清理文件。清理失败会返回错误，保留标记，下次删除或重启继续清理，不会声称已删除成功。Windows 上若成品被其他程序占用，需要先释放该文件后重试。
+
+## 验证范围
+
+本地只做 Cargo 编译、Rust 单元测试及网页逻辑验证，未运行 FFmpeg，未调用真实云端付费接口。
+
+Rust 测试使用合成 PCM 数据，覆盖固定时间窗、绝对时间拼接、字幕校准与低置信度回退、翻译 ID 校验、断点状态保存、取消与删除、资源鉴权和 Range 下载。实际音质、供应商额度及服务器媒体兼容性需部署后用短课程样片联调。
+
+## 新增接口
+
+- `POST /api/pkuvideo_fw/jobs/:id/translation`
+- `GET /api/pkuvideo_fw/jobs/:id/translation`
+- `POST /api/pkuvideo_fw/jobs/:id/translation/retry`
+- `GET /api/pkuvideo_fw/jobs/:id/translation/video.mp4?download=1`
+- `GET /api/pkuvideo_fw/jobs/:id/translation/subtitles/:kind.vtt`
+
+全部接口沿用当前登录鉴权和任务归属检查。删除仍使用原有 `DELETE /api/pkuvideo_fw/jobs/:id`。

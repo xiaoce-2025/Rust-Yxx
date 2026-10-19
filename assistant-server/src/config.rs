@@ -13,6 +13,36 @@ pub struct Settings {
     pub deepseek: DeepSeekConfig,
     #[serde(default)]
     pub pkuvideo: PkuVideoConfig,
+    #[serde(default)]
+    pub video_translation: VideoTranslationConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct VideoTranslationConfig {
+    pub enabled: bool,
+    pub mimo_api_key: Option<String>,
+    pub mimo_base_url: String,
+    pub mimo_model: String,
+    pub voice: String,
+    pub max_speed: f64,
+    pub asr_timeout_seconds: u64,
+    pub refine_subtitles: bool,
+}
+
+impl Default for VideoTranslationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mimo_api_key: None,
+            mimo_base_url: "https://api.xiaomimimo.com/v1".into(),
+            mimo_model: "mimo-v2.5-tts".into(),
+            voice: "苏打".into(),
+            max_speed: 1.15,
+            asr_timeout_seconds: 21600,
+            refine_subtitles: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

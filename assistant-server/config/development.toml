@@ -43,3 +43,15 @@ model = "deepseek-v4-flash"
 [pkuvideo]
 m3u8_concurrency = 4
 m3u8_segment_timeout_seconds = 120
+
+# FW 视频翻译：复用现有 Paraformer-v2 / DeepSeek，新增 MiMo。
+# 密钥推荐使用服务器环境变量 MIMO_API_KEY，不提交到仓库。
+[video_translation]
+enabled = true
+mimo_base_url = "https://api.xiaomimimo.com/v1"
+mimo_model = "mimo-v2.5-tts"
+voice = "苏打"
+max_speed = 1.15
+asr_timeout_seconds = 21600
+# 用同一 Paraformer-v2 再识别最终配音以校准中文字幕；会产生额外 ASR 用量。
+refine_subtitles = true

@@ -388,6 +388,18 @@
             <span class="hint">仅用于覆盖全局配置</span>
           </div>
         </div>
+        <div class="config-row">
+          <div class="config-group">
+            <label for="mimoModel">MiMo 语音合成模型名称</label>
+            <input type="text" id="mimoModel" placeholder="如: mimo-v2.5-tts" />
+            <span class="hint">仅用于视频翻译；留空使用服务器默认模型</span>
+          </div>
+          <div class="config-group">
+            <label for="mimoApiKey">MiMo API Key</label>
+            <input type="password" id="mimoApiKey" placeholder="输入后不可查看" autocomplete="new-password" />
+            <span class="hint">优先使用用户密钥；不输入则保留已设置的密钥</span>
+          </div>
+        </div>
         <div class="config-actions">
           <button id="saveConfigBtn" class="ghost">保存配置</button>
           <button id="clearConfigBtn" class="ghost" style="background: rgba(152,42,61,.1); color: var(--warn);">清除自定义配置</button>
@@ -1373,6 +1385,8 @@
         const resp = await api("/api/user/api-config");
         document.getElementById("aliyunModel").value = resp.aliyun_model || "";
         document.getElementById("deepseekModel").value = resp.deepseek_model || "";
+        document.getElementById("mimoModel").value = resp.mimo_model || "";
+        document.getElementById("mimoApiKey").placeholder = resp.mimo_api_key_set ? "已设置（输入新值可更新）" : "输入后不可查看";
         // API Key不可查看，只显示placeholder提示
         if (resp.aliyun_api_key_set) {
           document.getElementById("aliyunApiKey").placeholder = "已设置（输入新值可更新）";
@@ -1400,18 +1414,24 @@
       const aliyunApiKey = document.getElementById("aliyunApiKey").value.trim() || null;
       const deepseekModel = document.getElementById("deepseekModel").value.trim() || null;
       const deepseekApiKey = document.getElementById("deepseekApiKey").value.trim() || null;
+      const mimoModel = document.getElementById("mimoModel").value.trim();
+      const mimoApiKey = document.getElementById("mimoApiKey").value.trim() || null;
 
       try {
         await api("/api/user/api-config", "POST", {
           aliyun_model: aliyunModel,
           aliyun_api_key: aliyunApiKey,
           deepseek_model: deepseekModel,
-          deepseek_api_key: deepseekApiKey
+          deepseek_api_key: deepseekApiKey,
+          mimo_model: mimoModel,
+          mimo_api_key: mimoApiKey
         });
         showConfigStatus("配置已保存", "success");
         // 清空密码输入框
         document.getElementById("aliyunApiKey").value = "";
         document.getElementById("deepseekApiKey").value = "";
+        document.getElementById("mimoApiKey").value = "";
+        if (mimoApiKey) document.getElementById("mimoApiKey").placeholder = "已设置（输入新值可更新）";
         document.getElementById("aliyunApiKey").placeholder = "已设置（输入新值可更新）";
         document.getElementById("deepseekApiKey").placeholder = "已设置（输入新值可更新）";
       } catch (err) {
@@ -1426,12 +1446,17 @@
           aliyun_model: "",
           aliyun_api_key: "",
           deepseek_model: "",
-          deepseek_api_key: ""
+          deepseek_api_key: "",
+          mimo_model: "",
+          mimo_api_key: ""
         });
         showConfigStatus("已清除自定义配置", "success");
         document.getElementById("aliyunModel").value = "";
         document.getElementById("aliyunApiKey").value = "";
         document.getElementById("deepseekModel").value = "";
+        document.getElementById("mimoModel").value = "";
+        document.getElementById("mimoApiKey").value = "";
+        document.getElementById("mimoApiKey").placeholder = "输入后不可查看";
         document.getElementById("deepseekApiKey").value = "";
         document.getElementById("aliyunApiKey").placeholder = "输入后不可查看";
         document.getElementById("deepseekApiKey").placeholder = "输入后不可查看";

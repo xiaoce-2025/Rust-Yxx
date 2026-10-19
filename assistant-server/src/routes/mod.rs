@@ -4,6 +4,7 @@ pub mod conversations;
 pub mod health;
 pub mod pkuvideo;
 pub mod pkuvideo_fw;
+pub mod pkuvideo_fw_translation;
 pub mod pkuvideofullclass;
 pub mod settings;
 pub mod ui;
@@ -44,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .merge(conversations::routes())
         .merge(pkuvideo::routes())
         .merge(pkuvideo_fw::routes())
+        .merge(pkuvideo_fw_translation::routes())
         .merge(pkuvideofullclass::routes())
         .merge(manual_lessons::routes())
         .merge(settings::routes())

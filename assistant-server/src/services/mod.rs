@@ -11,6 +11,7 @@ mod lesson_order;
 pub mod login_cache;
 pub mod pkuvideo;
 pub mod pkuvideo_fw;
+pub mod video_translation;
 pub mod pkulogin;
 pub mod scheduler;
 pub mod video_downloader;

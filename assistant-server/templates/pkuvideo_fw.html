@@ -246,11 +246,19 @@
     const progressBar = document.getElementById("progressBar");
     let activeJobId = "";
     let pollTimer = null;
+    let pollInFlight = false;
+    let translationTimer = null;
+    let translationInFlight = false;
+    let translationReady = false;
+    let deletingVideo = false;
+    let sourceSwitch = 0;
 
     async function api(path, method = "GET", body) {
       const res = await fetch(path, {
         method,
         credentials: "include",
+        cache: "no-store",
+        signal: method === "GET" ? AbortSignal.timeout(15000) : undefined,
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined
       });
@@ -276,17 +284,30 @@
         // 视频预览
         const videoUrl = `/api/pkuvideo_fw/jobs/${job.id}/video.mp4`;
         videoPreview.style.display = "block";
-        videoPreview.innerHTML = `
-          <video controls>
+        if (videoPreview.dataset.jobId !== job.id) {
+          videoPreview.dataset.jobId = job.id;
+          translationReady = false;
+          videoPreview.innerHTML = `
+          <video id="fwPlayer" controls data-variant="source">
             <source src="${videoUrl}" type="video/mp4">
             您的浏览器不支持 video 标签
           </video>
+          <div id="translationStatus" role="status" aria-live="polite" style="margin-top:8px"></div>
+          <div id="translationControls" hidden style="margin-top:8px">
+            <label>音频 <select id="audioVersion" onchange="switchAudio(this.value)"><option value="dub">中文配音</option><option value="source">原声</option></select></label>
+            <label style="margin-left:12px">字幕 <select id="subtitleVersion" onchange="updateSubtitleTracks()"><option value="zh">中文</option><option value="bilingual">中英双语</option><option value="en">英文</option><option value="off">关闭</option></select></label>
+            <span id="subtitlePrecision" style="font-size:12px;color:#6b7280">字幕按实际配音块同步</span>
+          </div>
         `;
 
         resultActions.innerHTML = `
-          <button class="action-btn" onclick="downloadVideo('${job.id}')" style="background: var(--accent); color: #fff;">下载 MP4</button>
+          <button id="translateBtn" class="action-btn" onclick="startTranslation(false)" style="background: var(--accent); color: #fff;">视频翻译</button>
+          <button class="action-btn" onclick="downloadVideo('${job.id}')">下载原视频</button>
+          <button id="downloadTranslatedBtn" class="action-btn" onclick="downloadTranslatedVideo()" disabled>下载翻译视频</button>
           <button class="action-btn delete" onclick="deleteJob('${job.id}')">删除任务</button>
         `;
+          refreshTranslation();
+        }
       } else if (job.status === "failed") {
         jobMetaEl.textContent = "下载失败: " + esc(job.error || "未知错误");
         progressWrap.style.display = "none";
@@ -301,6 +322,7 @@
         progressWrap.style.display = "block";
         progressBar.style.width = pct + "%";
         progressBar.textContent = pct + "%";
+        progressBar.setAttribute('aria-valuenow', pct);
         jobResultEl.style.display = "block";
         inputSection.style.display = "none";
         submitBtn.style.display = "none";
@@ -451,9 +473,12 @@
     });
 
     async function pollJob() {
-      if (!activeJobId) return;
+      if (!activeJobId || pollInFlight) return;
+      const jobId = activeJobId;
+      pollInFlight = true;
       try {
-        const job = await api("/api/pkuvideo_fw/jobs/" + activeJobId);
+        const job = await api("/api/pkuvideo_fw/jobs/" + jobId);
+        if (jobId !== activeJobId) return;
         renderJob(job);
         if (job.status === "succeeded" || job.status === "failed") {
           clearInterval(pollTimer);
@@ -461,21 +486,28 @@
         }
       } catch (err) {
         statusEl.textContent = "查询任务失败: " + err.message;
+      } finally {
+        pollInFlight = false;
       }
     }
 
     function startPolling() {
       if (pollTimer) clearInterval(pollTimer);
       pollJob();
-      pollTimer = setInterval(pollJob, 2000);
+      pollTimer = setInterval(pollJob, 1000);
     }
 
     async function deleteJob(jobId) {
-      if (!confirm("确定要删除此任务吗？删除后将无法恢复，视频文件也会被删除。")) {
+      if (!confirm("确定要删除此任务吗？原视频、翻译视频、字幕和全部处理缓存都会被删除，正在执行的翻译也会停止。")) {
         return;
       }
 
       try {
+        deletingVideo = true;
+        clearInterval(translationTimer);
+        translationTimer = null;
+        const player = document.getElementById('fwPlayer');
+        if (player) { player.pause(); player.removeAttribute('src'); player.querySelectorAll('source,track').forEach(el => el.remove()); player.load(); }
         statusEl.textContent = "正在删除任务...";
         await api("/api/pkuvideo_fw/jobs/" + jobId, "DELETE");
         statusEl.textContent = "任务删除成功";
@@ -486,10 +518,114 @@
         jobResultEl.style.display = "none";
         videoPreview.style.display = "none";
         videoPreview.innerHTML = "";
+        delete videoPreview.dataset.jobId;
+        translationReady = false;
         resultActions.innerHTML = "";
       } catch (err) {
         statusEl.textContent = "删除任务失败: " + err.message;
+      } finally {
+        deletingVideo = false;
       }
+    }
+
+    async function refreshTranslation() {
+      if (!activeJobId || translationInFlight || deletingVideo) return;
+      const id = activeJobId;
+      translationInFlight = true;
+      try {
+        const response = await api(`/api/pkuvideo_fw/jobs/${id}/translation`);
+        if (id !== activeJobId || deletingVideo) return;
+        renderTranslation(response.translation, response.enabled);
+      } catch (error) {
+        const label = document.getElementById('translationStatus');
+        if (label && id === activeJobId && !deletingVideo) label.textContent = '查询翻译状态失败：' + error.message;
+        // A temporary network error must not leave a running task unobserved.
+        if (id === activeJobId && !deletingVideo && !translationTimer) translationTimer = setInterval(refreshTranslation, 3000);
+      } finally { translationInFlight = false; }
+    }
+
+    function renderTranslation(job, enabled = true) {
+      const button = document.getElementById('translateBtn');
+      const label = document.getElementById('translationStatus');
+      if (!button || !label) return;
+      const busy = job && ['queued', 'running', 'deleting'].includes(job.status);
+      const failed = job && ['failed', 'needs_review'].includes(job.status);
+      const ready = job && job.status === 'succeeded';
+      button.disabled = !enabled || busy || ready;
+      button.textContent = !enabled ? '视频翻译未开启' : busy ? (job.status === 'deleting' ? '正在清理' : '正在翻译…') : ready ? '翻译完成' : failed ? '重试翻译' : '视频翻译';
+      button.onclick = () => startTranslation(!!failed);
+      label.textContent = job ? (job.error ? `${job.stage}：${job.error}` : job.stage + (job.total_blocks ? `（${job.completed_blocks}/${job.total_blocks} 块）` : '')) : '';
+      document.getElementById('downloadTranslatedBtn').disabled = !ready;
+      document.getElementById('translationControls').hidden = !ready;
+      document.getElementById('subtitlePrecision').textContent = job && job.subtitle_precision === 'asr' ? '中文字幕已校准' : job && job.subtitle_precision === 'mixed' ? '中文字幕已校准，部分片段使用块级同步' : '字幕按实际配音块同步';
+      if (ready && !translationReady) {
+        translationReady = true;
+        switchAudio('dub');
+      }
+      if (busy && !translationTimer) translationTimer = setInterval(refreshTranslation, 3000);
+      if (!busy) { clearInterval(translationTimer); translationTimer = null; }
+    }
+
+    async function startTranslation(retry) {
+      if (!activeJobId || deletingVideo) return;
+      const id = activeJobId;
+      const button = document.getElementById('translateBtn');
+      button.disabled = true;
+      try {
+        const response = await api(`/api/pkuvideo_fw/jobs/${id}/translation${retry ? '/retry' : ''}`, 'POST', {});
+        if (id === activeJobId && !deletingVideo) renderTranslation(response.translation);
+      } catch (error) {
+        if (id === activeJobId && !deletingVideo) {
+          document.getElementById('translationStatus').textContent = '翻译提交失败：' + error.message;
+          button.disabled = false;
+        }
+      }
+    }
+
+    function switchAudio(version) {
+      const player = document.getElementById('fwPlayer');
+      if (!player || !translationReady || deletingVideo) return;
+      document.getElementById('audioVersion').value = version;
+      if (player.dataset.variant === version) { updateSubtitleTracks(); return; }
+      const saved = { time: player.currentTime || 0, paused: player.paused, rate: player.playbackRate, volume: player.volume, muted: player.muted };
+      const generation = ++sourceSwitch;
+      const id = activeJobId;
+      player.pause();
+      player.dataset.variant = version;
+      player.querySelectorAll('source,track').forEach(el => el.remove());
+      player.src = `/api/pkuvideo_fw/jobs/${id}/${version === 'dub' ? 'translation/' : ''}video.mp4`;
+      player.addEventListener('loadedmetadata', () => {
+        if (generation !== sourceSwitch || id !== activeJobId || deletingVideo) return;
+        player.currentTime = Math.min(saved.time, Math.max(0, player.duration - 0.05));
+        player.playbackRate = saved.rate; player.volume = saved.volume; player.muted = saved.muted;
+        updateSubtitleTracks();
+        if (!saved.paused) player.play().catch(() => {});
+      }, { once: true });
+      player.load();
+    }
+
+    function updateSubtitleTracks() {
+      const player = document.getElementById('fwPlayer');
+      if (!player || !translationReady) return;
+      player.querySelectorAll('track').forEach(el => el.remove());
+      const selection = document.getElementById('subtitleVersion').value;
+      if (selection === 'off') return;
+      const suffix = player.dataset.variant === 'dub' ? 'dub' : 'source';
+      const kind = `${selection}.${suffix}`;
+      const track = document.createElement('track');
+      track.kind = 'subtitles'; track.label = selection === 'en' ? '英文' : selection === 'zh' ? '中文' : '中英双语';
+      track.srclang = selection === 'en' ? 'en' : 'zh'; track.default = true;
+      track.src = `/api/pkuvideo_fw/jobs/${activeJobId}/translation/subtitles/${kind}.vtt`;
+      track.addEventListener('load', () => { track.track.mode = 'showing'; });
+      player.appendChild(track); track.track.mode = 'showing';
+    }
+
+    function downloadTranslatedVideo() {
+      if (!activeJobId || !translationReady) return;
+      const a = document.createElement('a');
+      a.href = `/api/pkuvideo_fw/jobs/${activeJobId}/translation/video.mp4?download=1`;
+      a.download = `translated_${activeJobId}.mp4`;
+      document.body.appendChild(a); a.click(); a.remove();
     }
 
     async function downloadVideo(jobId) {

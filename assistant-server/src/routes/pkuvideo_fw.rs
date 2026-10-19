@@ -386,8 +386,14 @@ async fn delete_job(
     })))
 }
 
-async fn remove_job(state: &AppState, id: Uuid) -> Result<(), ApiError> {
+pub(crate) async fn remove_job(state: &AppState, id: Uuid) -> Result<(), ApiError> {
+    crate::services::video_translation::remove(state, id)
+        .await
+        .map_err(ApiError::Internal)?;
     remove_job_files(std::path::Path::new("./data/pkuvideo_fw_jobs"), id).await?;
+    crate::services::video_translation::finish_remove(state, id)
+        .await
+        .map_err(ApiError::Internal)?;
     state
         .store
         .delete_pkuvideo_fw_job(id)

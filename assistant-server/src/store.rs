@@ -53,6 +53,10 @@ pub struct FileUserConfig {
     pub deepseek_model: Option<String>,
     #[serde(default)]
     pub deepseek_api_key: Option<String>,
+    #[serde(default)]
+    pub mimo_model: Option<String>,
+    #[serde(default)]
+    pub mimo_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

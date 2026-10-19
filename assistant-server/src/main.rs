@@ -20,7 +20,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = config::Settings::load()?;
 
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+                .add_directive("app_replay_download=info".parse()?),
+        )
         .init();
 
     let data_dir = PathBuf::from("./data");
@@ -30,6 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 从FileStore加载pkuvideo_jobs到内存
     app_state.load_pkuvideo_jobs().await;
     app_state.load_pkuvideo_fw_jobs().await;
+    if let Err(error) = services::video_translation::restore(&app_state).await {
+        tracing::error!(%error, "视频翻译恢复失败，已有功能继续运行");
+    }
 
     services::scheduler::start_wechat_listener_scheduler(app_state.clone());
 
