@@ -104,9 +104,77 @@ pub fn fit_speed(audio_ms: u64, window_ms: u64, maximum: f64) -> Option<f64> {
     }
 }
 
+// Automatic repairs may use more real trailing silence, but never the next block's speech.
+pub fn repair_window(blocks: &[Block], index: usize, duration: u64) -> Result<u64, String> {
+    let normal = window(blocks, index, duration)?;
+    let b = &blocks[index];
+    let next = blocks.get(index + 1).map_or(duration, |b| b.start_ms);
+    let extra = next.saturating_sub(b.end_ms).saturating_sub(100).min(3000);
+    Ok(normal.max(b.end_ms + extra - b.start_ms))
+}
+
+pub const MAX_REPAIRS: u8 = 8;
+pub const REPAIR_MAX_SPEED: f64 = 2.0;
+
+// Split only for synthesis; source block IDs, text and absolute anchors remain stable.
+pub fn speech_chunks(text: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut part = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    for (index, &ch) in chars.iter().enumerate() {
+        part.push(ch);
+        let word_boundary = !ch.is_ascii_alphanumeric()
+            || chars
+                .get(index + 1)
+                .is_none_or(|c| !c.is_ascii_alphanumeric());
+        if pieces.len() < 7
+            && part.chars().count() >= 8
+            && ("，。！？；：,!?;:".contains(ch) || (part.chars().count() >= 48 && word_boundary))
+        {
+            pieces.push(std::mem::take(&mut part));
+        }
+    }
+    if !part.trim().is_empty() {
+        pieces.push(part);
+    }
+    pieces
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repair_uses_available_silence_without_moving_neighbors() {
+        let blocks = blocks(
+            &serde_json::json!({"transcripts":[{"sentences":[
+                {"begin_time":0,"end_time":1000,"text":"First."},
+                {"begin_time":5000,"end_time":6000,"text":"Next."}
+            ]}]}),
+            8000,
+        )
+        .unwrap();
+        assert_eq!(window(&blocks, 0, 8000).unwrap(), 2000);
+        assert_eq!(repair_window(&blocks, 0, 8000).unwrap(), 4000);
+        assert_eq!(blocks[1].start_ms, 5000);
+        assert!(repair_window(&blocks, 1, 8000).unwrap() <= 8000 - blocks[1].start_ms);
+        assert!(fit_speed(
+            6500,
+            repair_window(&blocks, 0, 8000).unwrap(),
+            REPAIR_MAX_SPEED
+        )
+        .is_some());
+        assert!(fit_speed(6500, 2000, 1.15).is_none());
+    }
+    #[test]
+    fn semantic_resynthesis_preserves_text_words_and_bounds_requests() {
+        let text = "这是第一个较长的中文分句，需要保持所有知识点。这是第二个较长的中文分句，也需要完整朗读。";
+        let chunks = speech_chunks(text);
+        assert!(chunks.len() > 1 && chunks.len() <= 8);
+        assert_eq!(chunks.concat(), text);
+        let english = "Supercalifragilisticexpialidocious".repeat(5);
+        assert_eq!(speech_chunks(&english), vec![english]);
+        assert_eq!(speech_chunks(&text.repeat(100)).len(), 8);
+    }
     #[test]
     fn keeps_absolute_anchors_and_borrows_only_silence() {
         let b = blocks(

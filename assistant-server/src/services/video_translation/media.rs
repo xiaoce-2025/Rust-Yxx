@@ -162,6 +162,107 @@ pub async fn align(source: &Path, destination: &Path, speed: f64) -> Result<(), 
         .map_err(|e| e.to_string())
 }
 
+pub async fn align_fitting(
+    source: &Path,
+    destination: &Path,
+    window_ms: u64,
+    maximum: f64,
+) -> Result<Option<(f64, u64)>, String> {
+    let audio_ms = wav_info(source).await?.duration_ms();
+    let Some(mut speed) = super::timeline::fit_speed(audio_ms, window_ms, maximum) else {
+        return Ok(None);
+    };
+    for attempt in 0..3 {
+        if speed > maximum {
+            return Ok(None);
+        }
+        align(source, destination, speed).await?;
+        let measured = wav_info(destination).await?.duration_ms();
+        if measured <= window_ms {
+            return Ok(Some((speed, measured)));
+        }
+        tracing::info!(target: "video_translation", attempt=attempt+1, measured_ms=measured, window_ms,
+            "FFmpeg变速仍有时长偏差，自动校正倍率后重测");
+        speed *= measured as f64 / window_ms.saturating_sub(30).max(1) as f64;
+    }
+    Ok(None)
+}
+
+pub async fn trim_edges(source: &Path, destination: &Path) -> Result<(), String> {
+    if wav_info(destination).await.is_ok() {
+        return Ok(());
+    }
+    let tmp = destination.with_extension("tmp.wav");
+    // Reverse only to treat the trailing edge identically. Internal pauses stay intact;
+    // a conservative threshold and 50ms guard retain quiet speech on either edge.
+    let trim = "silenceremove=start_periods=1:start_duration=0.05:start_threshold=-60dB:start_silence=0.05";
+    checked(
+        command(vec![
+            "-y".into(),
+            "-v".into(),
+            "error".into(),
+            "-i".into(),
+            path(source),
+            "-af".into(),
+            format!("{trim},areverse,{trim},areverse"),
+            "-ac".into(),
+            "1".into(),
+            "-ar".into(),
+            RATE.to_string(),
+            "-c:a".into(),
+            "pcm_s16le".into(),
+            path(&tmp),
+        ])
+        .await?,
+    )?;
+    wav_info(&tmp).await?;
+    fs::rename(tmp, destination)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn concat(inputs: &[PathBuf], output: &Path) -> Result<(), String> {
+    if inputs.is_empty() {
+        return Err("语义配音分段为空".into());
+    }
+    let gap = RATE * 2 * 40 / 1000;
+    let mut files = Vec::new();
+    let mut total = gap * (inputs.len() - 1) as u64;
+    for path in inputs {
+        let info = wav_info(path).await?;
+        total = total.checked_add(info.bytes).ok_or("配音分段总长度溢出")?;
+        files.push(info);
+    }
+    if total > u32::MAX as u64 - 36 {
+        return Err("配音分段总长度超过WAV上限".into());
+    }
+    let temp = output.with_extension("tmp.wav");
+    let mut out = fs::File::create(&temp).await.map_err(|e| e.to_string())?;
+    out.write_all(&wav_header(total as u32))
+        .await
+        .map_err(|e| e.to_string())?;
+    for (index, (path, info)) in inputs.iter().zip(files).enumerate() {
+        if index > 0 {
+            silence(&mut out, gap).await?;
+        }
+        let mut input = fs::File::open(path).await.map_err(|e| e.to_string())?;
+        input
+            .seek(SeekFrom::Start(info.offset))
+            .await
+            .map_err(|e| e.to_string())?;
+        if tokio::io::copy(&mut input.take(info.bytes), &mut out)
+            .await
+            .map_err(|e| e.to_string())?
+            != info.bytes
+        {
+            return Err("语义配音分段读取不完整".into());
+        }
+    }
+    out.flush().await.map_err(|e| e.to_string())?;
+    drop(out);
+    fs::rename(temp, output).await.map_err(|e| e.to_string())
+}
+
 #[derive(Debug)]
 pub struct WavInfo {
     pub offset: u64,
@@ -369,6 +470,33 @@ pub async fn mux(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn automatic_resynthesis_concatenation_keeps_all_samples() {
+        let temp = tempdir::TempDir::new_in("target", "repair-concat").unwrap();
+        let mut inputs = Vec::new();
+        for index in 0..2 {
+            let path = temp.path().join(format!("part-{index}.wav"));
+            let mut data = wav_header(4800).to_vec();
+            data.extend(vec![(index + 1) as u8; 4800]);
+            fs::write(&path, data).await.unwrap();
+            inputs.push(path);
+        }
+        let output = temp.path().join("joined.wav");
+        concat(&inputs, &output).await.unwrap();
+        let info = wav_info(&output).await.unwrap();
+        assert_eq!(info.duration_ms(), 240);
+        let data = fs::read(&output).await.unwrap();
+        assert!(data[44..4844].iter().all(|v| *v == 1));
+        assert!(data[4844..6764].iter().all(|v| *v == 0));
+        assert!(data[6764..].iter().all(|v| *v == 2));
+        // Rejecting an impossible rate never executes FFmpeg, including in this test.
+        assert!(
+            align_fitting(&output, &temp.path().join("aligned.wav"), 20, 1.15)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
     #[test]
     fn parses_ffmpeg_duration_without_external_programs() {
         assert_eq!(

@@ -549,7 +549,7 @@
       const label = document.getElementById('translationStatus');
       if (!button || !label) return;
       const busy = job && ['queued', 'running', 'deleting'].includes(job.status);
-      const failed = job && ['failed', 'needs_review'].includes(job.status);
+      const failed = job && job.status === 'failed';
       const ready = job && job.status === 'succeeded';
       button.disabled = !enabled || busy || ready;
       button.textContent = !enabled ? '视频翻译未开启' : busy ? (job.status === 'deleting' ? '正在清理' : '正在翻译…') : ready ? '翻译完成' : failed ? '重试翻译' : '视频翻译';

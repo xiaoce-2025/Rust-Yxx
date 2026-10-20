@@ -483,12 +483,18 @@ impl Client {
         &self,
         block: &Block,
         window: u64,
+        actual_audio_ms: u64,
         glossary: &Value,
         model: &str,
     ) -> Result<String, String> {
+        let target_chars = ((block.spoken.chars().count() as f64 * window as f64
+            / actual_audio_ms.max(1) as f64
+            * 0.9)
+            .floor() as usize)
+            .max(1);
         let result = self.llm(model, include_str!("../../../prompts/video_translation_compress.md"), json!({
             "source":block.source,"translation":block.translation,"current_spoken":block.spoken,
-            "available_ms":window,"glossary":glossary
+            "available_ms":window,"actual_audio_ms":actual_audio_ms,"target_chars":target_chars,"glossary":glossary
         })).await?;
         let text = result["text"]
             .as_str()
@@ -496,7 +502,7 @@ impl Client {
             .ok_or("压缩译文为空")?
             .trim();
         if text.chars().count() >= block.spoken.chars().count() {
-            return Err("压缩译文未缩短，保留已有结果后重试".into());
+            return Err("当前压缩候选未缩短，将继续其他自动对轴策略".into());
         }
         Ok(text.into())
     }
