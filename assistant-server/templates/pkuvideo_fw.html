@@ -554,7 +554,7 @@
       button.disabled = !enabled || busy || ready;
       button.textContent = !enabled ? '视频翻译未开启' : busy ? (job.status === 'deleting' ? '正在清理' : '正在翻译…') : ready ? '翻译完成' : failed ? '重试翻译' : '视频翻译';
       button.onclick = () => startTranslation(!!failed);
-      label.textContent = job ? (job.error ? `${job.stage}：${job.error}` : job.stage + (job.total_blocks ? `（${job.completed_blocks}/${job.total_blocks} 块）` : '')) : '';
+      label.textContent = job ? (job.error ? `${job.stage}：${job.error}` : job.stage + (job.total_blocks && !String(job.stage).includes('已完成') ? `（${job.completed_blocks}/${job.total_blocks} 块）` : '')) : '';
       document.getElementById('downloadTranslatedBtn').disabled = !ready;
       document.getElementById('downloadTranslatedBtn').hidden = !ready;
       document.getElementById('translationControls').hidden = !ready;

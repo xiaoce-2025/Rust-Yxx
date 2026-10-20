@@ -91,6 +91,44 @@ pub struct Client {
     task_url: String,
     llm_url: String,
     asr_timeout: u64,
+    llm_slots: tokio::sync::Semaphore,
+    tts_slots: tokio::sync::Semaphore,
+    tts_pacer: RequestPacer,
+}
+
+struct RequestPacer {
+    next: tokio::sync::Mutex<tokio::time::Instant>,
+    gap: Duration,
+}
+
+fn reserve_request(
+    next: &mut tokio::time::Instant,
+    now: tokio::time::Instant,
+    gap: Duration,
+) -> tokio::time::Instant {
+    let scheduled = (*next).max(now);
+    *next = scheduled + gap;
+    scheduled
+}
+
+impl RequestPacer {
+    fn new(rpm: usize) -> Self {
+        Self {
+            next: tokio::sync::Mutex::new(tokio::time::Instant::now()),
+            gap: Duration::from_millis(60000u64.div_ceil(rpm.clamp(1, 60000) as u64)),
+        }
+    }
+    async fn wait(&self) {
+        let scheduled = {
+            let mut next = self.next.lock().await;
+            reserve_request(&mut next, tokio::time::Instant::now(), self.gap)
+        };
+        let delay = scheduled.saturating_duration_since(tokio::time::Instant::now());
+        if !delay.is_zero() {
+            tracing::info!(target:"video_translation",wait_ms=delay.as_millis() as u64,"等待MiMo请求速率槽位（已与并发数分开控制）");
+            tokio::time::sleep_until(scheduled).await;
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -162,6 +200,21 @@ impl Client {
                     .trim_end_matches('/')
             ),
             asr_timeout: state.settings.video_translation.asr_timeout_seconds.max(60),
+            tts_pacer: RequestPacer::new(state.settings.video_translation.tts_requests_per_minute),
+            llm_slots: tokio::sync::Semaphore::new(
+                state
+                    .settings
+                    .video_translation
+                    .translation_concurrency
+                    .clamp(1, 64),
+            ),
+            tts_slots: tokio::sync::Semaphore::new(
+                state
+                    .settings
+                    .video_translation
+                    .tts_concurrency
+                    .clamp(1, 64),
+            ),
         })
     }
 
@@ -185,7 +238,30 @@ impl Client {
         } else {
             "Paraformer状态查询"
         };
+        // Share the DeepSeek budget with repair/compression requests from parallel TTS
+        // blocks. Acquire here, so every actual provider request obeys the same limits.
+        let slots = if url == self.llm_url {
+            Some(&self.llm_slots)
+        } else if !asr && body.is_some() {
+            Some(&self.tts_slots)
+        } else {
+            None
+        };
+        let _permit = if let Some(slots) = slots {
+            tracing::info!(target:"video_translation",operation,available_slots=slots.available_permits(),"等待云端请求并发槽位");
+            Some(
+                slots
+                    .acquire()
+                    .await
+                    .map_err(|_| "云端请求并发队列已关闭")?,
+            )
+        } else {
+            None
+        };
         for attempt in 0..3 {
+            if !asr && body.is_some() && url != self.llm_url {
+                self.tts_pacer.wait().await;
+            }
             tracing::info!(target: "video_translation", operation, attempt=attempt+1, max_attempts=3, "开始云端请求尝试");
             let mut request = self.http.request(method.clone(), url);
             if let Some(key) = key {
@@ -578,6 +654,23 @@ fn validate_translations(
 mod tests {
     use super::*;
     #[test]
+    fn request_rate_is_per_minute_and_independent_of_concurrency() {
+        let pacer = RequestPacer::new(100);
+        assert_eq!(pacer.gap, Duration::from_millis(600));
+        let now = tokio::time::Instant::now();
+        let mut next = now;
+        for index in 0..=100 {
+            assert_eq!(
+                reserve_request(&mut next, now, pacer.gap),
+                now + Duration::from_millis(index * 600)
+            );
+        }
+        assert_eq!(
+            reserve_request(&mut next, now + Duration::from_secs(120), pacer.gap),
+            now + Duration::from_secs(120)
+        );
+    }
+    #[test]
     fn mimo_user_settings_override_server_and_empty_values_fall_back() {
         assert_eq!(
             mimo_override(
@@ -655,6 +748,9 @@ mod tests {
             task_url: "invalid://no-network".into(),
             llm_url: "invalid://no-network".into(),
             asr_timeout: 60,
+            tts_pacer: RequestPacer::new(100),
+            llm_slots: tokio::sync::Semaphore::new(3),
+            tts_slots: tokio::sync::Semaphore::new(4),
         };
         // The input file intentionally doesn't exist: a recovered successful task must use
         // the full cached result, not reupload the original audio or submit another job.

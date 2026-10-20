@@ -61,6 +61,9 @@ class Element {
   assert.equal(element('translateBtn').disabled, true);
   assert.equal(element('downloadTranslatedBtn').disabled, true);
   assert.match(element('translationStatus').textContent, /2\/4/);
+  vm.runInContext('renderTranslation({status:"running",stage:"翻译与术语处理 已完成 8/16块",completed_blocks:0,total_blocks:16});',context);
+  assert.match(element('translationStatus').textContent,/8\/16/);
+  assert.doesNotMatch(element('translationStatus').textContent,/0\/16/,'Translation progress must not be confused with unfinished dubbing blocks');
 
   const ready = 'renderTranslation({status:"succeeded",stage:"翻译完成",subtitle_precision:"asr"});';
   vm.runInContext(ready, context);

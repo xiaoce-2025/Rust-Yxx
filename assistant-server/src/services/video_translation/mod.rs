@@ -6,6 +6,7 @@ mod timeline;
 
 use crate::app_state::AppState;
 use chrono::{DateTime, Utc};
+use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -124,6 +125,42 @@ async fn stage(entry: &Entry, name: &str) -> Result<(), String> {
         job.stage = name.into();
         tracing::info!(target: "video_translation", job_id=%job.id, stage=name,
             completed_blocks=job.blocks.iter().filter(|b| b.done).count(), total_blocks=job.blocks.len(), "翻译任务阶段更新");
+    }
+    save(entry).await
+}
+
+// Futures are owned by the parent job, rather than spawned as detached tasks. Dropping
+// this stream on error/deletion drops every in-flight HTTP/FFmpeg operation as well.
+async fn parallel<T, F, Fut>(items: Vec<T>, limit: usize, operation: F) -> Result<(), String>
+where
+    F: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let mut pending = stream::iter(items)
+        .map(operation)
+        .buffer_unordered(limit.clamp(1, 64));
+    while let Some(result) = pending.next().await {
+        result?;
+    }
+    Ok(())
+}
+
+async fn block_progress(entry: &Entry, phase: &str, detail: &str) -> Result<(), String> {
+    {
+        let mut job = entry.job.lock().await;
+        let completed = if phase == "翻译与术语处理" {
+            job.blocks
+                .iter()
+                .filter(|b| !b.translation.is_empty())
+                .count()
+        } else {
+            job.blocks.iter().filter(|b| b.done).count()
+        };
+        job.stage = format!(
+            "{phase} 已完成 {completed}/{}块；{detail}",
+            job.blocks.len()
+        );
+        tracing::info!(target:"video_translation",phase,completed_blocks=completed,total_blocks=job.blocks.len(),detail,"并行任务进度更新");
     }
     save(entry).await
 }
@@ -401,168 +438,59 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
         tracing::info!(target: "video_translation", cache_hit=true, "复用课程主题与术语表");
     }
     let count = entry.job.lock().await.blocks.len();
-    for start in (0..count).step_by(8) {
-        let job = entry.job.lock().await.clone();
-        let end = (start + 8).min(count);
-        if job.blocks[start..end]
-            .iter()
-            .all(|b| !b.translation.is_empty())
-        {
+    let translation_job = entry.job.lock().await.clone();
+    let concurrency = state
+        .settings
+        .video_translation
+        .translation_concurrency
+        .clamp(1, 64);
+    tracing::info!(target:"video_translation",concurrency,total_blocks=count,"开始并行翻译批次");
+    let batches = (0..count)
+        .step_by(8)
+        .map(|start| (start, (start + 8).min(count)))
+        .collect();
+    parallel(batches,concurrency,|(start,end)| {
+        let job=&translation_job;
+        let client=&client;
+        async move {
+            if job.blocks[start..end].iter().all(|b| !b.translation.is_empty()) {
+                for index in start..end {
+                    tracing::info!(target:"video_translation",block=index+1,total_blocks=count,cache_hit=true,"翻译块完成：复用译文缓存");
+                }
+                return Ok(());
+            }
+            block_progress(entry,"翻译与术语处理",&format!("正在处理第{}–{end}块",start+1)).await?;
             for index in start..end {
-                tracing::info!(target: "video_translation", block=index+1, total_blocks=count, cache_hit=true, "翻译块完成：复用译文缓存");
+                tracing::info!(target:"video_translation",block=index+1,total_blocks=count,batch_start=start+1,batch_end=end,"翻译块开始：并发批次请求DeepSeek");
             }
-            continue;
-        }
-        stage(
-            entry,
-            &format!("翻译与术语处理 第{}–{end}/{count}块", start + 1),
-        )
-        .await?;
-        for index in start..end {
-            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, batch_start=start+1, batch_end=end,
-                "翻译块开始：与当前批次一起请求 DeepSeek");
-        }
-        let translated = client
-            .translate(&job.blocks, start, end, &job.glossary, &job.deepseek_model)
-            .await?;
-        {
-            let mut current = entry.job.lock().await;
-            for (index, text) in translated {
-                current.blocks[index].translation = text.clone();
-                current.blocks[index].spoken = text;
-                tracing::info!(target: "video_translation", block=index+1, total_blocks=count,
-                    translated_chars=current.blocks[index].translation.chars().count(), "翻译块处理完成");
-            }
-        }
-        save(entry).await?;
-    }
-    for index in 0..count {
-        stage(entry, &format!("中文配音与对轴 {}/{count}", index + 1)).await?;
-        let job = entry.job.lock().await.clone();
-        let mut block = job.blocks[index].clone();
-        let aligned = root.join(format!("aligned-{index}.wav"));
-        if block.done && media::wav_info(&aligned).await.is_ok() {
-            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, cache_hit=true, audio_ms=block.audio_ms, "配音块完成：复用已对轴音频");
-            continue;
-        }
-        block.done = false;
-        let normal_window = timeline::window(&job.blocks, index, duration)?;
-        tracing::info!(target: "video_translation", block=index+1, total_blocks=count, start_ms=block.start_ms,
-            window_ms=normal_window, revision=block.revision, "开始处理配音块");
-        loop {
-            let window = if block.revision >= 2 {
-                timeline::repair_window(&job.blocks, index, duration)?
-            } else {
-                normal_window
-            };
-            let maximum = if block.revision >= 4 {
-                timeline::REPAIR_MAX_SPEED.max(job.max_speed)
-            } else {
-                job.max_speed
-            };
-            if block.revision >= 2 {
-                stage(
-                    entry,
-                    &format!(
-                        "自动修复对轴 {}/{}（第{}轮）",
-                        index + 1,
-                        count,
-                        block.revision
-                    ),
-                )
-                .await?;
-            }
-            let tts = root.join(format!("tts-{index}-{}.wav", block.revision));
-            if media::wav_info(&tts).await.is_err() {
-                tracing::info!(target: "video_translation", block=index+1, total_blocks=count, revision=block.revision, "开始请求 MiMo 合成配音块");
-                client.tts(&block.spoken, &tts, &job).await?;
-            } else {
-                tracing::info!(target: "video_translation", block=index+1, total_blocks=count, revision=block.revision, cache_hit=true, "复用 MiMo 配音缓存");
-            }
-            let mut candidate = tts.clone();
-            if block.revision >= 2 {
-                let trimmed = root.join(format!("trimmed-{index}-{}.wav", block.revision));
-                if media::trim_edges(&candidate, &trimmed).await.is_ok() {
-                    candidate = trimmed;
-                    tracing::info!(target: "video_translation", block=index+1, "首尾静音自动清理完成，保留完整有声内容");
-                }
-                let chunks = timeline::speech_chunks(&block.spoken);
-                if chunks.len() > 1 {
-                    let mut parts = Vec::new();
-                    for (part, text) in chunks.iter().enumerate() {
-                        tracing::info!(target: "video_translation", block=index+1, part=part+1, total_parts=chunks.len(), "自动重新分段合成配音");
-                        let path =
-                            root.join(format!("repair-{index}-{}-{part}.wav", block.revision));
-                        if media::wav_info(&path).await.is_err() {
-                            client.tts(text, &path, &job).await?;
-                        }
-                        let trimmed = root.join(format!(
-                            "repair-trimmed-{index}-{}-{part}.wav",
-                            block.revision
-                        ));
-                        parts.push(if media::trim_edges(&path, &trimmed).await.is_ok() {
-                            trimmed
-                        } else {
-                            path
-                        });
-                    }
-                    let joined = root.join(format!("repair-joined-{index}-{}.wav", block.revision));
-                    media::concat(&parts, &joined).await?;
-                    if media::wav_info(&joined).await?.bytes
-                        < media::wav_info(&candidate).await?.bytes
-                    {
-                        candidate = joined;
-                    }
-                }
-                tracing::info!(target: "video_translation", block=index+1, window_ms=window, max_speed=maximum, "自动对轴已应用静音处理、语义分段与空白利用");
-            }
-            let info = media::wav_info(&candidate).await?;
-            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, audio_ms=info.duration_ms(), window_ms=window, "配音块测长完成");
-            if let Some((speed, measured)) =
-                media::align_fitting(&candidate, &aligned, window, maximum).await?
+            let translated=client.translate(&job.blocks,start,end,&job.glossary,&job.deepseek_model).await?;
             {
-                tracing::info!(target: "video_translation", block=index+1, total_blocks=count, speed,
-                    audio_ms=measured, window_ms=window, fits=measured<=window, "配音块变速与对轴测量完成");
-                if measured <= window {
-                    block.audio_ms = measured;
-                    block.done = true;
-                    tracing::info!(target: "video_translation", block=index+1, total_blocks=count, audio_ms=measured, revision=block.revision, "配音块处理完成");
-                    break;
+                let mut current=entry.job.lock().await;
+                for (index,text) in translated {
+                    current.blocks[index].translation=text.clone();
+                    current.blocks[index].spoken=text;
+                    tracing::info!(target:"video_translation",block=index+1,total_blocks=count,"翻译块处理完成");
                 }
             }
-            if block.revision >= timeline::MAX_REPAIRS {
-                return Err(format!(
-                    "第 {} 块自动对轴未通过：已完成 {} 轮自动修复，原视频及断点已保留",
-                    index + 1,
-                    timeline::MAX_REPAIRS
-                ));
-            }
-            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, attempt=block.revision+1,
-                max_attempts=timeline::MAX_REPAIRS, window_ms=window, "配音块超长，开始自动压缩及重新合成");
-            match client
-                .compress(
-                    &block,
-                    window,
-                    info.duration_ms(),
-                    &job.glossary,
-                    &job.deepseek_model,
-                )
-                .await
-            {
-                Ok(text) => block.spoken = text,
-                Err(error) => {
-                    tracing::info!(target: "video_translation", block=index+1, %error, "压缩候选不可用，保留完整译文继续自动修复")
-                }
-            }
-            block.revision += 1;
-            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, revision=block.revision,
-                spoken_chars=block.spoken.chars().count(), "配音块自动修复版本已更新，继续合成与测量");
-            entry.job.lock().await.blocks[index] = block.clone();
-            save(entry).await?;
-        }
-        entry.job.lock().await.blocks[index] = block;
-        save(entry).await?;
-    }
+            block_progress(entry,"翻译与术语处理",&format!("第{}–{end}块已完成",start+1)).await
+        }.instrument(tracing::info_span!(target:"video_translation","translation_batch",first_block=start+1,last_block=end))
+    }).await?;
+    let job = entry.job.lock().await.clone();
+    let concurrency = state
+        .settings
+        .video_translation
+        .tts_concurrency
+        .clamp(1, 64);
+    tracing::info!(target:"video_translation",concurrency,total_blocks=count,"开始并行配音与自动对轴");
+    parallel((0..count).collect(),concurrency,|index| {
+        let job=&job;
+        let client=&client;
+        let root=&root;
+        async move {
+            dub_block(entry,client,root,job,index,duration).await
+                .map_err(|error|format!("第{}块配音处理失败：{error}",index+1))
+        }.instrument(tracing::info_span!(target:"video_translation","dubbing_block",block=index+1,total_blocks=count))
+    }).await?;
     stage(entry, "生成字幕与配音音轨").await?;
     let job = entry.job.lock().await.clone();
     let dub = root.join("dub.wav");
@@ -593,6 +521,148 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
     stage(entry, "封装译制视频").await?;
     let output = root.join("translated.mp4");
     media::mux(&source, &dub, &root, &output, duration).await?;
+    Ok(())
+}
+
+async fn dub_block(
+    entry: &Entry,
+    client: &providers::Client,
+    root: &Path,
+    job: &TranslationJob,
+    index: usize,
+    duration: u64,
+) -> Result<(), String> {
+    let count = job.blocks.len();
+    block_progress(
+        entry,
+        "中文配音与对轴",
+        &format!("正在处理第{}块", index + 1),
+    )
+    .await?;
+
+    let mut block = job.blocks[index].clone();
+    let aligned = root.join(format!("aligned-{index}.wav"));
+    if block.done && media::wav_info(&aligned).await.is_ok() {
+        tracing::info!(target: "video_translation", block=index+1, total_blocks=count, cache_hit=true, audio_ms=block.audio_ms, "配音块完成：复用已对轴音频");
+        return Ok(());
+    }
+    block.done = false;
+    let normal_window = timeline::window(&job.blocks, index, duration)?;
+    tracing::info!(target: "video_translation", block=index+1, total_blocks=count, start_ms=block.start_ms,
+            window_ms=normal_window, revision=block.revision, "开始处理配音块");
+    loop {
+        let window = if block.revision >= 2 {
+            timeline::repair_window(&job.blocks, index, duration)?
+        } else {
+            normal_window
+        };
+        let maximum = if block.revision >= 4 {
+            timeline::REPAIR_MAX_SPEED.max(job.max_speed)
+        } else {
+            job.max_speed
+        };
+        if block.revision >= 2 {
+            block_progress(
+                entry,
+                "中文配音与对轴",
+                &format!(
+                    "自动修复对轴 {}/{}（第{}轮）",
+                    index + 1,
+                    count,
+                    block.revision
+                ),
+            )
+            .await?;
+        }
+        let tts = root.join(format!("tts-{index}-{}.wav", block.revision));
+        if media::wav_info(&tts).await.is_err() {
+            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, revision=block.revision, "开始请求 MiMo 合成配音块");
+            client.tts(&block.spoken, &tts, &job).await?;
+        } else {
+            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, revision=block.revision, cache_hit=true, "复用 MiMo 配音缓存");
+        }
+        let mut candidate = tts.clone();
+        if block.revision >= 2 {
+            let trimmed = root.join(format!("trimmed-{index}-{}.wav", block.revision));
+            if media::trim_edges(&candidate, &trimmed).await.is_ok() {
+                candidate = trimmed;
+                tracing::info!(target: "video_translation", block=index+1, "首尾静音自动清理完成，保留完整有声内容");
+            }
+            let chunks = timeline::speech_chunks(&block.spoken);
+            if chunks.len() > 1 {
+                let mut parts = Vec::new();
+                for (part, text) in chunks.iter().enumerate() {
+                    tracing::info!(target: "video_translation", block=index+1, part=part+1, total_parts=chunks.len(), "自动重新分段合成配音");
+                    let path = root.join(format!("repair-{index}-{}-{part}.wav", block.revision));
+                    if media::wav_info(&path).await.is_err() {
+                        client.tts(text, &path, &job).await?;
+                    }
+                    let trimmed = root.join(format!(
+                        "repair-trimmed-{index}-{}-{part}.wav",
+                        block.revision
+                    ));
+                    parts.push(if media::trim_edges(&path, &trimmed).await.is_ok() {
+                        trimmed
+                    } else {
+                        path
+                    });
+                }
+                let joined = root.join(format!("repair-joined-{index}-{}.wav", block.revision));
+                media::concat(&parts, &joined).await?;
+                if media::wav_info(&joined).await?.bytes < media::wav_info(&candidate).await?.bytes
+                {
+                    candidate = joined;
+                }
+            }
+            tracing::info!(target: "video_translation", block=index+1, window_ms=window, max_speed=maximum, "自动对轴已应用静音处理、语义分段与空白利用");
+        }
+        let info = media::wav_info(&candidate).await?;
+        tracing::info!(target: "video_translation", block=index+1, total_blocks=count, audio_ms=info.duration_ms(), window_ms=window, "配音块测长完成");
+        if let Some((speed, measured)) =
+            media::align_fitting(&candidate, &aligned, window, maximum).await?
+        {
+            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, speed,
+                    audio_ms=measured, window_ms=window, fits=measured<=window, "配音块变速与对轴测量完成");
+            if measured <= window {
+                block.audio_ms = measured;
+                block.done = true;
+                tracing::info!(target: "video_translation", block=index+1, total_blocks=count, audio_ms=measured, revision=block.revision, "配音块处理完成");
+                break;
+            }
+        }
+        if block.revision >= timeline::MAX_REPAIRS {
+            return Err(format!(
+                "第 {} 块自动对轴未通过：已完成 {} 轮自动修复，原视频及断点已保留",
+                index + 1,
+                timeline::MAX_REPAIRS
+            ));
+        }
+        tracing::info!(target: "video_translation", block=index+1, total_blocks=count, attempt=block.revision+1,
+                max_attempts=timeline::MAX_REPAIRS, window_ms=window, "配音块超长，开始自动压缩及重新合成");
+        match client
+            .compress(
+                &block,
+                window,
+                info.duration_ms(),
+                &job.glossary,
+                &job.deepseek_model,
+            )
+            .await
+        {
+            Ok(text) => block.spoken = text,
+            Err(error) => {
+                tracing::info!(target: "video_translation", block=index+1, %error, "压缩候选不可用，保留完整译文继续自动修复")
+            }
+        }
+        block.revision += 1;
+        tracing::info!(target: "video_translation", block=index+1, total_blocks=count, revision=block.revision,
+                spoken_chars=block.spoken.chars().count(), "配音块自动修复版本已更新，继续合成与测量");
+        entry.job.lock().await.blocks[index] = block.clone();
+        save(entry).await?;
+    }
+    entry.job.lock().await.blocks[index] = block;
+    block_progress(entry, "中文配音与对轴", &format!("第{}块已完成", index + 1)).await?;
+
     Ok(())
 }
 
@@ -637,7 +707,78 @@ fn test_job(id: Uuid) -> TranslationJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Active<'a>(&'a AtomicUsize);
+    impl Drop for Active<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_batches_run_out_of_order_with_a_bounded_peak() {
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let completed = Mutex::new(Vec::new());
+        parallel((0..9).collect(), 3, |index| {
+            let active = &active;
+            let peak = &peak;
+            let completed = &completed;
+            async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                let _guard = Active(active);
+                tokio::time::sleep(std::time::Duration::from_millis((9 - index) as u64 * 2)).await;
+                completed.lock().await.push(index);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        let completed = completed.into_inner();
+        assert_ne!(completed[0], 0);
+        let mut sorted = completed;
+        sorted.sort();
+        assert_eq!(sorted, (0..9).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn parallel_error_cancels_inflight_work_and_keeps_completed_results() {
+        let active = AtomicUsize::new(0);
+        let checkpoint = AtomicBool::new(false);
+        let result = parallel((0..8).collect(), 3, |index| {
+            let active = &active;
+            let checkpoint = &checkpoint;
+            async move {
+                active.fetch_add(1, Ordering::SeqCst);
+                let _guard = Active(active);
+                match index {
+                    0 => {
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        checkpoint.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                    1 => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        Err("provider failed".to_owned())
+                    }
+                    _ => std::future::pending::<Result<(), String>>().await,
+                }
+            }
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(checkpoint.load(Ordering::SeqCst));
+        assert_eq!(
+            active.load(Ordering::SeqCst),
+            0,
+            "No detached block workers may survive an error"
+        );
+    }
 
     #[test]
     fn old_review_jobs_resume_automatically_without_losing_tts_versions() {

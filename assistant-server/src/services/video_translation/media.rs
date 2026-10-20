@@ -12,8 +12,13 @@ use tokio::{
 };
 
 const RATE: u64 = 24000;
+static FFMPEG_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 async fn command(args: Vec<String>) -> Result<Output, String> {
+    let _permit = FFMPEG_SLOTS
+        .acquire()
+        .await
+        .map_err(|_| "FFmpeg并发队列已关闭")?;
     let operation = if args.iter().any(|arg| arg == "-c:v") {
         "译制视频封装"
     } else if args.iter().any(|arg| arg.starts_with("atempo=")) {

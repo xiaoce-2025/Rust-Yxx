@@ -28,6 +28,9 @@ pub struct VideoTranslationConfig {
     pub max_speed: f64,
     pub asr_timeout_seconds: u64,
     pub refine_subtitles: bool,
+    pub translation_concurrency: usize,
+    pub tts_concurrency: usize,
+    pub tts_requests_per_minute: usize,
 }
 
 impl Default for VideoTranslationConfig {
@@ -41,6 +44,9 @@ impl Default for VideoTranslationConfig {
             max_speed: 1.15,
             asr_timeout_seconds: 21600,
             refine_subtitles: true,
+            translation_concurrency: 8,
+            tts_concurrency: 8,
+            tts_requests_per_minute: 100,
         }
     }
 }
