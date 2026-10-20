@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::JoinHandle};
+use tracing::Instrument;
 use uuid::Uuid;
 
 pub const ROOT: &str = "./data/pkuvideo_fw_translations";
@@ -108,7 +109,12 @@ async fn save(entry: &Entry) -> Result<(), String> {
 }
 
 async fn stage(entry: &Entry, name: &str) -> Result<(), String> {
-    entry.job.lock().await.stage = name.into();
+    {
+        let mut job = entry.job.lock().await;
+        job.stage = name.into();
+        tracing::info!(target: "video_translation", job_id=%job.id, stage=name,
+            completed_blocks=job.blocks.iter().filter(|b| b.done).count(), total_blocks=job.blocks.len(), "翻译任务阶段更新");
+    }
     save(entry).await
 }
 
@@ -188,6 +194,7 @@ pub async fn start(state: &AppState, id: Uuid, retry: bool) -> Result<Translatio
         }
     };
     save(&entry).await?;
+    tracing::info!(target: "video_translation", job_id=%id, retry, "翻译任务已入队");
     launch(state.clone(), entry.clone()).await;
     let job = entry.job.lock().await.clone();
     Ok(job)
@@ -199,8 +206,15 @@ async fn launch(state: AppState, entry: Arc<Entry>) {
         return;
     }
     let work = entry.clone();
+    let job = work.job.lock().await.clone();
+    let span = tracing::info_span!(target: "video_translation", "translation_job", job_id=%job.id, user_id=%job.user_id);
     *handle = Some(tokio::spawn(async move {
+        let queued = tokio::time::Instant::now();
+        tracing::info!(target: "video_translation", "等待翻译执行槽位");
         let _permit = state.video_translations.worker.lock().await;
+        let started = tokio::time::Instant::now();
+        tracing::info!(target: "video_translation", queue_wait_ms=queued.elapsed().as_millis() as u64,
+            tts_model=%job.tts_model, deepseek_model=%job.deepseek_model, voice=%job.voice, "开始执行翻译任务");
         work.job.lock().await.status = "running".into();
         let result = run(&state, &work).await;
         let mut job = work.job.lock().await;
@@ -209,6 +223,8 @@ async fn launch(state: AppState, entry: Arc<Entry>) {
                 job.status = "succeeded".into();
                 job.stage = "翻译完成".into();
                 job.error = None;
+                tracing::info!(target: "video_translation", total_blocks=job.blocks.len(),
+                    elapsed_ms=started.elapsed().as_millis() as u64, subtitle_precision=%job.subtitle_precision, "翻译任务完成，译制视频可播放与下载");
             }
             Err(error) => {
                 job.status = if error.starts_with("对轴待处理") {
@@ -217,6 +233,8 @@ async fn launch(state: AppState, entry: Arc<Entry>) {
                     "failed"
                 }
                 .into();
+                tracing::info!(target: "video_translation", status=%job.status, stage=%job.stage, %error,
+                    elapsed_ms=started.elapsed().as_millis() as u64, "翻译任务停止，已保留断点");
                 job.error = Some(error);
             }
         }
@@ -224,7 +242,7 @@ async fn launch(state: AppState, entry: Arc<Entry>) {
         if let Err(error) = save(&work).await {
             tracing::error!(%error, "保存视频翻译状态失败");
         }
-    }));
+    }.instrument(span)));
 }
 
 pub async fn restore(state: &AppState) -> Result<(), String> {
@@ -262,6 +280,8 @@ pub async fn restore(state: &AppState) -> Result<(), String> {
         }
         let deleting = job.status == "deleting" || source.is_none();
         let resume = matches!(job.status.as_str(), "running" | "queued");
+        tracing::info!(target: "video_translation", job_id=%id, status=%job.status, resume, deleting,
+            completed_blocks=job.blocks.iter().filter(|b| b.done).count(), total_blocks=job.blocks.len(), "已加载翻译任务断点");
         let entry = Arc::new(Entry {
             job: Mutex::new(job),
             task: Mutex::new(None),
@@ -286,6 +306,7 @@ pub async fn restore(state: &AppState) -> Result<(), String> {
 // Called under the original FW slot lock. Keep the tombstone until source cleanup succeeds.
 pub async fn remove(state: &AppState, id: Uuid) -> Result<(), String> {
     if let Some(entry) = state.video_translations.entry(id).await {
+        tracing::info!(target: "video_translation", job_id=%id, "正在取消翻译任务，准备清理文件");
         entry.job.lock().await.status = "deleting".into();
         // Stop the writer before saving a durable tombstone or touching its files.
         if let Some(task) = entry.task.lock().await.take() {
@@ -317,6 +338,7 @@ pub async fn finish_remove(state: &AppState, id: Uuid) -> Result<(), String> {
         }
     }
     state.video_translations.entries.lock().await.remove(&id);
+    tracing::info!(target: "video_translation", job_id=%id, "翻译任务文件与缓存清理完成");
     Ok(())
 }
 
@@ -334,16 +356,21 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
     let source = PathBuf::from(source.video_path.ok_or("原视频未下载完成")?);
     let client = providers::Client::new(state, id).await?;
     let duration = media::duration(&source).await?;
+    tracing::info!(target: "video_translation", duration_ms=duration, "原视频媒体时长已读取");
     entry.job.lock().await.duration_ms = duration;
     stage(entry, "提取音频").await?;
     let wav = root.join("source.wav");
     if media::wav_info(&wav).await.is_err() {
         media::extract(&source, &wav).await?;
+        tracing::info!(target: "video_translation", "原视频音频提取完成");
+    } else {
+        tracing::info!(target: "video_translation", cache_hit=true, "复用已提取的原视频音频");
     }
     stage(entry, "英文语音识别").await?;
     let raw = client.asr(&wav, &root.join("source-asr"), "en").await?;
     if entry.job.lock().await.blocks.is_empty() {
         let blocks = timeline::blocks(&raw, duration)?;
+        tracing::info!(target: "video_translation", total_blocks=blocks.len(), "英文识别结果已完成语义分块");
         entry.job.lock().await.blocks = blocks;
         save(entry).await?;
     }
@@ -357,9 +384,13 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
         .is_none_or(|g| g.is_empty())
     {
         let blocks = entry.job.lock().await.blocks.clone();
+        tracing::info!(target: "video_translation", total_blocks=blocks.len(), "开始提取课程主题与术语表");
         let glossary = client.glossary(&blocks, &snapshot.deepseek_model).await?;
+        tracing::info!(target: "video_translation", terms=glossary["terms"].as_array().map_or(0, |v| v.len()), "课程主题与术语表提取完成");
         entry.job.lock().await.glossary = glossary;
         save(entry).await?;
+    } else {
+        tracing::info!(target: "video_translation", cache_hit=true, "复用课程主题与术语表");
     }
     let count = entry.job.lock().await.blocks.len();
     for start in (0..count).step_by(8) {
@@ -369,7 +400,19 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
             .iter()
             .all(|b| !b.translation.is_empty())
         {
+            for index in start..end {
+                tracing::info!(target: "video_translation", block=index+1, total_blocks=count, cache_hit=true, "翻译块完成：复用译文缓存");
+            }
             continue;
+        }
+        stage(
+            entry,
+            &format!("翻译与术语处理 第{}–{end}/{count}块", start + 1),
+        )
+        .await?;
+        for index in start..end {
+            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, batch_start=start+1, batch_end=end,
+                "翻译块开始：与当前批次一起请求 DeepSeek");
         }
         let translated = client
             .translate(&job.blocks, start, end, &job.glossary, &job.deepseek_model)
@@ -379,6 +422,8 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
             for (index, text) in translated {
                 current.blocks[index].translation = text.clone();
                 current.blocks[index].spoken = text;
+                tracing::info!(target: "video_translation", block=index+1, total_blocks=count,
+                    translated_chars=current.blocks[index].translation.chars().count(), "翻译块处理完成");
             }
         }
         save(entry).await?;
@@ -389,22 +434,32 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
         let mut block = job.blocks[index].clone();
         let aligned = root.join(format!("aligned-{index}.wav"));
         if block.done && media::wav_info(&aligned).await.is_ok() {
+            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, cache_hit=true, audio_ms=block.audio_ms, "配音块完成：复用已对轴音频");
             continue;
         }
         block.done = false;
         let window = timeline::window(&job.blocks, index, duration)?;
+        tracing::info!(target: "video_translation", block=index+1, total_blocks=count, start_ms=block.start_ms,
+            window_ms=window, revision=block.revision, "开始处理配音块");
         loop {
             let tts = root.join(format!("tts-{index}-{}.wav", block.revision));
             if media::wav_info(&tts).await.is_err() {
+                tracing::info!(target: "video_translation", block=index+1, total_blocks=count, revision=block.revision, "开始请求 MiMo 合成配音块");
                 client.tts(&block.spoken, &tts, &job).await?;
+            } else {
+                tracing::info!(target: "video_translation", block=index+1, total_blocks=count, revision=block.revision, cache_hit=true, "复用 MiMo 配音缓存");
             }
             let info = media::wav_info(&tts).await?;
+            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, audio_ms=info.duration_ms(), window_ms=window, "配音块测长完成");
             if let Some(speed) = timeline::fit_speed(info.duration_ms(), window, job.max_speed) {
                 media::align(&tts, &aligned, speed).await?;
                 let measured = media::wav_info(&aligned).await?.duration_ms();
+                tracing::info!(target: "video_translation", block=index+1, total_blocks=count, speed,
+                    audio_ms=measured, window_ms=window, fits=measured<=window, "配音块变速与对轴测量完成");
                 if measured <= window {
                     block.audio_ms = measured;
                     block.done = true;
+                    tracing::info!(target: "video_translation", block=index+1, total_blocks=count, audio_ms=measured, revision=block.revision, "配音块处理完成");
                     break;
                 }
             }
@@ -414,10 +469,14 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
                     index + 1
                 ));
             }
+            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, attempt=block.revision+1,
+                max_attempts=2, window_ms=window, "配音块超长，开始压缩译文并重新合成");
             block.spoken = client
                 .compress(&block, window, &job.glossary, &job.deepseek_model)
                 .await?;
             block.revision += 1;
+            tracing::info!(target: "video_translation", block=index+1, total_blocks=count, revision=block.revision,
+                spoken_chars=block.spoken.chars().count(), "配音块译文压缩完成");
             entry.job.lock().await.blocks[index] = block.clone();
             save(entry).await?;
         }
@@ -434,6 +493,7 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
         match client.asr(&dub, &root.join("dub-asr"), "zh").await {
             Ok(raw) => Some(raw),
             Err(error) => {
+                tracing::info!(target: "video_translation", %error, "配音复识别未成功，字幕将使用配音块边界");
                 alignment_error = Some(error);
                 None
             }

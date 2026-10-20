@@ -51,6 +51,12 @@ class Element {
   element('subtitleVersion').value = 'zh';
   element('videoPreview').dataset.jobId = 'job-1';
 
+  assert.match(html, /id="downloadTranslatedBtn"[^>]* hidden disabled/);
+  for (const status of [null, 'queued', 'running', 'failed', 'needs_review', 'deleting']) {
+    context.testTranslation = status ? {status, stage:'test'} : null;
+    vm.runInContext('renderTranslation(testTranslation)', context);
+    assert.equal(element('downloadTranslatedBtn').hidden, true, `Hide translated download for ${status}`);
+  }
   vm.runInContext('renderTranslation({status:"running",stage:"中文配音",completed_blocks:2,total_blocks:4});', context);
   assert.equal(element('translateBtn').disabled, true);
   assert.equal(element('downloadTranslatedBtn').disabled, true);
@@ -68,6 +74,7 @@ class Element {
   assert.equal(player.paused, false);
   assert.equal(player.children[0].src, '/api/pkuvideo_fw/jobs/job-1/translation/subtitles/zh.dub.vtt');
   assert.equal(element('downloadTranslatedBtn').disabled, false);
+  assert.equal(element('downloadTranslatedBtn').hidden, false);
 
   const loads = player.loads;
   vm.runInContext(ready, context);

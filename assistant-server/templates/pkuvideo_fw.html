@@ -303,7 +303,7 @@
         resultActions.innerHTML = `
           <button id="translateBtn" class="action-btn" onclick="startTranslation(false)" style="background: var(--accent); color: #fff;">视频翻译</button>
           <button class="action-btn" onclick="downloadVideo('${job.id}')">下载原视频</button>
-          <button id="downloadTranslatedBtn" class="action-btn" onclick="downloadTranslatedVideo()" disabled>下载翻译视频</button>
+          <button id="downloadTranslatedBtn" class="action-btn" onclick="downloadTranslatedVideo()" hidden disabled>下载翻译视频</button>
           <button class="action-btn delete" onclick="deleteJob('${job.id}')">删除任务</button>
         `;
           refreshTranslation();
@@ -556,6 +556,7 @@
       button.onclick = () => startTranslation(!!failed);
       label.textContent = job ? (job.error ? `${job.stage}：${job.error}` : job.stage + (job.total_blocks ? `（${job.completed_blocks}/${job.total_blocks} 块）` : '')) : '';
       document.getElementById('downloadTranslatedBtn').disabled = !ready;
+      document.getElementById('downloadTranslatedBtn').hidden = !ready;
       document.getElementById('translationControls').hidden = !ready;
       document.getElementById('subtitlePrecision').textContent = job && job.subtitle_precision === 'asr' ? '中文字幕已校准' : job && job.subtitle_precision === 'mixed' ? '中文字幕已校准，部分片段使用块级同步' : '字幕按实际配音块同步';
       if (ready && !translationReady) {

@@ -235,9 +235,11 @@ pub async fn write(
     let mut cues = Vec::new();
     for block in blocks {
         if let Some(refined) = raw.and_then(|raw| refine(block, raw)) {
+            tracing::info!(target: "video_translation", block=block.id+1, total_blocks=blocks.len(), cues=refined.len(), precision="asr", "字幕块时间轴校准完成");
             cues.extend(refined);
             refined_blocks += 1;
         } else {
+            tracing::info!(target: "video_translation", block=block.id+1, total_blocks=blocks.len(), precision="block", "字幕块使用实际配音边界");
             cues.push(Cue {
                 start: block.start_ms,
                 end: block.start_ms + block.audio_ms,
@@ -266,6 +268,7 @@ pub async fn write(
         "blocks": blocks.len(), "compressed_blocks": blocks.iter().filter(|b| b.revision > 0).count(),
         "maximum_duration_ms": blocks.iter().map(|b| b.audio_ms).max().unwrap_or(0)
     })).await?;
+    tracing::info!(target: "video_translation", total_blocks=blocks.len(), refined_blocks, precision, "字幕文件与质量报告生成完成");
     Ok(precision.into())
 }
 

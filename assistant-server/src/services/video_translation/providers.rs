@@ -100,6 +100,29 @@ struct RemoteTask {
 }
 
 impl Client {
+    async fn wait_response(
+        request: reqwest::RequestBuilder,
+        operation: &str,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let started = tokio::time::Instant::now();
+        tracing::info!(target: "video_translation", operation, "开始等待云端接口响应");
+        let pending = request.send();
+        tokio::pin!(pending);
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
+        heartbeat.tick().await;
+        loop {
+            tokio::select! {
+                result = &mut pending => {
+                    tracing::info!(target: "video_translation", operation, elapsed_ms=started.elapsed().as_millis() as u64,
+                        http_status=result.as_ref().ok().map(|response| response.status().as_u16()), success=result.is_ok(), "云端接口响应等待结束");
+                    return result;
+                }
+                _ = heartbeat.tick() => {
+                    tracing::info!(target: "video_translation", operation, elapsed_seconds=started.elapsed().as_secs(), "云端请求处理中，继续等待响应");
+                }
+            }
+        }
+    }
     pub async fn new(state: &AppState, id: Uuid) -> Result<Self, String> {
         Ok(Self {
             http: reqwest::Client::builder()
@@ -150,7 +173,20 @@ impl Client {
         body: Option<&Value>,
         asr: bool,
     ) -> Result<Value, String> {
+        // Never log URLs, authorization headers, request/response bodies or audio payloads.
+        let operation = if asr {
+            "Paraformer提交"
+        } else if url == self.llm_url {
+            "DeepSeek"
+        } else if body.is_some() {
+            "MiMo"
+        } else if key.is_none() {
+            "识别结果下载"
+        } else {
+            "Paraformer状态查询"
+        };
         for attempt in 0..3 {
+            tracing::info!(target: "video_translation", operation, attempt=attempt+1, max_attempts=3, "开始云端请求尝试");
             let mut request = self.http.request(method.clone(), url);
             if let Some(key) = key {
                 request = request.bearer_auth(key);
@@ -163,9 +199,10 @@ impl Client {
                     .header("X-DashScope-Async", "enable")
                     .header("X-DashScope-OssResourceResolve", "enable");
             }
-            let response = match request.send().await {
+            let response = match Self::wait_response(request, operation).await {
                 Ok(v) => v,
                 Err(_) if attempt < 2 => {
+                    tracing::info!(target: "video_translation", operation, attempt=attempt+1, retry_in_seconds=2u64.pow(attempt+1), "云端连接失败或超时，将退避重试");
                     sleep(Duration::from_secs(2u64.pow(attempt + 1))).await;
                     continue;
                 }
@@ -182,13 +219,28 @@ impl Client {
                 let mut stream = response.bytes_stream();
                 use futures_util::StreamExt;
                 let mut bytes = Vec::new();
-                while let Some(chunk) = stream.next().await {
+                let receiving = tokio::time::Instant::now();
+                let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
+                heartbeat.tick().await;
+                loop {
+                    let chunk = tokio::select! {
+                        chunk = stream.next() => chunk,
+                        _ = heartbeat.tick() => {
+                            tracing::info!(target: "video_translation", operation, received_bytes=bytes.len(),
+                                elapsed_seconds=receiving.elapsed().as_secs(), "正在接收云端响应内容");
+                            continue;
+                        }
+                    };
+                    let Some(chunk) = chunk else {
+                        break;
+                    };
                     let chunk = chunk.map_err(|_| "读取云端响应失败")?;
                     if bytes.len() + chunk.len() > 32 * 1024 * 1024 {
                         return Err("云端响应超过32MB上限".into());
                     }
                     bytes.extend_from_slice(&chunk);
                 }
+                tracing::info!(target: "video_translation", operation, response_bytes=bytes.len(), "云端响应内容接收完成");
                 return serde_json::from_slice(&bytes).map_err(|_| "云端没有返回有效 JSON".into());
             }
             if attempt < 2 && (status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error())
@@ -200,6 +252,7 @@ impl Client {
                     .and_then(|v| v.parse::<u64>().ok())
                     .unwrap_or(2u64.pow(attempt + 1))
                     .clamp(1, 60);
+                tracing::info!(target: "video_translation", operation, http_status=status.as_u16(), attempt=attempt+1, retry_in_seconds=delay, "云端限流或服务错误，将退避重试");
                 sleep(Duration::from_secs(delay)).await;
                 continue;
             }
@@ -212,12 +265,12 @@ impl Client {
     }
 
     async fn upload(&self, audio: &Path) -> Result<String, String> {
-        let response = self
+        let request = self
             .http
             .get(&self.upload_url)
             .bearer_auth(&self.keys.asr_key)
-            .query(&[("action", "getPolicy"), ("model", "paraformer-v2")])
-            .send()
+            .query(&[("action", "getPolicy"), ("model", "paraformer-v2")]);
+        let response = Self::wait_response(request, "获取ASR上传凭证")
             .await
             .map_err(|_| "获取ASR上传凭证失败")?;
         if !response.status().is_success() {
@@ -237,6 +290,7 @@ impl Client {
         let object = format!("{}/{}.wav", field("upload_dir")?, Uuid::new_v4());
         let file = fs::File::open(audio).await.map_err(|e| e.to_string())?;
         let length = file.metadata().await.map_err(|e| e.to_string())?.len();
+        tracing::info!(target: "video_translation", audio_bytes=length, "开始上传识别音频");
         let part = reqwest::multipart::Part::stream_with_length(
             reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file)),
             length,
@@ -253,12 +307,12 @@ impl Client {
             .text("key", object.clone())
             .text("success_action_status", "200")
             .part("file", part);
-        let response = self
+        let request = self
             .http
             .post(field("upload_host")?)
             .multipart(form)
-            .timeout(Duration::from_secs(1800))
-            .send()
+            .timeout(Duration::from_secs(1800));
+        let response = Self::wait_response(request, "ASR音频上传")
             .await
             .map_err(|_| "ASR音频上传失败或超时")?;
         if !response.status().is_success() {
@@ -267,6 +321,7 @@ impl Client {
                 response.status().as_u16()
             ));
         }
+        tracing::info!(target: "video_translation", audio_bytes=length, "识别音频上传完成");
         Ok(format!("oss://{object}"))
     }
 
@@ -275,6 +330,7 @@ impl Client {
         if let Ok(bytes) = fs::read(&result_path).await {
             if let Ok(result) = serde_json::from_slice::<Value>(&bytes) {
                 if result["transcripts"].is_array() {
+                    tracing::info!(target: "video_translation", language, cache_hit=true, "语音识别完成：复用完整ASR结果缓存");
                     return Ok(result);
                 }
             }
@@ -286,6 +342,7 @@ impl Client {
             .and_then(|b| serde_json::from_slice::<RemoteTask>(&b).ok())
             .filter(|t| (Utc::now() - t.created_at).num_hours() < 23);
         let task = if let Some(task) = existing {
+            tracing::info!(target: "video_translation", language, external_task_id=%task.task_id, "恢复查询已有ASR任务");
             task
         } else {
             let url = self.upload(audio).await?;
@@ -301,6 +358,7 @@ impl Client {
                 created_at: Utc::now(),
             };
             atomic_json(&task_path, &task).await?;
+            tracing::info!(target: "video_translation", language, external_task_id=%task.task_id, "ASR任务提交成功并已保存断点");
             task
         };
         let started = tokio::time::Instant::now();
@@ -314,6 +372,8 @@ impl Client {
                     false,
                 )
                 .await?;
+            tracing::info!(target: "video_translation", language, external_task_id=%task.task_id,
+                status=result["output"]["task_status"].as_str().unwrap_or("UNKNOWN"), elapsed_seconds=started.elapsed().as_secs(), "ASR任务进度更新");
             match result["output"]["task_status"].as_str().unwrap_or("") {
                 "SUCCEEDED" => {
                     let item = &result["output"]["results"][0];
@@ -335,6 +395,8 @@ impl Client {
                         return Err("ASR缺少transcripts结果".into());
                     }
                     atomic_json(&result_path, &raw).await?;
+                    tracing::info!(target: "video_translation", language, external_task_id=%task.task_id,
+                        elapsed_seconds=started.elapsed().as_secs(), "语音识别结果已下载并保存");
                     return Ok(raw);
                 }
                 "FAILED" | "CANCELED" => {
@@ -397,7 +459,8 @@ impl Client {
             .collect();
         let data = json!({"glossary":glossary,"context_only":context,"translate":input});
         let mut last = "翻译输出缺少有效条目".to_string();
-        for _ in 0..3 {
+        for attempt in 0..3 {
+            tracing::info!(target: "video_translation", first_block=start+1, last_block=end, total_blocks=blocks.len(), attempt=attempt+1, max_attempts=3, "开始翻译批次及结构校验");
             let result = self
                 .llm(
                     model,
@@ -407,7 +470,10 @@ impl Client {
                 .await;
             match result.and_then(|v| validate_translations(&v, start, end)) {
                 Ok(result) => return Ok(result),
-                Err(error) => last = error,
+                Err(error) => {
+                    tracing::info!(target: "video_translation", first_block=start+1, last_block=end, attempt=attempt+1, %error, "翻译批次未通过，将在次数上限内重试");
+                    last = error;
+                }
             }
         }
         Err(last)
@@ -454,6 +520,7 @@ impl Client {
         if bytes.len() < 44 {
             return Err("MiMo返回空音频".into());
         }
+        tracing::info!(target: "video_translation", audio_bytes=bytes.len(), "MiMo音频已接收并解码，开始规范化WAV格式");
         let raw = destination.with_extension("raw.wav");
         fs::write(&raw, bytes).await.map_err(|e| e.to_string())?;
         media::extract(&raw, destination).await?;

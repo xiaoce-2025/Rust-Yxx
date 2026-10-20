@@ -14,17 +14,43 @@ use tokio::{
 const RATE: u64 = 24000;
 
 async fn command(args: Vec<String>) -> Result<Output, String> {
-    tokio::time::timeout(
+    let operation = if args.iter().any(|arg| arg == "-c:v") {
+        "译制视频封装"
+    } else if args.iter().any(|arg| arg.starts_with("atempo=")) {
+        "配音变速对轴"
+    } else if args.iter().any(|arg| arg == "pcm_s16le") {
+        "音频提取或格式规范化"
+    } else {
+        "媒体时长探测"
+    };
+    let started = tokio::time::Instant::now();
+    tracing::info!(target: "video_translation", operation, "开始执行FFmpeg");
+    let pending = tokio::time::timeout(
         Duration::from_secs(7200),
         Command::new("ffmpeg")
             .args(["-hide_banner", "-nostdin"])
             .args(args)
             .kill_on_drop(true)
             .output(),
-    )
-    .await
-    .map_err(|_| "FFmpeg 处理超时".to_string())?
-    .map_err(|e| format!("无法运行服务器 FFmpeg：{e}"))
+    );
+    tokio::pin!(pending);
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
+    heartbeat.tick().await;
+    loop {
+        tokio::select! {
+            result = &mut pending => {
+                let output = result.map_err(|_| "FFmpeg 处理超时".to_string())?
+                    .map_err(|e| format!("无法运行服务器 FFmpeg：{e}"))?;
+                // A probe deliberately exits without an output file; its nonzero status is expected.
+                tracing::info!(target: "video_translation", operation, elapsed_ms=started.elapsed().as_millis() as u64,
+                    exit_code=output.status.code(), "FFmpeg执行结束");
+                return Ok(output);
+            }
+            _ = heartbeat.tick() => {
+                tracing::info!(target: "video_translation", operation, elapsed_seconds=started.elapsed().as_secs(), "FFmpeg仍在处理");
+            }
+        }
+    }
 }
 
 fn path(p: &Path) -> String {
@@ -243,6 +269,8 @@ pub async fn assemble(
         .map_err(|e| e.to_string())?;
     let mut cursor = 0;
     for b in blocks {
+        tracing::info!(target: "video_translation", block=b.id+1, total_blocks=blocks.len(), start_ms=b.start_ms,
+            "开始将配音块写入固定时间轴");
         let start = b.start_ms * RATE / 1000 * 2;
         let info = wav_info(&root.join(format!("aligned-{}.wav", b.id))).await?;
         if start < cursor || start + info.bytes > total {
@@ -262,6 +290,7 @@ pub async fn assemble(
             return Err("配音音频读取不完整".into());
         }
         cursor = start + copied;
+        tracing::info!(target: "video_translation", block=b.id+1, total_blocks=blocks.len(), copied_bytes=copied, "配音块时间轴写入完成");
     }
     silence(&mut destination, total - cursor).await?;
     destination.flush().await.map_err(|e| e.to_string())?;
