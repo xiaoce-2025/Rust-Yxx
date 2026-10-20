@@ -22,6 +22,9 @@ class Element {
   play() { this.paused = false; return Promise.resolve(); }
   load() { this.loads++; }
   click() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
+  focus() {}
 }
 
 (async () => {
@@ -36,7 +39,11 @@ class Element {
     document: { getElementById: element, createElement: tag => { const el = new Element(tag); if (tag === 'a') anchors.push(el); return el; }, body: new Element('body') },
     AbortSignal: { timeout: () => undefined },
     fetch: async (url, options) => {
-      requests.push({ url, method: options.method });
+      requests.push({ url, method: options.method, body: options.body });
+      if (url.endsWith('/restart')) {
+        const valid = JSON.parse(options.body).admin_password === 'test-admin';
+        return { ok: valid, text: async () => JSON.stringify(valid ? {translation:{status:'queued',stage:'排队中'}} : {error:'管理员密码错误'}) };
+      }
       return { ok: true, text: async () => '{}' };
     },
     setInterval: () => 1, clearInterval: () => {}, confirm: () => true,
@@ -56,6 +63,7 @@ class Element {
     context.testTranslation = status ? {status, stage:'test'} : null;
     vm.runInContext('renderTranslation(testTranslation)', context);
     assert.equal(element('downloadTranslatedBtn').hidden, true, `Hide translated download for ${status}`);
+    assert.equal(element('restartTranslationBtn').hidden, status !== 'failed');
   }
   vm.runInContext('renderTranslation({status:"running",stage:"中文配音",completed_blocks:2,total_blocks:4});', context);
   assert.equal(element('translateBtn').disabled, true);
@@ -78,6 +86,8 @@ class Element {
   assert.equal(player.children[0].src, '/api/pkuvideo_fw/jobs/job-1/translation/subtitles/zh.dub.vtt');
   assert.equal(element('downloadTranslatedBtn').disabled, false);
   assert.equal(element('downloadTranslatedBtn').hidden, false);
+  assert.equal(element('restartTranslationBtn').hidden, false);
+  assert.equal(element('restartTranslationBtn').disabled, false);
 
   const loads = player.loads;
   vm.runInContext(ready, context);
@@ -96,6 +106,28 @@ class Element {
   vm.runInContext('downloadTranslatedVideo()', context);
   assert.equal(anchors[0].href, '/api/pkuvideo_fw/jobs/job-1/video.mp4?download=1');
   assert.equal(anchors[1].href, '/api/pkuvideo_fw/jobs/job-1/translation/video.mp4?download=1');
+  const beforeRestart = requests.length;
+  context.confirm = () => false;
+  vm.runInContext('confirmRestartTranslation()', context);
+  assert.equal(requests.length, beforeRestart, 'Cancelling confirmation sends no request');
+  assert.ok(!element('restartTranslationDialog').open);
+  context.confirm = () => true;
+  vm.runInContext('confirmRestartTranslation()', context);
+  assert.equal(element('restartTranslationDialog').open, true);
+  assert.equal(requests.length, beforeRestart, 'Password dialog alone sends no request');
+  element('restartAdminPassword').value = 'wrong';
+  await vm.runInContext('submitRestartTranslation()', context);
+  assert.match(element('restartTranslationError').textContent, /管理员密码错误/);
+  assert.equal(element('restartTranslationDialog').open, true);
+  assert.equal(vm.runInContext('translationReady', context), true, 'Wrong password keeps current video');
+  element('restartAdminPassword').value = 'test-admin';
+  await vm.runInContext('submitRestartTranslation()', context);
+  assert.match(requests.at(-1).url, /\/translation\/restart$/);
+  assert.equal(element('restartAdminPassword').value, '');
+  assert.equal(element('restartTranslationDialog').open, false);
+  assert.equal(vm.runInContext('translationReady', context), false);
+  assert.equal(element('downloadTranslatedBtn').hidden, true);
+  assert.equal(player.dataset.variant, 'source');
   await vm.runInContext('deleteJob("job-1")', context);
   assert.equal(requests.at(-1).method, 'DELETE');
   assert.equal(vm.runInContext('activeJobId', context), '');

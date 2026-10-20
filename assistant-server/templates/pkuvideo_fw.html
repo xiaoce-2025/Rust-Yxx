@@ -234,6 +234,19 @@
     </div>
   </main>
 
+  <dialog id="restartTranslationDialog" style="border:0;border-radius:12px;max-width:420px;width:85%">
+    <form onsubmit="event.preventDefault(); submitRestartTranslation();">
+      <h3>重新翻译：管理员验证</h3>
+      <p>旧翻译视频、字幕与处理缓存将被清除，原视频保留。</p>
+      <label for="restartAdminPassword">管理员密码</label>
+      <input id="restartAdminPassword" type="password" autocomplete="off" required style="width:100%;box-sizing:border-box;margin-top:8px" />
+      <p id="restartTranslationError" role="alert" style="color:#c33"></p>
+      <div class="modal-actions">
+        <button type="button" class="ghost" onclick="closeRestartTranslation()">取消</button>
+        <button id="restartTranslationSubmit" type="submit">验证并重新翻译</button>
+      </div>
+    </form>
+  </dialog>
   <script>
     const statusEl = document.getElementById("status");
     const jobMetaEl = document.getElementById("jobMeta");
@@ -252,6 +265,13 @@
     let translationReady = false;
     let deletingVideo = false;
     let sourceSwitch = 0;
+    let restartJobId = '';
+    let restartInFlight = false;
+    let translationEpoch = 0;
+    document.getElementById('restartTranslationDialog').addEventListener('cancel', event => {
+      event.preventDefault();
+      closeRestartTranslation();
+    });
 
     async function api(path, method = "GET", body) {
       const res = await fetch(path, {
@@ -302,6 +322,7 @@
 
         resultActions.innerHTML = `
           <button id="translateBtn" class="action-btn" onclick="startTranslation(false)" style="background: var(--accent); color: #fff;">视频翻译</button>
+          <button id="restartTranslationBtn" class="action-btn" onclick="confirmRestartTranslation()" hidden disabled>重新翻译</button>
           <button class="action-btn" onclick="downloadVideo('${job.id}')">下载原视频</button>
           <button id="downloadTranslatedBtn" class="action-btn" onclick="downloadTranslatedVideo()" hidden disabled>下载翻译视频</button>
           <button class="action-btn delete" onclick="deleteJob('${job.id}')">删除任务</button>
@@ -531,10 +552,11 @@
     async function refreshTranslation() {
       if (!activeJobId || translationInFlight || deletingVideo) return;
       const id = activeJobId;
+      const epoch = translationEpoch;
       translationInFlight = true;
       try {
         const response = await api(`/api/pkuvideo_fw/jobs/${id}/translation`);
-        if (id !== activeJobId || deletingVideo) return;
+        if (id !== activeJobId || deletingVideo || epoch !== translationEpoch) return;
         renderTranslation(response.translation, response.enabled);
       } catch (error) {
         const label = document.getElementById('translationStatus');
@@ -551,6 +573,9 @@
       const busy = job && ['queued', 'running', 'deleting'].includes(job.status);
       const failed = job && job.status === 'failed';
       const ready = job && job.status === 'succeeded';
+      const restartButton = document.getElementById('restartTranslationBtn');
+      restartButton.hidden = !(ready || failed);
+      restartButton.disabled = !enabled || busy || restartInFlight;
       button.disabled = !enabled || busy || ready;
       button.textContent = !enabled ? '视频翻译未开启' : busy ? (job.status === 'deleting' ? '正在清理' : '正在翻译…') : ready ? '翻译完成' : failed ? '重试翻译' : '视频翻译';
       button.onclick = () => startTranslation(!!failed);
@@ -565,6 +590,53 @@
       }
       if (busy && !translationTimer) translationTimer = setInterval(refreshTranslation, 3000);
       if (!busy) { clearInterval(translationTimer); translationTimer = null; }
+    }
+
+    function confirmRestartTranslation() {
+      if (!activeJobId || deletingVideo || restartInFlight) return;
+      if (!confirm('确定要重新翻译吗？旧翻译视频、字幕和全部翻译缓存将被清除，并从头重新调用识别、翻译和配音服务。原视频保留。')) return;
+      restartJobId = activeJobId;
+      document.getElementById('restartAdminPassword').value = '';
+      document.getElementById('restartTranslationError').textContent = '';
+      document.getElementById('restartTranslationDialog').showModal();
+      document.getElementById('restartAdminPassword').focus();
+    }
+
+    function closeRestartTranslation() {
+      if (restartInFlight) return;
+      document.getElementById('restartTranslationDialog').close();
+      document.getElementById('restartAdminPassword').value = '';
+      restartJobId = '';
+    }
+
+    async function submitRestartTranslation() {
+      if (!restartJobId || restartJobId !== activeJobId || deletingVideo || restartInFlight) return;
+      const id = restartJobId;
+      const input = document.getElementById('restartAdminPassword');
+      if (!input.value) return;
+      restartInFlight = true;
+      translationEpoch++;
+      document.getElementById('restartTranslationSubmit').disabled = true;
+      try {
+        const request = api(`/api/pkuvideo_fw/jobs/${id}/translation/restart`, 'POST', { admin_password: input.value });
+        input.value = '';
+        const response = await request;
+        translationEpoch++;
+        if (id === activeJobId && !deletingVideo) {
+          // Switch away from the old output before the rebuilt file becomes available.
+          if (translationReady) switchAudio('source');
+          translationReady = false;
+          document.getElementById('fwPlayer')?.querySelectorAll('track').forEach(el => el.remove());
+          renderTranslation(response.translation);
+        }
+        restartInFlight = false;
+        closeRestartTranslation();
+      } catch (error) {
+        document.getElementById('restartTranslationError').textContent = '重新翻译失败：' + error.message;
+      } finally {
+        restartInFlight = false;
+        document.getElementById('restartTranslationSubmit').disabled = false;
+      }
     }
 
     async function startTranslation(retry) {

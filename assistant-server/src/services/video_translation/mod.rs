@@ -247,6 +247,39 @@ pub async fn start(state: &AppState, id: Uuid, retry: bool) -> Result<Translatio
     Ok(job)
 }
 
+// Caller holds the original FW slot lock, serializing restart with submit/delete.
+pub async fn restart(state: &AppState, id: Uuid) -> Result<TranslationJob, String> {
+    let config = &state.settings.video_translation;
+    if !config.enabled {
+        return Err("视频翻译功能未开启".into());
+    }
+    if !config.max_speed.is_finite() || !(1.0..=1.3).contains(&config.max_speed) {
+        return Err("翻译 max_speed 必须在 1.0–1.3 之间".into());
+    }
+    providers::Credentials::load(state, id).await?;
+    clear_for_restart(state, id).await?;
+    tracing::info!(target: "video_translation", job_id=%id, "管理员密码已校验，清除旧翻译后从头重新翻译");
+    start(state, id, false).await
+}
+
+async fn clear_for_restart(state: &AppState, id: Uuid) -> Result<(), String> {
+    let entry = state
+        .video_translations
+        .entry(id)
+        .await
+        .ok_or("此视频尚无翻译任务")?;
+    let status = entry.job.lock().await.status.clone();
+    if !matches!(status.as_str(), "succeeded" | "failed") {
+        return Err("请等待当前翻译或清理结束后再重新翻译".into());
+    }
+    // Join the terminal worker's final manifest write before removing its files.
+    if let Some(task) = entry.task.lock().await.take() {
+        let _ = task.await;
+    }
+    // Do not write a deletion tombstone: recovery of those also removes the source job.
+    finish_remove(state, id).await
+}
+
 async fn launch(state: AppState, entry: Arc<Entry>) {
     let mut handle = entry.task.lock().await;
     if handle.is_some() {
@@ -802,6 +835,44 @@ mod tests {
         assert_eq!(job.blocks[0].revision, 2);
         assert_eq!(job.blocks[0].spoken, "已压缩译文");
         assert!(!resume_legacy_alignment(&mut job));
+    }
+
+    #[tokio::test]
+    async fn restart_clears_only_terminal_translation_files() {
+        let (state, _temp) = test_state().await;
+        let id = Uuid::new_v4();
+        fs::create_dir_all(dir(id)).await.unwrap();
+        fs::write(dir(id).join("translated.mp4"), b"old output")
+            .await
+            .unwrap();
+        fs::create_dir_all(dir(id).join("audio")).await.unwrap();
+        fs::write(dir(id).join("audio/old.wav"), b"old cache")
+            .await
+            .unwrap();
+        let mut job = test_job(id);
+        job.status = "running".into();
+        let entry = Arc::new(Entry {
+            job: Mutex::new(job),
+            task: Mutex::new(None),
+        });
+        state
+            .video_translations
+            .entries
+            .lock()
+            .await
+            .insert(id, entry.clone());
+        save(&entry).await.unwrap();
+        assert!(clear_for_restart(&state, id).await.is_err());
+        assert!(dir(id).join("translated.mp4").exists());
+        let source = dir(id).with_extension("source-test");
+        fs::write(&source, b"original video").await.unwrap();
+        entry.job.lock().await.status = "succeeded".into();
+        clear_for_restart(&state, id).await.unwrap();
+        assert!(!dir(id).exists());
+        assert!(state.video_translations.entry(id).await.is_none());
+        assert_eq!(fs::read(&source).await.unwrap(), b"original video");
+        fs::remove_file(source).await.unwrap();
+        assert!(clear_for_restart(&state, id).await.is_err());
     }
 
     #[tokio::test]

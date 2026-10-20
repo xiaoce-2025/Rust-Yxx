@@ -28,6 +28,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/pkuvideo_fw/jobs/:id/translation/retry", post(retry))
         .route(
+            "/api/pkuvideo_fw/jobs/:id/translation/restart",
+            post(restart),
+        )
+        .route(
             "/api/pkuvideo_fw/jobs/:id/translation/video.mp4",
             get(video),
         )
@@ -103,6 +107,54 @@ async fn retry(
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     begin(state, user, id, true).await
+}
+
+#[derive(Deserialize)]
+struct RestartRequest {
+    admin_password: String,
+}
+
+fn validate_restart_password(password: &str) -> Result<(), ApiError> {
+    const ADMIN_PASSWORD: &str = "绯英小姐真可爱";
+    if password != ADMIN_PASSWORD {
+        return Err(ApiError::Forbidden("管理员密码错误".into()));
+    }
+    Ok(())
+}
+
+async fn restart(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(request): Json<RestartRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let slot = state.fw_slot(user.id).await;
+    let _guard = slot.lock().await;
+    owner(&state, id, user.id).await?;
+    validate_restart_password(&request.admin_password)?;
+    let job = translation::restart(&state, id)
+        .await
+        .map_err(ApiError::BadRequest)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"translation":summary(&job)})),
+    ))
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn restart_requires_exact_admin_password() {
+        assert!(validate_restart_password("绯英小姐真可爱").is_ok());
+        for password in ["", "wrong", "绯英小姐真可爱 ", "绯英小姐真可愛"] {
+            assert!(matches!(
+                validate_restart_password(password),
+                Err(ApiError::Forbidden(_))
+            ));
+        }
+    }
 }
 
 #[derive(Deserialize)]
