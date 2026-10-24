@@ -1,6 +1,8 @@
 # 编译输出
 assistant-server/target/
 **/*.rs.bk
+**/*.bak
+assistant-server/server.log
 
 # 移除 Cargo.lock
 # 对于可执行程序，建议保留 Cargo.lock
