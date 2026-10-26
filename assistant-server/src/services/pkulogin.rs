@@ -2,10 +2,10 @@ use std::{
     fs,
     fs::File,
     io::{BufRead, BufReader},
-    path::PathBuf,
     process::Command,
 };
 
+use chrono::Utc;
 use rand::{seq::SliceRandom, thread_rng};
 use serde_json::Value;
 
@@ -18,10 +18,62 @@ const BLACKBOARD_REDIR_URL: &str =
 const BLACKBOARD_REDIR_URL_HTTPS: &str =
     "https://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin";
 
-pub struct PkuLoginResult {
-    pub token: String,
-    pub cookie_file: PathBuf,
-    pub user_agent: String,
+pub type PkuLoginResult = super::login_cache::LoginCacheEntry;
+
+pub const AUTH_EXPIRED: &str = "教学网登录已失效";
+
+pub fn validate_page(content: &str) -> Result<(), String> {
+    let lower = content.to_ascii_lowercase();
+    let document = scraper::Html::parse_document(content);
+    let password = scraper::Selector::parse("input[type='password' i]").unwrap();
+    if document.select(&password).next().is_some()
+        || lower.contains("form-pku-login") || lower.contains("/iaaa/oauth.jsp")
+        || lower.contains("/webapps/login/?action=relogin")
+        || content.contains("登录已失效") || content.contains("会话已过期") {
+        return Err(AUTH_EXPIRED.into());
+    }
+    if content.contains("无权访问") || content.contains("没有权限访问") {
+        return Err("教学网页面拒绝访问".into());
+    }
+    Ok(())
+}
+
+pub fn is_auth_error(error: &str) -> bool {
+    error.contains(AUTH_EXPIRED) || error.contains("401")
+}
+
+/// Retry only explicit authentication failures, at most once per operation.
+/// The session is otherwise pinned: this does not inspect its age.
+pub async fn session_operation<T>(
+    login: &mut PkuLoginResult, username: &str, password: &str, cache: &LoginCache,
+    operation: impl FnMut(&PkuLoginResult) -> Result<T, String>,
+) -> Result<T, String> {
+    session_operation_with_refresh(login, operation,
+        || login_iaaa_and_get_cookies_with_cache(username, password, cache)).await
+}
+
+async fn session_operation_with_refresh<T, F, Fut>(
+    login: &mut PkuLoginResult,
+    mut operation: impl FnMut(&PkuLoginResult) -> Result<T, String>,
+    refresh: F,
+) -> Result<T, String>
+where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Result<PkuLoginResult, String>> {
+    let result = operation(login);
+    if let Err(ref error) = result {
+        login.invalidate();
+        if is_auth_error(error) {
+            *login = refresh().await?;
+            return login.checked(operation(login));
+        }
+    }
+    result
+}
+
+pub fn fetch_page_in_session(login: &PkuLoginResult, url: &str) -> Result<String, String> {
+    let _guard = login.lock_cookie();
+    let result = fetch_with_cookie(&login.cookie_file.to_string_lossy(), &login.user_agent, url)
+        .and_then(|page| { validate_page(&page)?; Ok(page) });
+    login.checked(result)
 }
 
 fn null_device() -> &'static str {
@@ -31,16 +83,32 @@ fn null_device() -> &'static str {
 /// Use the browser-style cookie jar, including domain/path scoped and HttpOnly cookies.
 /// Do not replace it with a manually constructed Cookie header.
 pub fn download_in_session(login: &PkuLoginResult, url: &str) -> Result<Vec<u8>, String> {
+    download_in_session_with_timeout(login, url, Some(60))
+}
+
+/// Whole videos may legitimately take much longer than page/key requests.
+pub fn download_video_in_session(login: &PkuLoginResult, url: &str) -> Result<Vec<u8>, String> {
+    download_in_session_with_timeout(login, url, None)
+}
+
+fn download_in_session_with_timeout(login: &PkuLoginResult, url: &str, max_seconds: Option<u64>) -> Result<Vec<u8>, String> {
+    let _guard = login.lock_cookie();
     let cookie_file = login.cookie_file.to_string_lossy().to_string();
-    run_curl_bytes(&vec![
+    let mut args = vec![
         "-sS".into(), "-k".into(), "-L".into(),
         "--connect-timeout".into(), "15".into(),
-        "--max-time".into(), "60".into(),
         "-A".into(), login.user_agent.clone(),
         "-b".into(), cookie_file.clone(),
         "-c".into(), cookie_file,
-        url.into(),
-    ])
+    ];
+    if let Some(seconds) = max_seconds {
+        args.extend(["--max-time".into(), seconds.to_string()]);
+    }
+    args.push(url.into());
+    login.checked(run_curl_bytes(&args).and_then(|bytes| {
+        if let Ok(text) = std::str::from_utf8(&bytes) { validate_page(text)?; }
+        Ok(bytes)
+    }))
 }
 
 pub async fn login_iaaa_and_get_cookies_with_cache(
@@ -48,22 +116,11 @@ pub async fn login_iaaa_and_get_cookies_with_cache(
     password: &str,
     login_cache: &LoginCache,
 ) -> Result<PkuLoginResult, String> {
-    if let Some(cached_entry) = login_cache.get(username).await {
-        tracing::info!("使用缓存的IAAA登录信息 - 用户: {}", username);
-        return Ok(PkuLoginResult {
-            token: cached_entry.token,
-            cookie_file: cached_entry.cookie_file,
-            user_agent: cached_entry.user_agent,
-        });
-    }
-
-    tracing::info!("缓存未命中，执行新的IAAA登录 - 用户: {}", username);
+    let lock = login_cache.login_lock(username).await;
+    let _guard = lock.lock().await;
+    if let Some(entry) = login_cache.get(username).await { return Ok(entry); }
     let result = login_iaaa_and_get_cookies(username, password).await?;
-    
-    login_cache.set(username, result.cookie_file.clone(), result.user_agent.clone(), result.token.clone()).await;
-    tracing::info!("IAAA登录信息已缓存 - 用户: {}", username);
-    
-    Ok(result)
+    Ok(login_cache.insert(username, result).await)
 }
 
 pub async fn login_iaaa_and_get_cookies(
@@ -79,8 +136,9 @@ pub async fn login_iaaa_and_get_cookies(
     let cookie_file = std::env::temp_dir().join(format!(
         "pku_cookie_{}_{}.txt",
         std::process::id(),
-        chrono::Utc::now().timestamp_millis()
+        uuid::Uuid::new_v4()
     ));
+    let mut session = PkuLoginResult::new(cookie_file.clone(), user_agent.clone(), String::new());
     let cookie_file_str = cookie_file.to_string_lossy().to_string();
     tracing::debug!("步骤2: 创建临时Cookie文件 - {}", cookie_file_str);
 
@@ -152,18 +210,25 @@ pub async fn login_iaaa_and_get_cookies(
             cookie_file_str.clone(),
             "-b".to_string(),
             cookie_file_str.clone(),
-            "-o".to_string(),
-            null_device().to_string(),
             "--fail".to_string(),
             campus_url.clone(),
         ];
 
         match run_curl_text(&campus_args) {
-            Ok(_) => {
+            Ok(page) if validate_page(&page).is_ok() => {
+                // SSO callbacks may return only a redirect script; verify the portal itself.
+                let portal = fetch_page_in_session(&session,
+                    "https://course.pku.edu.cn/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1");
+                match portal {
+                    Ok(portal) if is_teaching_portal(&portal) => {},
+                    Ok(_) => { last_err = "教学网登录后未返回可识别的门户页面".into(); continue; },
+                    Err(error) => { last_err = error; continue; },
+                }
                 tracing::info!("步骤7完成: 第{}次教学网登录成功", idx + 1);
                 last_err.clear();
                 break;
             }
+            Ok(_) => { last_err = AUTH_EXPIRED.into(); }
             Err(e) => {
                 tracing::warn!("步骤7: 第{}次教学网登录失败: {}", idx + 1, e);
                 last_err = e;
@@ -181,11 +246,9 @@ pub async fn login_iaaa_and_get_cookies(
     let duration = end_time - start_time;
     tracing::info!("IAAA登录流程完成 - 总耗时: {}ms", duration.num_milliseconds());
 
-    Ok(PkuLoginResult {
-        token,
-        cookie_file,
-        user_agent,
-    })
+    session.token = token;
+    session.created_at = Utc::now();
+    Ok(session)
 }
 
 pub fn fetch_with_cookie(cookie_file: &str, user_agent: &str, url: &str) -> Result<String, String> {
@@ -223,67 +286,36 @@ pub fn fetch_with_cookie_redirect(cookie_file: &str, user_agent: &str, url: &str
         url.to_string(),
     ];
 
-    run_curl_text(&args)
+    run_curl_text(&args).and_then(|destination| {
+        if let Ok(url) = reqwest::Url::parse(destination.trim()) {
+            if url.host_str() == Some("iaaa.pku.edu.cn")
+                || url.path().starts_with("/webapps/login/") {
+                return Err(AUTH_EXPIRED.into());
+            }
+        }
+        Ok(destination)
+    })
 }
 
-pub async fn download_with_pku_cookie(
-    url: &str,
-    username: &str,
-    password: &str,
-    login_cache: &LoginCache,
-) -> Result<Vec<u8>, String> {
-    let login = login_iaaa_and_get_cookies_with_cache(username, password, login_cache).await?;
-
-    let cookie_file_str = login.cookie_file.to_string_lossy().to_string();
-
-    let args = vec![
-        "-sS".to_string(),
-        "-k".to_string(),
-        "-L".to_string(),
-        "--http1.1".to_string(),
-        "-A".to_string(),
-        login.user_agent,
-        "-c".to_string(),
-        cookie_file_str.clone(),
-        "-b".to_string(),
-        cookie_file_str,
-        url.to_string(),
-    ];
-
-    let bytes = run_curl_bytes(&args).map_err(|e| format!("下载请求失败: {e}"));
-    bytes
-}
-
-/// 下载资源，同时显式发送 _token Cookie（用于跨域资源如 resourcese.pku.edu.cn）
-pub async fn download_with_token_cookie(
-    url: &str,
-    username: &str,
-    password: &str,
-    login_cache: &LoginCache,
-) -> Result<Vec<u8>, String> {
-    let login = login_iaaa_and_get_cookies_with_cache(username, password, login_cache).await?;
-    let cookie_file_str = login.cookie_file.to_string_lossy().to_string();
-    let token_cookie = read_token_from_cookie_file(&cookie_file_str).unwrap_or_default();
-
-    let mut args = vec![
-        "-sS".to_string(),
-        "-k".to_string(),
-        "-L".to_string(),
-        "--http1.1".to_string(),
-        "-A".to_string(),
-        login.user_agent,
-        "-c".to_string(),
-        cookie_file_str.clone(),
-        "-b".to_string(),
-        cookie_file_str,
-    ];
-    if !token_cookie.is_empty() {
-        args.push("-H".to_string());
-        args.push(format!("Cookie: _token={}", token_cookie));
+pub fn download_token_in_session(login: &PkuLoginResult, url: &str) -> Result<Vec<u8>, String> {
+    let _guard = login.lock_cookie();
+    let cookie = login.cookie_file.to_string_lossy().to_string();
+    let mut args = vec!["-sS".into(), "-k".into(), "-L".into(), "--http1.1".into(),
+        "-A".into(), login.user_agent.clone(), "-b".into(), cookie.clone(), "-c".into(), cookie.clone()];
+    if let Some(token) = read_token_from_cookie_file(&cookie) {
+        args.extend(["-H".into(), format!("Cookie: _token={token}")]);
     }
-    args.push(url.to_string());
+    args.push(url.into());
+    login.checked(run_curl_bytes(&args).and_then(|bytes| {
+        if let Ok(text) = std::str::from_utf8(&bytes) { validate_page(text)?; }
+        Ok(bytes)
+    }))
+}
 
-    run_curl_bytes(&args).map_err(|e| format!("下载请求失败: {e}"))
+/// Require the portal shell as well as absence of a login form. Empty courses are valid.
+pub fn is_teaching_portal(page: &str) -> bool {
+    ["courseListing", "courseList", "myCourses", "课程列表", "我的课程", "type=Course"]
+        .iter().any(|marker| page.contains(marker))
 }
 
 fn read_token_from_cookie_file(path: &str) -> Option<String> {
@@ -310,8 +342,82 @@ mod session_tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
+    fn test_session() -> PkuLoginResult {
+        let path = std::env::temp_dir().join(format!("pku-auth-test-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "cookies").unwrap();
+        PkuLoginResult::new(path, "test-agent".into(), String::new())
+    }
+
     #[test]
-    fn watching_page_cookies_reach_key_request_and_401_is_rejected() {
+    fn detects_login_forms_and_accepts_empty_portal() {
+        assert!(validate_page("<input TYPE = 'PASSWORD' name='password'>").is_err());
+        assert!(validate_page("<form id='form-pku-login'></form>").is_err());
+        let empty = "<div id='courseListing'>目前没有课程</div>";
+        assert!(validate_page(empty).is_ok());
+        assert!(is_teaching_portal(empty));
+        assert!(!is_teaching_portal("<html>服务器错误</html>"));
+    }
+
+    #[tokio::test]
+    async fn authentication_retry_is_bounded_and_failure_evicts_new_session() {
+        let cache = LoginCache::new(60);
+        let mut login = cache.insert("user", test_session()).await;
+        let mut calls = 0;
+        let mut refreshes = 0;
+        let result: Result<(), String> = session_operation_with_refresh(&mut login, |_| {
+            calls += 1;
+            Err(AUTH_EXPIRED.into())
+        }, || {
+            refreshes += 1;
+            let cache = cache.clone();
+            async move { Ok(cache.insert("user", test_session()).await) }
+        }).await;
+        assert!(result.is_err());
+        assert_eq!((calls, refreshes), (2, 1));
+        assert!(cache.get("user").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn network_failure_clears_cache_without_relogin() {
+        let cache = LoginCache::new(60);
+        let mut login = cache.insert("user", test_session()).await;
+        let result: Result<(), String> = session_operation_with_refresh(&mut login,
+            |_| Err("网络连接失败".into()),
+            || async { panic!("ordinary errors must not trigger login") }).await;
+        assert!(result.is_err());
+        assert!(cache.get("user").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn running_operation_uses_expired_lease_without_refreshing() {
+        let cache = LoginCache::new(60);
+        let mut session = test_session();
+        session.created_at = Utc::now() - chrono::Duration::minutes(61);
+        let mut login = cache.insert("user", session).await;
+        cache.cleanup_expired().await;
+        let result = session_operation_with_refresh(&mut login,
+            |session| Ok(session.cookie_file.is_file()),
+            || async { panic!("running operation must not check TTL") }).await;
+        assert_eq!(result, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn authentication_retry_can_succeed_with_new_session() {
+        let cache = LoginCache::new(60);
+        let mut login = cache.insert("user", test_session()).await;
+        let old_path = login.cookie_file.clone();
+        let mut calls = 0;
+        let result = session_operation_with_refresh(&mut login, |_| {
+            calls += 1;
+            if calls == 1 { Err(AUTH_EXPIRED.into()) } else { Ok(42) }
+        }, || async { Ok(cache.insert("user", test_session()).await) }).await;
+        assert_eq!(result, Ok(42));
+        assert!(!old_path.exists());
+        assert_eq!(cache.get("user").await.unwrap().cookie_file, login.cookie_file);
+    }
+
+    #[tokio::test]
+    async fn watching_page_cookies_reach_key_request_and_401_is_rejected() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
@@ -338,18 +444,19 @@ mod session_tests {
             requests
         });
         let dir = tempdir::TempDir::new("pku-session-test").unwrap();
-        let login = PkuLoginResult {
-            token: String::new(),
-            cookie_file: dir.path().join("cookies.txt"),
-            user_agent: "session-test-agent".into(),
-        };
+        let login = PkuLoginResult::new(dir.path().join("cookies.txt"), "session-test-agent".into(), String::new());
         download_in_session(&login, &format!("{base}/login")).unwrap();
+        let cache = LoginCache::new(60);
+        let login = cache.insert("test-user", login).await;
         fetch_with_cookie_redirect(
             login.cookie_file.to_str().unwrap(), &login.user_agent, &format!("{base}/watch"),
         ).unwrap();
         assert_eq!(read_token_from_cookie_file(login.cookie_file.to_str().unwrap()).as_deref(), Some("watch-token"));
         assert_eq!(download_in_session(&login, &format!("{base}/key")).unwrap(), b"0123456789abcdef");
+        assert!(cache.get("test-user").await.is_some());
         assert!(download_in_session(&login, &format!("{base}/denied")).unwrap_err().contains("401"));
+        assert!(cache.get("test-user").await.is_none());
+        assert!(login.cookie_file.is_file());
         let requests = server.join().unwrap();
         assert!(requests[1].contains("login=yes"));
         assert!(requests[3].contains("login=yes"));
@@ -391,7 +498,7 @@ fn parse_token(body: &str) -> Result<String, String> {
 fn run_curl_text(args: &[String]) -> Result<String, String> {
     let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = Command::new(curl_cmd)
-        .arg("--fail")
+        .args(["--fail", "--connect-timeout", "15", "--max-time", "60"])
         .args(args)
         .output()
         .map_err(|e| format!("调用 {} 失败: {}", curl_cmd, e))?;
@@ -407,7 +514,7 @@ fn run_curl_text(args: &[String]) -> Result<String, String> {
 pub(crate) fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
     let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = Command::new(curl_cmd)
-        .arg("--fail")
+        .args(["--fail", "--connect-timeout", "15"])
         .args(args)
         .output()
         .map_err(|e| format!("调用 {} 失败: {}", curl_cmd, e))?;

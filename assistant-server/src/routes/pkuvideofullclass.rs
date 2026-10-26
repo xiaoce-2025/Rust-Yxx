@@ -182,7 +182,11 @@ async fn bind(
         Ok(login_result) => {
             tracing::info!("IAAA authentication succeeded for user {}, token obtained", req.username);
 
-            let _ = std::fs::remove_file(&login_result.cookie_file);
+            drop(login_result);
+            let username = current_user.email.split('@').next().unwrap_or_default();
+            let login_lock = state.login_cache.login_lock(username).await;
+            let _login_guard = login_lock.lock().await;
+            state.login_cache.invalidate(username).await;
 
             crate::services::app_replay::clear_binding(current_user.id).map_err(ApiError::Internal)?;
             if let Some(password) = req.password.as_ref() {
@@ -217,6 +221,10 @@ async fn unbind(
     State(state): State<AppState>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let username = current_user.email.split('@').next().unwrap_or_default();
+    let login_lock = state.login_cache.login_lock(username).await;
+    let _login_guard = login_lock.lock().await;
+    state.login_cache.invalidate(username).await;
     crate::services::app_replay::clear_binding(current_user.id).map_err(ApiError::Internal)?;
     state.app_replay_clients.lock().await.remove(&current_user.id);
     state
@@ -355,82 +363,40 @@ async fn refresh_lessons(
         }
     };
 
-    let login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
+    let mut login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
         .map_err(|e| {
             tracing::error!("IAAA登录失败: {}", e);
             ApiError::BadRequest(format!("IAAA登录失败: {}", e))
         })?;
 
-    let cookie_file_str = login_result.cookie_file.to_string_lossy().to_string();
-
-    let mut all_lessons = Vec::new();
-    let mut current_url = format!("https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/videoList.action?course_id={}&mode=view", course_id);
-    let mut page_num = 1;
-    let mut visited_urls = HashSet::new();
-
-    loop {
-        if page_num > MAX_VIDEO_LIST_PAGES {
-            tracing::error!(
-                "刷新课节分页超过上限，课程: {}, 已抓取页数: {}",
-                course_id,
-                page_num - 1
-            );
-            return Err(ApiError::Internal(format!(
-                "课节分页异常：超过最大页数限制({})，已终止刷新",
-                MAX_VIDEO_LIST_PAGES
-            )));
-        }
-
-        if !visited_urls.insert(current_url.clone()) {
-            tracing::error!("检测到重复分页URL，疑似循环跳转: {}", current_url);
-            return Err(ApiError::Internal("课节分页异常：检测到重复页面跳转，已终止刷新".to_string()));
-        }
-
-        tracing::info!("开始访问视频列表页面 {}: {}", page_num, current_url);
-
-        let page_content = match pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, &current_url) {
-            Ok(content) => content,
-            Err(e) => {
-                tracing::error!("获取视频列表页面失败: {}", e);
-                state.login_cache.invalidate(username).await;
-                return Err(ApiError::Internal(format!("获取视频列表页面失败: {}", e)));
-            }
-        };
-
-        if page_num == 1 {
-            let looks_like_video_page = page_content.contains("bb-streammedia-hqy-BBLEARN")
-                || page_content.contains("listContainer_row:");
-            if !looks_like_video_page {
-                tracing::warn!(
-                    "首屏内容疑似非视频页，课程: {}，当前URL: {}，可能发生了跳转或权限拦截",
-                    course_id,
-                    current_url
-                );
-            }
-        }
-
-        let mut lessons = lesson_parser::parse_lessons(&page_content, &course_id);
-        all_lessons.append(&mut lessons);
-
-        match lesson_parser::get_next_page_url(&page_content) {
-            Some(next_url) => {
-                if next_url == current_url {
-                    tracing::error!("下一页URL与当前页相同，疑似循环跳转: {}", next_url);
-                    return Err(ApiError::Internal("课节分页异常：下一页地址重复，已终止刷新".to_string()));
+    // One lease for all pages; retry the full read once only on authentication loss.
+    let mut all_lessons = pkulogin::session_operation(
+        &mut login_result, username, &password, &state.login_cache, |login| {
+            let mut all_lessons = Vec::new();
+            let mut current_url = format!("https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/videoList.action?course_id={}&mode=view", course_id);
+            let mut visited = HashSet::new();
+            loop {
+                if visited.len() >= MAX_VIDEO_LIST_PAGES || !visited.insert(current_url.clone()) {
+                    return Err("课节分页异常：页数超限或重复跳转，已终止刷新".into());
                 }
-                current_url = next_url;
-                page_num += 1;
+                let page = pkulogin::fetch_page_in_session(login, &current_url)?;
+                // Require a list container, including the normal empty-list state.
+                if !page.contains("listContainer") {
+                    return Err("教学网返回的内容不是可识别的课节列表，已保留原有课节".into());
+                }
+                let mut lessons = lesson_parser::parse_lessons(&page, &course_id);
+                if lessons.is_empty() && page.contains("listContainer_row:") {
+                    return Err("课节列表解析失败，已保留原有课节".into());
+                }
+                all_lessons.append(&mut lessons);
+                match lesson_parser::get_next_page_url(&page) {
+                    Some(next) => current_url = next,
+                    None => break,
+                }
             }
-            None => {
-                tracing::info!("已到达最后一页，共获取 {} 个课节", all_lessons.len());
-                break;
-            }
-        }
-    }
-
-    if all_lessons.is_empty() {
-        tracing::warn!("课程 {} 未解析到任何课节", course_id);
-    }
+            Ok(all_lessons)
+        },
+    ).await.map_err(ApiError::Internal)?;
 
     // 合并已有的课节数据：保留 video_url, is_processed, tex_filename，只更新 play_url
     lesson_parser::assign_lesson_numbers(&mut all_lessons);
@@ -529,29 +495,26 @@ async fn refresh_courses(
 
     tracing::info!("用户 {} 开始刷新课程列表...", username);
 
-    let login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
+    let mut login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
         .map_err(|e| {
             tracing::error!("IAAA登录失败: {}", e);
             ApiError::BadRequest(format!("IAAA登录失败: {}", e))
         })?;
 
-    let cookie_file_str = login_result.cookie_file.to_string_lossy().to_string();
-    tracing::info!("登录成功，Cookie文件: {}", cookie_file_str);
-
     let portal_url = "https://course.pku.edu.cn/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1";
-    tracing::info!("开始访问教学网首页: {}", portal_url);
-
-    let page_content = match pkulogin::fetch_with_cookie(&cookie_file_str, &login_result.user_agent, portal_url) {
-        Ok(content) => content,
-        Err(e) => {
-            tracing::error!("获取教学网页面失败: {}", e);
-            state.login_cache.invalidate(username).await;
-            return Err(ApiError::Internal(format!("获取教学网页面失败: {}", e)));
-        }
-    };
-
-    let courses = course_parser::parse_courses(&page_content);
-    tracing::info!("解析出 {} 门课程", courses.len());
+    let courses = pkulogin::session_operation(
+        &mut login_result, username, &password, &state.login_cache, |login| {
+            let page = pkulogin::fetch_page_in_session(login, portal_url)?;
+            if !pkulogin::is_teaching_portal(&page) {
+                return Err("教学网返回的内容不是可识别的课程页面，已保留原有课程".into());
+            }
+            let courses = course_parser::parse_courses(&page);
+            if courses.is_empty() && page.contains("type=Course") {
+                return Err("课程列表解析失败，已保留原有课程".into());
+            }
+            Ok(courses)
+        },
+    ).await.map_err(ApiError::Internal)?;
 
     course_storage::save_courses(username, &courses)
         .map_err(|e| {
@@ -661,18 +624,16 @@ async fn process_lesson(
         if lessons[lesson_index].video_url.is_empty() || req.manual_key.is_none() {
             tracing::info!("课节 {} 访问观看页并刷新下载链接", video_id);
 
-            let login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
+            let mut login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
                 .map_err(|e| {
                     tracing::error!("IAAA登录失败: {}", e);
                     ApiError::BadRequest(format!("IAAA登录失败: {}", e))
                 })?;
-
-            let cookie_file_str = login_result.cookie_file.to_string_lossy().to_string();
-
             if !lessons[lesson_index].play_url.is_empty() {
                 tracing::info!("尝试获取下载链接，播放链接: {}", lessons[lesson_index].play_url);
 
-                match video_downloader::get_video_download_url(&lessons[lesson_index].play_url, &cookie_file_str, &login_result.user_agent).await {
+                match pkulogin::session_operation(&mut login_result, &username, &password, &state.login_cache,
+                    |login| video_downloader::get_video_download_url(&lessons[lesson_index].play_url, login)).await {
                     Ok(download_url) => {
                         lessons[lesson_index].video_url = download_url;
                         tracing::info!("成功获取下载链接: {}", lessons[lesson_index].video_url);
@@ -684,6 +645,7 @@ async fn process_lesson(
                 }
             } else {
                 tracing::warn!("课节 {} 播放链接为空，无法获取下载链接", video_id);
+                login_result.invalidate();
                 return Err(ApiError::BadRequest("播放链接为空，请先刷新课节列表".to_string()));
             }
 
@@ -709,11 +671,17 @@ async fn process_lesson(
         // 登录、观看页、播放列表和密钥请求使用同一个 Cookie jar 和 User-Agent。
         let mut resolved_key = req.manual_key.clone();
         if video_url.contains(".m3u8") && resolved_key.is_none() {
-            let login = playback_session.as_ref().ok_or_else(||
+            let login = playback_session.as_mut().ok_or_else(||
                 ApiError::Internal("缺少观看页登录会话".to_string()))?;
-            let (key_uri, key_result) = crate::services::pkuvideo::fetch_m3u8_key_in_session(
-                &video_url, login,
-            ).map_err(|e| ApiError::BadRequest(format!("获取播放列表失败: {}", e)))?;
+            let (key_uri, key_result) = pkulogin::session_operation(
+                login, &username, &password, &state.login_cache, |session| {
+                    let (uri, key) = crate::services::pkuvideo::fetch_m3u8_key_in_session(&video_url, session)?;
+                    if let Err(ref error) = key {
+                        if pkulogin::is_auth_error(error) { return Err(error.clone()); }
+                    }
+                    Ok((uri, key))
+                },
+            ).await.map_err(|e| ApiError::BadRequest(format!("获取播放列表失败: {}", e)))?;
             match key_result {
                 Ok(key) => resolved_key = Some(key),
                 Err(e) => {

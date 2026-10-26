@@ -1,46 +1,54 @@
 use regex::Regex;
 use serde_json::Value;
 
-pub async fn get_video_download_url(play_url: &str, cookie_file: &str, user_agent: &str) -> Result<String, String> {
-    tracing::info!("开始获取视频下载链接: {}", play_url);
+pub fn get_video_download_url(play_url: &str, login: &super::pkulogin::PkuLoginResult) -> Result<String, String> {
+    let cookie_file = login.cookie_file.to_string_lossy();
+    let user_agent = &login.user_agent;
+    let _guard = login.lock_cookie();
+    let result = (|| {
+        tracing::info!("开始获取视频下载链接: {}", play_url);
 
-    let first_page = fetch_player_page(play_url, cookie_file, user_agent).await?;
-    save_to_file("/tmp/first_page.html", &first_page).await;
+        let first_page = fetch_player_page(play_url, &cookie_file, user_agent)?;
+        save_to_file("/tmp/first_page.html", &first_page);
     
-    let iframe_src = extract_iframe_src_raw(&first_page);
-    let one_time_url = match iframe_src {
-        Some(src) => {
-            tracing::info!("找到一次性iframe链接: {}", src);
-            src
-        }
-        None => {
-            return Err("无法找到iframe链接".to_string());
-        }
-    };
+        let iframe_src = extract_iframe_src_raw(&first_page);
+        let one_time_url = match iframe_src {
+            Some(src) => {
+                tracing::info!("找到一次性iframe链接: {}", src);
+                src
+            }
+            None => {
+                return Err("无法找到iframe链接".to_string());
+            }
+        };
     
-    let redirect_url = follow_redirect(&one_time_url, cookie_file, user_agent).await?;
-    tracing::info!("获取到重定向后的URL: {}", redirect_url);
+        let redirect_url = follow_redirect(&one_time_url, &cookie_file, user_agent)?;
+        tracing::info!("获取到重定向后的URL: {}", redirect_url);
     
-    let params = extract_player_params(&redirect_url);
-    tracing::info!("提取的参数: {:?}", params);
+        let params = extract_player_params(&redirect_url);
+        tracing::info!("提取的参数: {:?}", params);
     
-    let download_url = fetch_video_download_url(&params, cookie_file, user_agent).await?;
-    tracing::info!("最终下载链接: {}", download_url);
+        let download_url = fetch_video_download_url(&params, &cookie_file, user_agent)?;
+        tracing::info!("最终下载链接: {}", download_url);
     
-    Ok(download_url)
+        Ok(download_url)
+    })();
+    login.checked(result)
 }
 
-async fn follow_redirect(url: &str, cookie_file: &str, user_agent: &str) -> Result<String, String> {
+fn follow_redirect(url: &str, cookie_file: &str, user_agent: &str) -> Result<String, String> {
     use super::pkulogin::fetch_with_cookie_redirect;
     fetch_with_cookie_redirect(cookie_file, user_agent, url)
 }
 
-async fn fetch_player_page(url: &str, cookie_file: &str, user_agent: &str) -> Result<String, String> {
+fn fetch_player_page(url: &str, cookie_file: &str, user_agent: &str) -> Result<String, String> {
     use super::pkulogin::fetch_with_cookie;
-    fetch_with_cookie(cookie_file, user_agent, url)
+    let page = fetch_with_cookie(cookie_file, user_agent, url)?;
+    super::pkulogin::validate_page(&page)?;
+    Ok(page)
 }
 
-async fn save_to_file(path: &str, content: &str) {
+fn save_to_file(path: &str, content: &str) {
     match std::fs::write(path, content) {
         Ok(_) => tracing::info!("页面内容已保存到: {}", path),
         Err(e) => tracing::warn!("保存页面失败: {}", e),
@@ -88,7 +96,7 @@ fn extract_player_params(url: &str) -> PlayerParams {
     }
 }
 
-async fn fetch_video_download_url(params: &PlayerParams, cookie_file: &str, user_agent: &str) -> Result<String, String> {
+fn fetch_video_download_url(params: &PlayerParams, cookie_file: &str, user_agent: &str) -> Result<String, String> {
     if params.course_id.is_empty() || params.sub_id.is_empty() || params.app_id.is_empty() || params.auth_data.is_empty() {
         return Err("缺少必要参数".to_string());
     }
@@ -100,15 +108,17 @@ async fn fetch_video_download_url(params: &PlayerParams, cookie_file: &str, user
     
     tracing::info!("调用视频信息API: {}", api_url);
     
-    let response = fetch_with_cookie_direct(api_url.as_str(), cookie_file, user_agent).await?;
-    save_to_file("/tmp/video_api_response.json", &response).await;
+    let response = fetch_with_cookie_direct(api_url.as_str(), cookie_file, user_agent)?;
+    save_to_file("/tmp/video_api_response.json", &response);
     
     extract_download_url_from_api_response(&response)
 }
 
-async fn fetch_with_cookie_direct(url: &str, cookie_file: &str, user_agent: &str) -> Result<String, String> {
+fn fetch_with_cookie_direct(url: &str, cookie_file: &str, user_agent: &str) -> Result<String, String> {
     use super::pkulogin::fetch_with_cookie;
-    fetch_with_cookie(cookie_file, user_agent, url)
+    let page = fetch_with_cookie(cookie_file, user_agent, url)?;
+    super::pkulogin::validate_page(&page)?;
+    Ok(page)
 }
 
 fn extract_download_url_from_api_response(response: &str) -> Result<String, String> {

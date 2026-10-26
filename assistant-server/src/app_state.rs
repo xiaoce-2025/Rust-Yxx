@@ -65,7 +65,7 @@ impl AppState {
         let pkuvideo_jobs = Arc::new(RwLock::new(HashMap::new()));
         let pkuvideo_fw_jobs = Arc::new(RwLock::new(HashMap::new()));
 
-        let login_cache = Arc::new(LoginCache::new(10)); // 10分钟缓存
+        let login_cache = Arc::new(LoginCache::new(60)); // 仅在操作开始时检查 1 小时有效期
 
         let processing_users = Arc::new(RwLock::new(HashMap::new()));
 
