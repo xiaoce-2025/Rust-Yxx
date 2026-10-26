@@ -13,7 +13,7 @@
 1. GET Passport 的 `/auth/login?redirect=https://passport.pku.edu.cn/auth/app-login`，读取并校验官方隐藏表单。
 2. POST IAAA `oauth.jsp`，保留 Cookie；应用必须为 `resource`，回调必须为 `https://passport.pku.edu.cn`。
 3. 检查图形验证码及短信／邮件／OTP 策略；用户明确点击发送按钮后才调用验证码发送接口。
-4. 每次提交登录现场 GET `getPublicKey.do`，使用 RSA PKCS#1 v1.5 加密共享的 IAAA 绑定密码并 Base64 编码，POST `oauthlogin.do`。
+4. 每次提交登录现场 GET `getPublicKey.do`，使用 RSA PKCS#1 v1.5 加密共享的 IAAA 绑定密码并 Base64 编码，以表单格式 POST `oauthlogin.do`；显式提交 `remTrustChk=false`，并使用 `appid=resource`、`redirUrl=https://passport.pku.edu.cn`。
 5. 使用同一 CookieJar 请求 Passport 票据回调，按 ZIP 的规则最多跟随四次页面跳转；必要时再 GET `/auth/app-login`。
 6. 安全读取响应中的 JSON、`bridge.PKULoginSuccess(...)` 字面量、JSON.parse／stringify 包装或赋值变量，取得 App `_token` 和媒体 `_cookieToken`。不执行网页 JavaScript。
 

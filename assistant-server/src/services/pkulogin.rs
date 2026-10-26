@@ -144,7 +144,7 @@ pub async fn login_iaaa_and_get_cookies(
 
     // Step 1: IAAA oauthlogin -> token
     let form_body = format!(
-        "appid={}&userName={}&password={}&redirUrl={}",
+        "appid={}&userName={}&password={}&remTrustChk=false&redirUrl={}",
         urlencoding::encode(BLACKBOARD_APP_ID),
         urlencoding::encode(username),
         urlencoding::encode(password),

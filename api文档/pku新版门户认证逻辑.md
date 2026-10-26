@@ -1,5 +1,5 @@
 【重要提醒】
-本文档参照20251215版的认证逻辑编写，确保在OAuthLogin.js认证请求版本为"20251215"的情况下可正常使用，其余情况请自行验证。
+本文档参照20251215版的认证逻辑编写。其余认证行为如有变化，请自行验证。
 
 流程：IAAA账密认证获取token→相关app使用token登录
 
@@ -7,9 +7,15 @@
 ```
 curl "https://iaaa.pku.edu.cn/iaaa/oauthlogin.do" \
   -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
-  --data-raw "appid=【此处填入应用id】blackboard&userName=【此处填入学号】&password=【此处填入密码（明文）】&redirUrl=【填入重定向url】"
+  --data-urlencode "appid=【填入应用id】" \
+  --data-urlencode "userName=【此处填入学号】" \
+  --data-urlencode "password=【此处填入密码（明文或RSA加密后的Base64密文）】" \
+  --data-urlencode "remTrustChk=false" \
+  --data-urlencode "redirUrl=【填入重定向url】"
 ```
 注意，此处的应用id会和重定向url在后端进行一致性校验，二者必须全部正确且匹配
+
+提交格式为 `application/x-www-form-urlencoded`，必须显式包含 `remTrustChk`，值为字符串 `false`（不是 JSON 布尔值，也不要省略）。上例为教学网配置：`appid=blackboard`，`redirUrl` 使用上面的 HTTP 地址；其他应用应替换为各自匹配的应用 id 与回调地址。所有字段值均需进行表单编码，尤其是密码密文中的 `+`、`/`、`=` 等字符；上例的 `--data-urlencode` 会自动完成编码。
 
 返回格式如：
 
