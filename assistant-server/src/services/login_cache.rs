@@ -59,7 +59,6 @@ impl LoginCacheEntry {
     }
     pub fn checked<T>(&self, result: Result<T, String>) -> Result<T, String> {
         if result.is_err() {
-            super::user_agents::record_failure(&self.user_agent,"教学网会话操作失败");
             self.invalidate();
         }
         result

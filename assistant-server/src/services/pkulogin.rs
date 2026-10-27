@@ -141,8 +141,8 @@ where F:FnOnce()->Fut, Fut:std::future::Future<Output=Result<PkuLoginResult,Stri
     let lock=cache.login_lock(username).await;
     let _guard=lock.lock().await;
     if let Some(entry)=cache.get(username).await {
-        if super::user_agents::is_failed(&entry.user_agent)? {
-            tracing::warn!(user_agent=%entry.user_agent,"缓存会话的 User-Agent 已在失败名单中，重新登录");
+        if !super::user_agents::is_windows(&entry.user_agent) {
+            tracing::warn!(user_agent=%entry.user_agent,"缓存会话的 User-Agent 不是 Windows 设备，重新登录");
             entry.invalidate();
         } else {
             tracing::info!(user_agent=%entry.user_agent,"复用教学网缓存会话，使用 User-Agent（完整值）");
@@ -157,7 +157,6 @@ pub async fn login_iaaa_and_get_cookies(username: &str, password: &str) -> Resul
     let user_agent = random_user_agent("./user_agents.txt.gz")?;
     tracing::info!(user_agent=%user_agent,"教学网登录使用 User-Agent（完整值）");
     let result = login_with_user_agent(username, password, user_agent.clone()).await;
-    if result.is_err() { super::user_agents::record_failure(&user_agent,"教学网登录流程失败"); }
     result
 }
 
@@ -345,7 +344,7 @@ mod session_tests {
     fn test_session() -> PkuLoginResult {
         let path = std::env::temp_dir().join(format!("pku-auth-test-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&path, "cookies").unwrap();
-        PkuLoginResult::new(path, "test-agent".into())
+        PkuLoginResult::new(path, "Windows test-agent".into())
     }
 
     #[tokio::test]
@@ -364,7 +363,7 @@ mod session_tests {
         let expected=cookie.clone();
         let session=cached_teaching_login("ticket-test",&cache,|| {
             iaaa_calls+=1;
-            async {Ok(PkuLoginResult::new(cookie,format!("successful-ua-{}",uuid::Uuid::new_v4())))}
+            async {Ok(PkuLoginResult::new(cookie,format!("Windows successful-ua-{}",uuid::Uuid::new_v4())))}
         }).await.unwrap();
         assert_eq!(iaaa_calls,2);
         assert_eq!(session.cookie_file,expected);
@@ -375,17 +374,16 @@ mod session_tests {
     }
 
     #[tokio::test]
-    async fn quarantined_cached_user_agent_requires_a_fresh_login() {
+    async fn non_windows_cached_user_agent_requires_a_fresh_login() {
         let cache=LoginCache::new(60);
         let dir=tempdir::TempDir::new("ua-cache").unwrap();
         let old=dir.path().join("old.txt");let fresh=dir.path().join("new.txt");
         std::fs::write(&old,"old cookie").unwrap();std::fs::write(&fresh,"new cookie").unwrap();
         let failed_ua=format!("failed-cached-ua-{}",uuid::Uuid::new_v4());
         cache.insert("ua-test",PkuLoginResult::new(old.clone(),failed_ua.clone())).await;
-        super::super::user_agents::record_failure(&failed_ua,"test failure");
         let expected=fresh.clone();
         let entry=cached_teaching_login("ua-test",&cache,||async {
-            Ok(PkuLoginResult::new(fresh,format!("fresh-ua-{}",uuid::Uuid::new_v4())))
+            Ok(PkuLoginResult::new(fresh,format!("Windows fresh-ua-{}",uuid::Uuid::new_v4())))
         }).await.unwrap();
         assert_eq!(entry.cookie_file,expected);
         assert_ne!(entry.user_agent,failed_ua);
@@ -519,7 +517,7 @@ mod session_tests {
             requests
         });
         let dir = tempdir::TempDir::new("pku-session-test").unwrap();
-        let login = PkuLoginResult::new(dir.path().join("cookies.txt"), "session-test-agent".into());
+        let login = PkuLoginResult::new(dir.path().join("cookies.txt"), "Windows session-test-agent".into());
         download_in_session(&login, &format!("{base}/login")).unwrap();
         let cache = LoginCache::new(60);
         let login = cache.insert("test-user", login).await;
@@ -530,7 +528,6 @@ mod session_tests {
         assert_eq!(download_playback_key_in_session(&login, &format!("{base}/key")).unwrap(), b"0123456789abcdef");
         assert!(cache.get("test-user").await.is_some());
         assert!(download_in_session(&login, &format!("{base}/denied")).unwrap_err().contains("401"));
-        assert!(super::super::user_agents::is_failed(&login.user_agent).unwrap());
         assert!(cache.get("test-user").await.is_none());
         assert!(login.cookie_file.is_file());
         let requests = server.join().unwrap();
@@ -582,17 +579,18 @@ fn curl_user_agent(args: &[String]) -> Option<&str> {
 }
 
 pub(crate) fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
+    if let Some(ua)=curl_user_agent(args) {
+        super::user_agents::ensure_teaching(ua).map_err(|error|format!("{AUTH_EXPIRED}：{error}"))?;
+    }
     let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = Command::new(curl_cmd)
         .args(["--fail", "--connect-timeout", "15", "--max-time", "60"])
         .args(args).output().map_err(|error| {
-            if let Some(ua)=curl_user_agent(args) { super::user_agents::record_failure(ua,"curl 调用失败"); }
             format!("调用 {curl_cmd} 失败: {error}")
         })?;
     if !output.status.success() {
         if let Some(ua)=curl_user_agent(args) {
-            tracing::warn!(user_agent=%ua,curl_exit_code=?output.status.code(),"curl 请求失败，记录完整 User-Agent");
-            super::user_agents::record_failure(ua,"curl 请求返回非零状态");
+            tracing::warn!(user_agent=%ua,curl_exit_code=?output.status.code(),"curl 请求失败，使用的完整 User-Agent");
         }
         let stderr=String::from_utf8_lossy(&output.stderr);
         return Err(format!("curl 返回非 0: {}",stderr.trim()));

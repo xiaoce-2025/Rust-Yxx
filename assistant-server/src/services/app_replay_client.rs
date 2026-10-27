@@ -20,13 +20,13 @@ pub struct AppReplayClient {
 
 impl AppReplayClient {
     pub async fn start() -> Result<Self, String> {
-        Self::with_user_agent(super::pkulogin::random_user_agent("./user_agents.txt.gz")?)
+        Self::with_user_agent(super::user_agents::choose_app("./user_agents.txt.gz")?)
     }
     pub async fn for_user(user_id: uuid::Uuid) -> Result<Self, String> {
         let saved = super::app_replay_vault::load::<Value>(user_id, "session")?;
         let saved_ua=saved.as_ref().and_then(|session|session["user_agent"].as_str());
-        let reusable=match saved_ua {Some(ua)=>!super::user_agents::is_failed(ua)?,None=>false};
-        let ua=if reusable {saved_ua.unwrap().to_string()} else {super::pkulogin::random_user_agent("./user_agents.txt.gz")?};
+        let reusable=match saved_ua {Some(ua)=>super::user_agents::valid_header(ua),None=>false};
+        let ua=if reusable {saved_ua.unwrap().to_string()} else {super::user_agents::choose_app("./user_agents.txt.gz")?};
         let mut client = Self::with_user_agent(ua)?;
         client.user_id = Some(user_id);
         if let Some(saved) = saved.filter(|_|reusable) {
@@ -154,7 +154,7 @@ impl AppReplayClient {
             .await
             .map_err(|_| "无法连接学校课程服务器，请检查校园网或 VPN")?;
         if !response.status().is_success() {
-            if response.status().as_u16() == 401 {
+            if matches!(response.status().as_u16(),401 | 403) {
                 self.invalid_session
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -174,6 +174,11 @@ impl AppReplayClient {
             serde_json::from_slice(&bytes).map_err(|_| "课程服务器返回了无法识别的数据格式")?;
         if !data.is_object() {
             return Err("课程服务器返回了无法识别的数据格式".into());
+        }
+        let code = data["code"].as_i64().or_else(||data["code"].as_str().and_then(|code|code.parse().ok()));
+        if matches!(code,Some(401 | 403)) {
+            self.invalid_session.store(true,std::sync::atomic::Ordering::Relaxed);
+            return Err("好学 App 登录已过期".into());
         }
         if data["success"] == false {
             return Err(data["message"]
@@ -360,6 +365,44 @@ impl AppReplayClient {
             .as_str()
             .ok_or("对应日期回放缺少地址")?
             .to_string();
+        self.media_from_url(url).await
+    }
+
+    pub async fn prepare_course_lesson(&mut self,user:&crate::store::FileUser,course_name:&str,
+        mapping:&str,date:&str,time:&str)->Result<super::prepared_media::PreparedMedia,String> {
+        date.parse::<chrono::NaiveDate>().map_err(|_|"课节日期无效，无法匹配好学 App 回放")?;
+        tracing::info!(target:"app_replay_auth",user_id=%user.id,%date,"回退前检查好学 App 登录及课程 API 会话状态");
+        let status=self.login_bound(user,&json!({})).await?;
+        if status["data"]["logged_in"]!=true {
+            return Err(format!("请先完成好学 App 登录验证后重试：{}",status["error"].as_str().unwrap_or("App 未登录")));
+        }
+        for attempt in 0..2 {
+            let result=async {
+                let rows=self.scan_date(date,course_name,mapping).await?;
+                let row=matching_course_replay(&rows,time)?;
+                if let Some(error)=row["error"].as_str() {return Err(error.to_string());}
+                let url=row["video_url"].as_str().filter(|url|!url.is_empty()).ok_or("好学 App 未返回有效回放链接")?.to_string();
+                self.media_from_url(url).await
+            }.await;
+            let expired=self.invalid_session.swap(false,std::sync::atomic::Ordering::Relaxed);
+            if expired && attempt==0 {
+                self.user=None;
+                if let Some(id)=self.user_id {super::app_replay_vault::remove(id,"session")?;}
+                tracing::warn!(target:"app_replay_auth","回退获取发现 App 会话过期，重新认证一次");
+                let status=self.login_bound(user,&json!({})).await?;
+                if status["data"]["logged_in"]!=true {
+                    return Err(format!("好学 App 会话已过期，请完成登录验证：{}",status["error"].as_str().unwrap_or("App 未登录")));
+                }
+            } else {
+                if result.is_ok() {tracing::info!(target:"app_replay_auth",user_id=%user.id,"好学 App 回放及会话检查通过");}
+                if expired {self.invalid_session.store(true,std::sync::atomic::Ordering::Relaxed);}
+                return result;
+            }
+        }
+        unreachable!("bounded App authentication refresh")
+    }
+
+    async fn media_from_url(&self,url:String)->Result<super::prepared_media::PreparedMedia,String> {
         let token = self
             .user
             .as_ref()
@@ -369,10 +412,39 @@ impl AppReplayClient {
         let (url, enc_key) = if url.contains(".m3u8") {
             let (url, playlist) = super::prepared_media::public_playlist(&url, 60).await?;
             let uri = super::pkuvideo::key_uri(&url, &playlist)?;
-            let key = super::app_replay_media::fetch_key(&uri, &token, &self.user_agent).await?;
+            let key = super::app_replay_media::fetch_key(&uri, &token, &self.user_agent).await.map_err(|error|{
+                if error.contains("HTTP 401") || error.contains("HTTP 403") {
+                    self.invalid_session.store(true,std::sync::atomic::Ordering::Relaxed);
+                }
+                error
+            })?;
             (url, Some(key))
         } else { (url, None) };
         Ok(super::prepared_media::PreparedMedia { url, enc_key })
+    }
+}
+
+fn replay_start_minutes(time:&str)->Option<i32> {
+    if let Ok(stamp)=time.parse::<i64>() {
+        let dt=if time.len()>=13 {chrono::DateTime::from_timestamp_millis(stamp)} else {chrono::DateTime::from_timestamp(stamp,0)};
+        if let Some(dt)=dt {
+            use chrono::Timelike;
+            let local=dt.with_timezone(&chrono::FixedOffset::east_opt(8*3600).unwrap());
+            return Some((local.hour()*60+local.minute()) as i32);
+        }
+    }
+    let minutes=super::lesson_parser::parse_time_order(time);
+    (minutes>0 && (time.contains('第') || time.contains(':'))).then_some(minutes)
+}
+fn matching_course_replay<'a>(rows:&'a [Value],time:&str)->Result<&'a Value,String> {
+    if rows.is_empty() {return Err("好学 App 中该课程在此日期没有可访问回放".into());}
+    if rows.len()==1 {return Ok(&rows[0]);}
+    let target=replay_start_minutes(time).ok_or("同一天有多节回放，但教学网课节缺少可识别的上课时间")?;
+    let matches:Vec<_>=rows.iter().filter(|row|row["time"].as_str().and_then(replay_start_minutes)==Some(target)).collect();
+    match matches.as_slice() {
+        [row]=>Ok(row),
+        []=>Err("好学 App 回放无法匹配该课节的上课时间".into()),
+        _=>Err("好学 App 有多条同时间回放，无法唯一匹配此课节".into()),
     }
 }
 
@@ -450,7 +522,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn client_is_native_and_does_not_expose_session() {
-        let mut client = AppReplayClient::with_user_agent("test-pool-agent".into()).unwrap();
+        let mut client = AppReplayClient::with_user_agent("Mozilla/5.0 (Linux; Android 14) test-pool-agent".into()).unwrap();
         assert_eq!(
             client.request(json!({"action":"status"})).await.unwrap(),
             json!({"ok":true,"data":{"logged_in":false}})
@@ -460,6 +532,17 @@ mod tests {
         assert!(!status.to_string().contains("secret"));
         assert!(AppReplayClient::with_user_agent("bad\r\nagent".into()).is_err());
     }
+    #[test]
+    fn fallback_matches_course_date_rows_by_period_or_clock_without_guessing() {
+        let rows=vec![json!({"sub_id":"morning","time":"2026-10-13 08:00:00"}),json!({"sub_id":"later","time":"2026-10-13 10:10:00"})];
+        assert_eq!(matching_course_replay(&rows,"第3-4节").unwrap()["sub_id"],"later");
+        assert_eq!(matching_course_replay(&rows,"08:00").unwrap()["sub_id"],"morning");
+        assert!(matching_course_replay(&rows,"第7-9节").is_err());
+        assert!(matching_course_replay(&[],"08:00").is_err());
+        let duplicate=vec![rows[0].clone(),rows[0].clone()];
+        assert!(matching_course_replay(&duplicate,"第1-2节").is_err());
+    }
+
     #[test]
     fn signed_and_video_fallback_match_zip() {
         let params = signed(&[("course_time", "2026-10-13"), ("page", "1")]);

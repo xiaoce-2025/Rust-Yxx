@@ -146,7 +146,7 @@ pub fn sort_lessons(lessons: &mut [LessonInfo]) {
     
 }
 
-fn parse_time_order(time_str: &str) -> i32 {
+pub(crate) fn parse_time_order(time_str: &str) -> i32 {
     let re = regex::Regex::new(r"第(\d+)").unwrap();
     if let Some(captures) = re.captures(time_str) {
         if let Ok(num) = captures[1].parse::<i32>() {
