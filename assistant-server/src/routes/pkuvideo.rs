@@ -7,15 +7,13 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tokio::task;
 use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
     auth::{verify_password, CurrentUser},
-    config::Settings,
     error::ApiError,
-    services::pkuvideo::{run_pipeline, PipelineStatus, PkuVideoJob},
+    services::pkuvideo::{PipelineStatus, PkuVideoJob},
 };
 
 #[derive(Debug, Deserialize)]
@@ -47,6 +45,7 @@ struct CheckM3u8Request {
 struct SubmitResponse {
     job_id: Uuid,
     status: String,
+    status_url: String,
 }
 
 pub fn routes() -> Router<AppState> {
@@ -90,6 +89,7 @@ async fn submit_api(
     Ok(Json(SubmitResponse {
         job_id,
         status: "queued".to_string(),
+        status_url: format!("/api/pkuvideo/jobs/{job_id}"),
     }))
 }
 
@@ -113,6 +113,7 @@ async fn submit_web(
     Ok(Json(SubmitResponse {
         job_id,
         status: "queued".to_string(),
+        status_url: format!("/api/pkuvideo/jobs/{job_id}"),
     }))
 }
 
@@ -190,6 +191,10 @@ async fn reexecute_step(
 
     if job.user_id != current_user.id {
         return Err(ApiError::Forbidden("无权访问".to_string()));
+    }
+
+    if matches!(job.status, PipelineStatus::Pending | PipelineStatus::Running) || job.course_id.is_some() {
+        return Err(ApiError::Conflict("活动任务不能重执行；课节任务请通过课节重新处理接口提交".into()));
     }
 
     // 构建任务目录路径（时间戳_任务ID）
@@ -316,10 +321,13 @@ async fn delete_job(
         }
 
         // 复制需要的信息
-        (job.pdf_path.clone(), job.status.clone())
+        (job.pdf_path.clone(), job.status.clone(), job.course_id.is_none())
     };
 
-    let (pdf_path, job_status) = job_info;
+    let (pdf_path, job_status, charged_storage) = job_info;
+    if matches!(job_status, PipelineStatus::Pending | PipelineStatus::Running) {
+        return Err(ApiError::Conflict("排队或处理中的任务不能删除".into()));
+    }
 
     // 删除任务目录中的文件（通过 pdf_path 的父目录定位）
     if let Some(pdf) = pdf_path {
@@ -344,7 +352,7 @@ async fn delete_job(
     state.store.delete_pkuvideo_job(id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     // 如果任务已完成，返还储存限额
-    if job_status == PipelineStatus::Succeeded {
+    if charged_storage && job_status == PipelineStatus::Succeeded {
         state.store.increase_storage_quota(current_user.id, 1).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
@@ -407,6 +415,9 @@ async fn enqueue_job(
         return Err(ApiError::Forbidden("储存资源限额不足，请删除已完成的任务释放空间".to_string()));
     }
 
+    let media = crate::services::prepared_media::prepare_teaching(&video_url, &pku_auth_one,
+        &pku_auth_two, &state.login_cache, manual_key.as_deref()).await.map_err(ApiError::BadRequest)?;
+
     // 扣除处理限额
     state.store.decrease_processing_quota(user_id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -422,31 +433,11 @@ async fn enqueue_job(
     // 保存到FileStore
     state.store.insert_pkuvideo_job(job).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let state_for_task = state.clone();
-    let state_for_error = state.clone();
-    let user_id_for_task = user_id;
-    task::spawn(async move {
-        if let Err(e) = run_job_pipeline(
-            state_for_task,
-            job_id,
-            user_id_for_task,
-            video_url,
-            pku_auth_one,
-            pku_auth_two,
-            manual_key,
-        )
-        .await
-        {
-            let mut jobs = state_for_error.pkuvideo_jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = PipelineStatus::Failed;
-                job.updated_at = Utc::now();
-                job.error = Some(e);
-                // 保存到FileStore
-                let _ = state_for_error.store.update_pkuvideo_job(job.clone()).await;
-            }
-        }
-    });
+    if let Err(error) = crate::services::video_jobs::enqueue_prepared_job(&state, job_id, user_id, media).await {
+        state.pkuvideo_jobs.write().await.remove(&job_id);
+        let _ = state.store.delete_pkuvideo_job(job_id).await;
+        return Err(ApiError::Internal(error));
+    }
 
     Ok(job_id)
 }
@@ -525,171 +516,6 @@ async fn copy_existing_job(
     state.store.insert_pkuvideo_job(job).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(job_id)
-}
-
-pub async fn run_job_pipeline(
-    state: AppState,
-    job_id: Uuid,
-    user_id: Uuid,
-    video_url: String,
-    pku_auth_one: String,
-    pku_auth_two: String,
-    manual_key: Option<String>,
-) -> Result<(), String> {
-    tracing::info!("run_job_pipeline 开始执行, job_id: {}", job_id);
-    mark_job_running(&state, job_id).await;
-
-    // 获取用户自定义配置（使用 user_id 而不是 job_id）
-    let user_config = state.store.get_config(user_id).await;
-    let merged_settings = merge_with_user_config(&state.settings, &user_config);
-
-    mark_step_running(&state, job_id, 0, "开始下载视频").await;
-    let base_dir = PathBuf::from("./data/pkuvideo_jobs");
-    let replay = state.pkuvideo_jobs.read().await.get(&job_id).and_then(|j| j.manual_replay.clone());
-    let result = async {
-        let app_download = if let Some(replay) = replay {
-            let client = state.app_replay_client(user_id).await?;
-            let user = state.store.get_user(user_id).await.ok_or("用户不存在")?;
-            let status = client.lock().await.login_bound(&user, &serde_json::json!({})).await?;
-            if status["ok"] != true { return Err(status["error"].as_str().unwrap_or("好学认证失败").to_string()); }
-            Some((client, replay))
-        } else { None };
-        run_pipeline(job_id, base_dir, video_url, pku_auth_one, pku_auth_two, &merged_settings, &state.login_cache, manual_key.as_deref(), app_download).await
-    }.await;
-
-    match result {
-        Ok((transcript_path, notes_path, pdf_path)) => {
-            mark_step_success(&state, job_id, 0, "视频下载完成").await;
-            mark_step_success(&state, job_id, 1, "mp3 抽离完成").await;
-            mark_step_success(&state, job_id, 2, "语音转文字完成").await;
-            mark_step_success(&state, job_id, 3, "讲义提取完成").await;
-            mark_step_success(&state, job_id, 4, "PDF 编译完成").await;
-
-            let mut jobs = state.pkuvideo_jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = PipelineStatus::Succeeded;
-                job.updated_at = Utc::now();
-                job.transcript_path = transcript_path;
-                job.notes_path = notes_path;
-                job.pdf_path = pdf_path;
-                // 保存到FileStore
-                let _ = state.store.update_pkuvideo_job(job.clone()).await;
-            }
-            Ok(())
-        }
-        Err(err) => {
-            tracing::error!(%job_id, error=%err, "course processing failed");
-            let (index, message) = parse_step_error(&err);
-            mark_step_failed(&state, job_id, index, &message).await;
-            Err(message)
-        }
-    }
-}
-
-fn parse_step_error(raw: &str) -> (usize, String) {
-    if let Some((step_part, message)) = raw.split_once(';') {
-        if let Some(step) = step_part.strip_prefix("step=") {
-            if let Ok(index) = step.parse::<usize>() {
-                return (index.min(4), message.to_string());
-            }
-        }
-    }
-    (0, raw.to_string())
-}
-
-/// 合并全局配置和用户自定义配置，用户配置优先
-fn merge_with_user_config(
-    global_settings: &Settings,
-    user_config: &Option<crate::store::FileUserConfig>,
-) -> Settings {
-    let mut merged = global_settings.clone();
-
-    if let Some(user_cfg) = user_config {
-        // 阿里云配置覆盖
-        if let Some(model) = &user_cfg.aliyun_model {
-            if !model.is_empty() {
-                merged.paraformer.model = Some(model.clone());
-            }
-        }
-        if let Some(api_key) = &user_cfg.aliyun_api_key {
-            if !api_key.is_empty() {
-                merged.paraformer.api_key = Some(api_key.clone());
-            }
-        }
-        // DeepSeek配置覆盖
-        if let Some(model) = &user_cfg.deepseek_model {
-            if !model.is_empty() {
-                merged.deepseek.model = Some(model.clone());
-            }
-        }
-        if let Some(api_key) = &user_cfg.deepseek_api_key {
-            if !api_key.is_empty() {
-                merged.deepseek.api_key = Some(api_key.clone());
-            }
-        }
-    }
-
-    merged
-}
-
-async fn mark_job_running(state: &AppState, job_id: Uuid) {
-    let mut jobs = state.pkuvideo_jobs.write().await;
-    if let Some(job) = jobs.get_mut(&job_id) {
-        job.status = PipelineStatus::Running;
-        job.updated_at = Utc::now();
-        // 保存到FileStore
-        let _ = state.store.update_pkuvideo_job(job.clone()).await;
-    }
-}
-
-async fn mark_step_running(state: &AppState, job_id: Uuid, index: usize, msg: &str) {
-    let mut jobs = state.pkuvideo_jobs.write().await;
-    if let Some(job) = jobs.get_mut(&job_id) {
-        if let Some(step) = job.steps.get_mut(index) {
-            step.status = PipelineStatus::Running;
-            step.message = msg.to_string();
-            step.started_at = Some(Utc::now());
-        }
-        job.updated_at = Utc::now();
-        // 保存到FileStore
-        let _ = state.store.update_pkuvideo_job(job.clone()).await;
-    }
-}
-
-async fn mark_step_success(state: &AppState, job_id: Uuid, index: usize, msg: &str) {
-    let mut jobs = state.pkuvideo_jobs.write().await;
-    if let Some(job) = jobs.get_mut(&job_id) {
-        if let Some(step) = job.steps.get_mut(index) {
-            step.status = PipelineStatus::Succeeded;
-            step.message = msg.to_string();
-            step.finished_at = Some(Utc::now());
-            if step.started_at.is_none() {
-                step.started_at = step.finished_at;
-            }
-        }
-        job.updated_at = Utc::now();
-        // 保存到FileStore
-        let _ = state.store.update_pkuvideo_job(job.clone()).await;
-    }
-}
-
-async fn mark_step_failed(state: &AppState, job_id: Uuid, index: usize, msg: &str) {
-    let mut jobs = state.pkuvideo_jobs.write().await;
-    if let Some(job) = jobs.get_mut(&job_id) {
-        if let Some(step) = job.steps.get_mut(index) {
-            step.status = PipelineStatus::Failed;
-            step.message = msg.to_string();
-            step.finished_at = Some(Utc::now());
-            if step.started_at.is_none() {
-                step.started_at = step.finished_at;
-            }
-        }
-        job.status = PipelineStatus::Failed;
-        job.updated_at = Utc::now();
-        job.error = Some(msg.to_string());
-        // 保存到FileStore
-        let _ = state.store.update_pkuvideo_job(job.clone()).await;
-    }
 }
 
 async fn download_pdf(

@@ -138,11 +138,7 @@ async fn add(
         .map_err(ApiError::BadRequest)?;
     let lesson_mutex = state.lesson_mutation(current.id).await;
     let _guard = lesson_mutex.lock().await;
-    if state
-        .processing_users
-        .read()
-        .await
-        .contains_key(&current.id)
+    if state.course_busy(current.id, &course_id).await
     {
         return Err(ApiError::BadRequest("请等待当前课节处理完成".into()));
     }
@@ -255,7 +251,8 @@ async fn add(
                     .map_err(|_| ApiError::Internal("返回日期无效".into()))?;
                 use chrono::Datelike;
                 lessons.push(LessonInfo {
-                    id: format!("app_{}", Uuid::new_v4()),
+                enc_key: None,
+                id: format!("app_{}", Uuid::new_v4()),
                     video_url: row["video_url"].as_str().unwrap_or_default().into(),
                     play_url: String::new(),
                     date: date.into(),
@@ -312,11 +309,7 @@ async fn delete_lesson(
     }
     let lesson_mutex = state.lesson_mutation(current.id).await;
     let _guard = lesson_mutex.lock().await;
-    if state
-        .processing_users
-        .read()
-        .await
-        .contains_key(&current.id)
+    if state.course_busy(current.id, &course_id).await
     {
         return Err(ApiError::BadRequest("请等待当前课节处理完成".into()));
     }

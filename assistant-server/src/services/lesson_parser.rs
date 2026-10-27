@@ -45,6 +45,7 @@ pub fn parse_lessons(html: &str, course_id: &str) -> Vec<LessonInfo> {
         };
 
         let lesson = LessonInfo {
+            enc_key: None,
             id: format!("{}_lesson_{}", course_id, index),
             video_url: String::new(),
             play_url,
@@ -209,15 +210,16 @@ mod tests {
 
     #[test]
     fn test_calculate_day_of_week() {
-        assert_eq!(calculate_day_of_week("2026-04-30"), "周三");
-        assert_eq!(calculate_day_of_week("2026-05-01"), "周四");
-        assert_eq!(calculate_day_of_week("2026-05-03"), "周六");
+        assert_eq!(calculate_day_of_week("2026-04-30"), "周四");
+        assert_eq!(calculate_day_of_week("2026-05-01"), "周五");
+        assert_eq!(calculate_day_of_week("2026-05-03"), "周日");
     }
 
     #[test]
     fn test_assign_lesson_numbers() {
         let mut lessons = vec![
             LessonInfo {
+                enc_key: None,
                 id: "test_1".to_string(),
                 video_url: "".to_string(),
                 play_url: "".to_string(),
@@ -229,6 +231,7 @@ mod tests {
                 manual_replay: None,
             },
             LessonInfo {
+                enc_key: None,
                 id: "test_2".to_string(),
                 video_url: "".to_string(),
                 play_url: "".to_string(),
@@ -240,6 +243,7 @@ mod tests {
                 manual_replay: None,
             },
             LessonInfo {
+                enc_key: None,
                 id: "test_3".to_string(),
                 video_url: "".to_string(),
                 play_url: "".to_string(),

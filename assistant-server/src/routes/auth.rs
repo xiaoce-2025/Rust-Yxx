@@ -93,6 +93,7 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
     let now = Utc::now();
 
     let user = FileUser {
+        processing_priority: 5,
         id: user_id,
         username: req.username.trim().to_string(),
         email: req.email.trim().to_string(),

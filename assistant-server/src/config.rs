@@ -98,6 +98,8 @@ pub struct DeepSeekConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PkuVideoConfig {
     #[serde(default = "default_m3u8_concurrency")]
+    pub processing_concurrency: usize,
+    #[serde(default = "default_m3u8_concurrency")]
     pub m3u8_concurrency: usize,
     #[serde(default = "default_m3u8_segment_timeout")]
     pub m3u8_segment_timeout_seconds: u64,
@@ -109,6 +111,7 @@ fn default_m3u8_segment_timeout() -> u64 { 120 }
 impl Default for PkuVideoConfig {
     fn default() -> Self {
         PkuVideoConfig {
+            processing_concurrency: 3,
             m3u8_concurrency: 3,
             m3u8_segment_timeout_seconds: 120,
         }

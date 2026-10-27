@@ -518,6 +518,8 @@
     let pendingDeleteLesson = null;
     let isProcessing = false;
     let processingLessonId = null;
+    const activeLessons = new Set();
+    const lessonPolls = new Set();
     let downloadingLessonId = null;
     let pendingKeyLessonId = null;
 
@@ -867,27 +869,12 @@
         if (resp.success) {
           currentLessons = resp.lessons || [];
 
-          // 恢复处理状态：如果后端有正在处理的课节，自动开始轮询
-          if (resp.processing_video_id) {
-            processingLessonId = resp.processing_video_id;
-            setProcessing(true);
-            renderLessonList(resp);
-            statusEl.textContent = "检测到正在处理的课节，等待完成...";
-            statusEl.className = "status loading";
-            // 异步轮询，不阻塞页面交互
-            pollProcessStatus(resp.processing_video_id, courseId).finally(() => {
-              setProcessing(false);
-              if (processingLessonId === resp.processing_video_id) {
-                processingLessonId = null;
-              }
-              const feedback = statusEl.textContent, feedbackClass = statusEl.className;
-        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
-        statusEl.textContent = feedback; statusEl.className = feedbackClass;
-            });
-          } else {
-            processingLessonId = null;
-            renderLessonList(resp);
+          activeLessons.clear();
+          for (const task of resp.processing_tasks || []) {
+            activeLessons.add(task.lesson_id);
+            pollProcessStatus(task.lesson_id, courseId, task.job_id);
           }
+          renderLessonList(resp);
         } else {
           currentLessons = [];
           processingLessonId = null;
@@ -918,7 +905,7 @@
         lessonListEl.innerHTML = '<div class="status">暂无课节信息，请点击"刷新课节列表"按钮获取</div>';
       } else {
         lessonListEl.innerHTML = lessons.map((lesson, index) => {
-          const isProcessingThisLesson = processingLessonId === lesson.id;
+          const isProcessingThisLesson = activeLessons.has(lesson.id) || processingLessonId === lesson.id;
           const isDownloadingThisLesson = downloadingLessonId === lesson.id;
           return `
             <div class="lesson-item ${lesson.is_processed ? 'processed' : ''}">
@@ -999,138 +986,72 @@
 
     // 轮询任务处理状态（可复用于提交后轮询和页面恢复轮询）
     // courseId 作为参数传入，避免异步执行时 selectedCourse 已改变
-    async function pollProcessStatus(lessonId, courseId) {
-      courseId = courseId || selectedCourse;
-      const maxPolls = 1200; // 最多轮询1小时 (3秒间隔)
-      for (let i = 0; i < maxPolls; i++) {
-        await new Promise(r => setTimeout(r, 3000));
-
-        // 如果用户已切换到其他课程，停止轮询
-        if (selectedCourse !== courseId) {
-          console.log("课程已切换，停止轮询");
-          return;
-        }
-
-        try {
-          const statusResp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos/${lessonId}/process-status`);
-
-          if (statusResp.status === "completed") {
-            statusEl.textContent = "处理完成";
-            statusEl.className = "status success";
-
-            // 刷新页面以获取最新状态
-            setTimeout(() => location.reload(), 500);
-            return;
-          } else if (statusResp.status === "failed") {
-            statusEl.textContent = "处理失败: " + (statusResp.message || "未知错误");
-            statusEl.className = "status error";
-            processingLessonId = null;
-            const feedback = statusEl.textContent, feedbackClass = statusEl.className;
-        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
-        statusEl.textContent = feedback; statusEl.className = feedbackClass;
-            return;
-          } else if (statusResp.status === "idle") {
-            // 后端已无处理状态，刷新列表确认最终结果
-            try {
-              const lessonsResp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos`);
-              if (lessonsResp.lessons) {
-                currentLessons = lessonsResp.lessons;
-              }
-              processingLessonId = lessonsResp.processing_video_id || null;
-            } catch (e) { /* ignore */ }
-            if (!processingLessonId) {
-              statusEl.textContent = "处理完成";
-              statusEl.className = "status success";
-              const feedback = statusEl.textContent, feedbackClass = statusEl.className;
-        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
-        statusEl.textContent = feedback; statusEl.className = feedbackClass;
+    async function pollProcessStatus(lessonId, courseId, taskId) {
+      const key = `${courseId}/${lessonId}`;
+      if (lessonPolls.has(key)) return;
+      lessonPolls.add(key);
+      try {
+        while (selectedCourse === courseId) {
+          await new Promise(r => setTimeout(r, 3000));
+          if (selectedCourse !== courseId) return;
+          try {
+            const task = await api(taskId ? `/api/pkuvideo/jobs/${taskId}` : `/api/pkuvideofullclass/courses/${courseId}/videos/${lessonId}/process-status`);
+            const resp = {
+              status: ({pending:'queued', running:'processing', succeeded:'completed'})[task.status] || task.status,
+              message: task.error || (task.postprocessing ? '正在保存课节笔记…' : task.message)
+            };
+            if (selectedCourse !== courseId) return;
+            if (['completed', 'failed', 'idle'].includes(resp.status)) {
+              activeLessons.delete(lessonId);
+              const latest = await api(`/api/pkuvideofullclass/courses/${courseId}/videos`);
+              if (selectedCourse !== courseId) return;
+              currentLessons = latest.lessons || [];
+              renderLessonList(latest);
+              statusEl.textContent = resp.status === 'failed' ? `处理失败: ${resp.message || '未知错误'}` : '处理完成';
+              statusEl.className = resp.status === 'failed' ? 'status error' : 'status success';
               return;
             }
-          } else {
-            statusEl.textContent = statusResp.message || "正在处理...";
-            statusEl.className = "status loading";
-          }
-        } catch (pollErr) {
-          console.warn("轮询状态失败:", pollErr);
+            statusEl.textContent = resp.message || '队列处理中…';
+            statusEl.className = 'status loading';
+          } catch (error) { console.warn('查询课节状态失败', error); }
         }
-      }
-      // 超时
-      processingLessonId = null;
-      statusEl.textContent = "处理超时，请刷新页面查看结果";
-      statusEl.className = "status error";
-      renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
+      } finally { lessonPolls.delete(key); }
     }
 
     async function handleProcessLesson(lessonId, manualKey) {
-      if (isProcessing) {
-        statusEl.textContent = "请等待当前操作完成";
-        statusEl.className = "status error";
-        return;
-      }
-      if (!selectedCourse) {
-        statusEl.textContent = "请先选择课程";
-        statusEl.className = "status error";
-        return;
-      }
-
-      if (currentLessons.find(l => l.id === lessonId)?.manual_replay && !(await ensureAppLogin())) return;
-      // 立即更新UI，显示处理中
+      if (isProcessing || !selectedCourse || activeLessons.has(lessonId)) return;
+      const courseId = selectedCourse;
+      const lesson = currentLessons.find(l => l.id === lessonId);
+      if (lesson?.manual_replay && !lesson['enc.key'] && !manualKey && !(await ensureAppLogin())) return;
       setProcessing(true);
       processingLessonId = lessonId;
       renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
-      statusEl.textContent = "正在提交任务...";
-      statusEl.className = "status loading";
-
+      statusEl.textContent = '正在获取播放链接和密钥…';
+      statusEl.className = 'status loading';
       try {
-        // 步骤1: 提交任务（立即返回）
-        const body = manualKey ? {manual_key: manualKey} : {};
-        const resp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/process`, "POST", body);
-
+        const resp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos/${lessonId}/process`, 'POST', manualKey ? {manual_key:manualKey} : {});
         if (resp.needs_key) {
-          document.getElementById("keyUrl").href = resp.key_uri;
-          document.getElementById("keyUrl").textContent = resp.key_uri;
-          document.getElementById("manualKey").value = "";
-          document.getElementById("keyModal").style.display = "flex";
+          document.getElementById('keyUrl').href = resp.key_uri;
+          document.getElementById('keyUrl').textContent = resp.key_uri;
+          document.getElementById('manualKey').value = '';
+          document.getElementById('keyModal').style.display = 'flex';
           pendingKeyLessonId = lessonId;
-          setProcessing(false);
-          processingLessonId = null;
-          const feedback = statusEl.textContent, feedbackClass = statusEl.className;
-        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
-        statusEl.textContent = feedback; statusEl.className = feedbackClass;
-          statusEl.textContent = "请粘贴密钥以继续";
-          statusEl.className = "status";
+          statusEl.textContent = '请粘贴密钥以继续';
           return;
         }
-
-        if (!resp.success) {
-          statusEl.textContent = resp.message || "提交失败";
-          statusEl.className = "status error";
-          setProcessing(false);
-          processingLessonId = null;
-          const feedback = statusEl.textContent, feedbackClass = statusEl.className;
-        renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
-        statusEl.textContent = feedback; statusEl.className = feedbackClass;
-          return;
-        }
-
-        statusEl.textContent = "任务已提交，正在后台处理...";
-        statusEl.className = "status loading";
-
-        // 步骤2: 轮询等待处理完成
-        await pollProcessStatus(lessonId, selectedCourse);
-      } catch (err) {
-        statusEl.textContent = "处理失败: " + err.message;
-        statusEl.className = "status error";
+        if (!resp.success) throw new Error(resp.message || '提交失败');
+        activeLessons.add(lessonId);
+        statusEl.textContent = '已加入处理队列，可以继续提交其他课节';
+        pollProcessStatus(lessonId, courseId, resp.job_id);
+      } catch (error) {
+        statusEl.textContent = `提交失败: ${error.message}`;
+        statusEl.className = 'status error';
       } finally {
+        processingLessonId = null;
         setProcessing(false);
-        // 仅当 polling 没有再设置 processingLessonId 时才清空
-        // (pollProcessStatus 内部可能已根据后端状态更新了 processingLessonId)
-        if (processingLessonId === lessonId) {
-          processingLessonId = null;
-        }
-        const feedback = statusEl.textContent, feedbackClass = statusEl.className;
+        const message = statusEl.textContent, className = statusEl.className;
         renderLessonList({ lessons: currentLessons, total: currentLessons.length, processed: currentLessons.filter(l => l.is_processed).length });
-        statusEl.textContent = feedback; statusEl.className = feedbackClass;
+        statusEl.textContent = message; statusEl.className = className;
       }
     }
 

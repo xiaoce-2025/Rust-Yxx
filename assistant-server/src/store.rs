@@ -9,8 +9,12 @@ use uuid::Uuid;
 
 
 
+pub fn default_processing_priority() -> u32 { 5 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileUser {
+    #[serde(default = "default_processing_priority")]
+    pub processing_priority: u32,
     pub id: Uuid,
     pub username: String,
     pub email: String,

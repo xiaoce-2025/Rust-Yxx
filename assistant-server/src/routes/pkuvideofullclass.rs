@@ -10,10 +10,9 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::{
-    app_state::{AppState, ProcessingState},
+    app_state::AppState,
     auth::CurrentUser,
     error::ApiError,
-    routes::pkuvideo::run_job_pipeline,
     services::{
         course_parser, course_storage, lesson_parser, lesson_storage, pkulogin, pkuvideo::{PipelineStatus, PkuVideoJob}, 
         video_downloader
@@ -301,12 +300,13 @@ async fn get_course_videos(
     let manual_attempts = lesson_storage::load_manual_attempts(username, &course_id).map_err(ApiError::Internal)?;
 
     // 检查当前是否有正在处理的课节
-    let processing_video_id = {
-        let processing_users = state.processing_users.read().await;
-        processing_users.get(&current_user.id)
-            .filter(|p| p.course_id == course_id)
-            .map(|p| p.video_id.clone())
-    };
+    let processing_tasks: Vec<_> = state.pkuvideo_jobs.read().await.values()
+        .filter(|j|j.user_id == current_user.id && j.course_id.as_deref() == Some(&course_id)
+            && matches!(j.status, PipelineStatus::Pending | PipelineStatus::Running))
+        .map(|j|serde_json::json!({"job_id":j.id,"lesson_id":j.lesson_id})).collect();
+    let processing_video_ids: Vec<String> = processing_tasks.iter()
+        .filter_map(|j|j["lesson_id"].as_str().map(str::to_string)).collect();
+    let processing_video_id = processing_video_ids.first().cloned();
 
     tracing::info!("用户 {} 课程 {} 加载了 {} 个课节, processing: {:?}", username, course_id, lessons.len(), processing_video_id);
 
@@ -317,7 +317,9 @@ async fn get_course_videos(
         "total": total,
         "processed": processed,
         "all_processed": total > 0 && processed == total,
-        "processing_video_id": processing_video_id
+        "processing_video_id": processing_video_id,
+        "processing_video_ids": processing_video_ids,
+        "processing_tasks": processing_tasks
     })))
 }
 
@@ -328,7 +330,7 @@ async fn refresh_lessons(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let lesson_mutex = state.lesson_mutation(current_user.id).await;
     let _guard = lesson_mutex.lock().await;
-    if state.processing_users.read().await.contains_key(&current_user.id) {
+    if state.course_busy(current_user.id, &course_id).await {
         return Err(ApiError::BadRequest("请等待当前课节处理完成后刷新".into()));
     }
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
@@ -428,6 +430,7 @@ fn merge_lesson_data(new_lessons: &mut Vec<LessonInfo>, existing_lessons: &Vec<L
             tracing::info!("找到匹配的课节: {} {}，保留原有数据", new_lesson.date, new_lesson.time);
             // 保留原有数据，只更新播放链接
             new_lesson.video_url = existing.video_url.clone();
+            new_lesson.enc_key = existing.enc_key.clone();
             new_lesson.is_processed = existing.is_processed;
             new_lesson.tex_filename = existing.tex_filename.clone();
             new_lesson.id = existing.id.clone();
@@ -446,7 +449,7 @@ mod manual_refresh_tests {
 
     #[test]
     fn refresh_retains_manual_origin_and_processed_ids() {
-        let regular = LessonInfo {id:"lesson_9".into(), video_url:"saved".into(), play_url:"old".into(),
+        let regular = LessonInfo {enc_key:None,id:"lesson_9".into(), video_url:"saved".into(), play_url:"old".into(),
             date:"2026-10-12".into(), time:"第1-2节".into(), day_of_week:"周一".into(),
             is_processed:true, tex_filename:Some("saved.tex".into()), manual_replay:None};
         let manual = LessonInfo {id:"app_stable".into(), manual_replay:Some(crate::services::app_replay::ManualReplay {
@@ -531,14 +534,19 @@ async fn refresh_courses(
 }
 
 async fn batch_submit(
-    State(_state): State<AppState>,
-    _current_user: CurrentUser,
-    Json(_req): Json<BatchSubmitRequest>,
+    State(state): State<AppState>, current_user: CurrentUser,
+    Json(req): Json<BatchSubmitRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "job_id": "mock-job-id"
-    })))
+    let mut results = Vec::new();
+    for video_id in req.video_ids {
+        let result = process_lesson(State(state.clone()), axum::extract::Path((req.course_id.clone(),video_id.clone())),
+            current_user.clone(), Json(ProcessLessonRequest { manual_key: None })).await;
+        results.push(match result {
+            Ok(Json(value)) => serde_json::json!({"video_id":video_id,"result":value}),
+            Err(error) => serde_json::json!({"video_id":video_id,"error":error.to_string()}),
+        });
+    }
+    Ok(Json(serde_json::json!({"success":true,"results":results})))
 }
 
 async fn process_lesson(
@@ -549,446 +557,99 @@ async fn process_lesson(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let lesson_mutex = state.lesson_mutation(current_user.id).await;
     let _mutation_guard = lesson_mutex.lock().await;
-    // 后端防并发控制：检查用户是否正在处理
-    {
-        let processing_users = state.processing_users.read().await;
-        if processing_users.contains_key(&current_user.id) {
-            return Err(ApiError::BadRequest("请等待当前操作完成".to_string()));
-        }
+    if state.lesson_busy(current_user.id, &course_id, &video_id).await {
+        return Err(ApiError::BadRequest("该课节已在队列中或正在处理".into()));
     }
-
-    // 设置处理状态
-    {
-        let mut processing_users = state.processing_users.write().await;
-        processing_users.insert(current_user.id, ProcessingState {
-            course_id: course_id.clone(),
-            video_id: video_id.clone(),
-            started_at: chrono::Utc::now(),
-        });
+    let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
+    let username = user.email.split('@').next().unwrap_or_default().to_string();
+    let mut lessons = lesson_storage::load_lessons(&username, &course_id).map_err(ApiError::Internal)?;
+    let index = lessons.iter().position(|l|l.id == video_id)
+        .ok_or_else(||ApiError::BadRequest("课节不存在".into()))?;
+    let supplied_key = req.manual_key.or_else(||lessons[index].enc_key.clone());
+    let media = if !lessons[index].video_url.is_empty() && supplied_key.is_some() {
+        crate::services::prepared_media::prepare_teaching(&lessons[index].video_url, "", "",
+            &state.login_cache, supplied_key.as_deref()).await.map_err(ApiError::BadRequest)?
+    } else if let Some(mut replay) = lessons[index].manual_replay.clone() {
+        if replay.date.is_empty() { replay.date = lessons[index].date.clone(); }
+        let client = state.app_replay_client(current_user.id).await.map_err(ApiError::Internal)?;
+        let mut client = client.lock().await;
+        let status = client.login_bound(&user, &serde_json::json!({})).await.map_err(ApiError::Internal)?;
+        if status["data"]["logged_in"] != true {
+            return Ok(Json(serde_json::json!({"success":false,"needs_app_login":true,
+                "message":status["error"].as_str().unwrap_or("好学认证需要验证码")})));
+        }
+        client.prepare_media(&replay).await.map_err(ApiError::BadRequest)?
+    } else {
+        let password = user.iaaa_encrypted_password.as_deref()
+            .ok_or_else(||ApiError::BadRequest("未绑定IAAA账号，请先绑定".into()))?;
+        let play_url = lessons[index].play_url.clone();
+        if play_url.is_empty() { return Err(ApiError::BadRequest("播放链接为空，请先刷新课节列表".into())); }
+        let mut login = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, password, &state.login_cache)
+            .await.map_err(ApiError::BadRequest)?;
+        let (url, key_uri, key) = pkulogin::session_operation(&mut login, &username, password, &state.login_cache, |session| {
+            // Retry the entire watching-page -> signed URL -> key transaction after authentication expires.
+            let url = video_downloader::get_video_download_url(&play_url, session)?;
+            if !url.contains(".m3u8") { return Ok((url, String::new(), Ok(None))); }
+            if let Some(key) = &supplied_key {
+                crate::services::prepared_media::decode_key(key)?;
+                return Ok((url, String::new(), Ok(Some(key.clone()))));
+            }
+            let (uri, key) = crate::services::pkuvideo::fetch_m3u8_key_in_session(&url, session)?;
+            if let Err(error) = &key { if pkulogin::is_auth_error(error) { return Err(error.clone()); } }
+            Ok((url, uri, key.map(Some)))
+        }).await.map_err(ApiError::BadRequest)?;
+        lessons[index].video_url = url.clone();
+        match key {
+            Ok(enc_key) => crate::services::prepared_media::PreparedMedia { url, enc_key },
+            Err(_) => {
+                lesson_storage::save_lessons(&username, &course_id, &lessons).map_err(ApiError::Internal)?;
+                return Ok(Json(serde_json::json!({"success":true,"needs_key":true,"key_uri":key_uri,"video_url":url})));
+            }
+        }
+    };
+    lessons[index].video_url = media.url.clone();
+    lessons[index].enc_key = media.enc_key.clone();
+    lesson_storage::save_lessons(&username, &course_id, &lessons).map_err(ApiError::Internal)?;
+    let job_id = Uuid::new_v4();
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let mut job = PkuVideoJob::new(job_id, current_user.id, media.url.clone(),
+        format!("./data/pkuvideo_jobs/{timestamp}_{job_id}"));
+    job.course_id = Some(course_id.clone());
+    job.lesson_id = Some(video_id.clone());
+    state.store.insert_pkuvideo_job(job.clone()).await.map_err(|e|ApiError::Internal(e.to_string()))?;
+    state.pkuvideo_jobs.write().await.insert(job_id, job);
+    if let Err(error) = crate::services::video_jobs::enqueue_prepared_job(&state, job_id, current_user.id, media).await {
+        state.pkuvideo_jobs.write().await.remove(&job_id);
+        let _ = state.store.delete_pkuvideo_job(job_id).await;
+        return Err(ApiError::Internal(error));
     }
-
-    // 以下为同步准备阶段：获取下载链接、提交任务
-    // 如果此阶段失败，需要手动清理 processing_users
-    let result = async {
-        let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
-            tracing::error!("用户不存在: {}", current_user.id);
-            ApiError::Internal("用户不存在".to_string())
-        })?;
-
-        let username = user.email.split('@').next().ok_or_else(|| {
-            tracing::error!("邮箱格式无效: {}", user.email);
-            ApiError::BadRequest("无效的邮箱格式".to_string())
-        })?.to_string();
-
-        let password = match user.iaaa_encrypted_password.clone() {
-            Some(p) => p,
-            None => {
-                tracing::warn!("用户未绑定IAAA账号: {}", current_user.id);
-                return Err(ApiError::BadRequest("未绑定IAAA账号，请先绑定".to_string()));
-            }
-        };
-
-        let mut lessons = lesson_storage::load_lessons(&username, &course_id)
-            .map_err(|e| {
-                tracing::error!("加载课节信息失败: {}", e);
-                ApiError::Internal(format!("加载课节信息失败: {}", e))
-            })?;
-
-        let lesson_index = lessons.iter().position(|l| l.id == video_id);
-
-        if lesson_index.is_none() {
-            return Err(ApiError::BadRequest("课节不存在".to_string()));
-        }
-
-        let lesson_index = lesson_index.unwrap();
-
-        if let Some(mut replay) = lessons[lesson_index].manual_replay.clone() {
-            if replay.date.is_empty() { replay.date = lessons[lesson_index].date.clone(); }
-            let client = state.app_replay_client(current_user.id).await.map_err(ApiError::Internal)?;
-            let status = client.lock().await.login_bound(&user, &serde_json::json!({})).await.map_err(ApiError::Internal)?;
-            if status["data"]["logged_in"] != true {
-                state.processing_users.write().await.remove(&current_user.id);
-                return Ok(Json(serde_json::json!({"success":false,"needs_app_login":true,
-                    "message":status["error"].as_str().unwrap_or("好学认证需要验证码")})));
-            }
-            let job_id = enqueue_job_without_limit(&state, current_user.id,
-                &lessons[lesson_index].video_url, &username, &password, None, Some(replay)).await?;
-            tokio::spawn(background_post_process(state.clone(), job_id, username,
-                course_id.clone(), video_id.clone(), current_user.id));
-            return Ok(Json(serde_json::json!({"success":true,"video_id":video_id,
-                "job_id":job_id.to_string(),"status":"processing","message":"正在通过好学 App 下载并处理"})));
-        }
-
-        // 每次自动获取密钥前都访问观看页，不能因缓存了下载链接而跳过鉴权。
-        let mut playback_session = None;
-        if lessons[lesson_index].video_url.is_empty() || req.manual_key.is_none() {
-            tracing::info!("课节 {} 访问观看页并刷新下载链接", video_id);
-
-            let mut login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
-                .map_err(|e| {
-                    tracing::error!("IAAA登录失败: {}", e);
-                    ApiError::BadRequest(format!("IAAA登录失败: {}", e))
-                })?;
-            if !lessons[lesson_index].play_url.is_empty() {
-                tracing::info!("尝试获取下载链接，播放链接: {}", lessons[lesson_index].play_url);
-
-                match pkulogin::session_operation(&mut login_result, &username, &password, &state.login_cache,
-                    |login| video_downloader::get_video_download_url(&lessons[lesson_index].play_url, login)).await {
-                    Ok(download_url) => {
-                        lessons[lesson_index].video_url = download_url;
-                        tracing::info!("成功获取下载链接: {}", lessons[lesson_index].video_url);
-                    }
-                    Err(e) => {
-                        tracing::warn!("获取下载链接失败: {}", e);
-                        return Err(ApiError::Internal(format!("获取下载链接失败: {}", e)));
-                    }
-                }
-            } else {
-                tracing::warn!("课节 {} 播放链接为空，无法获取下载链接", video_id);
-                login_result.invalidate();
-                return Err(ApiError::BadRequest("播放链接为空，请先刷新课节列表".to_string()));
-            }
-
-            playback_session = Some(login_result);
-            lesson_storage::save_lessons(&username, &course_id, &lessons)
-                .map_err(|e| {
-                    tracing::error!("保存课节信息失败: {}", e);
-                    ApiError::Internal(format!("保存课节信息失败: {}", e))
-                })?;
-        } else {
-            tracing::info!("课节 {} 已有下载链接，跳过获取", video_id);
-        }
-
-        let video_url = lessons[lesson_index].video_url.clone();
-
-        // 步骤2: 提交pkuvideo任务（不扣除限额）
-        if video_url.is_empty() {
-            return Err(ApiError::Internal("下载链接为空，无法提交任务".to_string()));
-        }
-
-        tracing::info!("提交pkuvideo任务，视频URL: {}", video_url);
-
-        // 登录、观看页、播放列表和密钥请求使用同一个 Cookie jar 和 User-Agent。
-        let mut resolved_key = req.manual_key.clone();
-        if video_url.contains(".m3u8") && resolved_key.is_none() {
-            let login = playback_session.as_mut().ok_or_else(||
-                ApiError::Internal("缺少观看页登录会话".to_string()))?;
-            let (key_uri, key_result) = pkulogin::session_operation(
-                login, &username, &password, &state.login_cache, |session| {
-                    let (uri, key) = crate::services::pkuvideo::fetch_m3u8_key_in_session(&video_url, session)?;
-                    if let Err(ref error) = key {
-                        if pkulogin::is_auth_error(error) { return Err(error.clone()); }
-                    }
-                    Ok((uri, key))
-                },
-            ).await.map_err(|e| ApiError::BadRequest(format!("获取播放列表失败: {}", e)))?;
-            match key_result {
-                Ok(key) => resolved_key = Some(key),
-                Err(e) => {
-                    tracing::warn!("自动获取密钥失败: {}", e);
-                    let mut processing_users = state.processing_users.write().await;
-                    processing_users.remove(&current_user.id);
-                    return Ok(Json(serde_json::json!({
-                        "success": true,
-                        "needs_key": true,
-                        "key_uri": key_uri,
-                        "video_url": video_url,
-                    })));
-                }
-            }
-        }
-
-        let job_id = enqueue_job_without_limit(
-            &state,
-            current_user.id,
-            &video_url,
-            &username,
-            &password,
-            resolved_key.as_deref(),
-            None,
-        ).await?;
-
-        tracing::info!("任务提交成功，job_id: {}，启动后台后处理任务", job_id);
-
-        // 步骤3: 启动后台任务等待完成并执行后处理（不受客户端连接影响）
-        tokio::spawn(background_post_process(
-            state.clone(),
-            job_id,
-            username,
-            course_id.clone(),
-            video_id.clone(),
-            current_user.id,
-        ));
-
-        Ok(Json(serde_json::json!({
-            "success": true,
-            "message": "任务已提交，正在后台处理",
-            "video_id": video_id,
-            "job_id": job_id.to_string(),
-            "status": "processing"
-        })))
-    }.await;
-
-    // 如果在准备阶段就失败了（还没spawn后台任务），需要清理处理状态
-    if result.is_err() {
-        let mut processing_users = state.processing_users.write().await;
-        processing_users.remove(&current_user.id);
-    }
-
-    result
+    Ok(Json(serde_json::json!({"success":true,"job_id":job_id,"task_id":job_id,
+        "status_url":format!("/api/pkuvideo/jobs/{job_id}"),
+        "status":"queued","message":"已加入视频处理队列"})))
 }
 
-/// 查询任务处理状态（供前端轮询）
 async fn get_process_status(
     State(state): State<AppState>,
+    axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // 检查用户是否正在处理
-    let processing = {
-        let processing_users = state.processing_users.read().await;
-        processing_users.get(&current_user.id).cloned()
-    };
-
-    if let Some(_proc_state) = processing {
-        // 用户有正在处理的任务，查询对应的job状态
-        let jobs = state.pkuvideo_jobs.read().await;
-        // 找到该用户的最新任务
-        let user_job = jobs.values()
-            .filter(|j| j.user_id == current_user.id)
-            .max_by_key(|j| j.created_at);
-
-        if let Some(job) = user_job {
-            let (status_str, message) = match &job.status {
-                PipelineStatus::Pending => ("processing", "任务等待中...".to_string()),
-                PipelineStatus::Running => {
-                    // 找到当前正在执行的步骤
-                    let current_step = job.steps.iter()
-                        .find(|s| s.status == PipelineStatus::Running)
-                        .map(|s| s.message.clone())
-                        .unwrap_or_else(|| "处理中...".to_string());
-                    ("processing", current_step)
-                }
-                PipelineStatus::Succeeded => ("completed", "处理完成".to_string()),
-                PipelineStatus::Failed => ("failed", job.error.clone().unwrap_or_else(|| "未知错误".to_string())),
-            };
-
-            return Ok(Json(serde_json::json!({
-                "status": status_str,
-                "message": message,
-                "job_id": job.id.to_string(),
-                "steps": job.steps.iter().map(|s| {
-                    serde_json::json!({
-                        "name": s.name,
-                        "status": format!("{:?}", s.status).to_lowercase(),
-                        "message": s.message,
-                    })
-                }).collect::<Vec<_>>()
-            })));
-        } else {
-            // 有processing状态但找不到job — 可能还在准备阶段
-            return Ok(Json(serde_json::json!({
-                "status": "processing",
-                "message": "正在准备任务...",
-            })));
-        }
+    let jobs = state.pkuvideo_jobs.read().await;
+    if let Some(job) = jobs.values().filter(|j|j.user_id == current_user.id
+        && j.course_id.as_deref() == Some(&course_id) && j.lesson_id.as_deref() == Some(&video_id))
+        .max_by_key(|j|j.created_at) {
+        let (status, message) = match job.status {
+            PipelineStatus::Pending => ("queued", "队列等待中".to_string()),
+            PipelineStatus::Running => ("processing", if job.postprocessing {"正在保存课节笔记"} else {"正在处理视频"}.to_string()),
+            PipelineStatus::Succeeded => ("completed", "处理完成".to_string()),
+            PipelineStatus::Failed => ("failed", job.error.clone().unwrap_or_default()),
+        };
+        return Ok(Json(serde_json::json!({"status":status,"message":message,"job_id":job.id,"priority":job.priority,"steps":job.steps,"postprocessing":job.postprocessing,"result":job.course_notes_path})));
     }
-
-    // 没有正在处理的任务，检查课节是否已处理完成
-    Ok(Json(serde_json::json!({
-        "status": "idle",
-        "message": "无正在处理的任务",
-    })))
-}
-
-async fn enqueue_job_without_limit(
-    state: &AppState,
-    user_id: Uuid,
-    video_url: &str,
-    pku_auth_one: &str,
-    pku_auth_two: &str,
-    manual_key: Option<&str>,
-    manual_replay: Option<crate::services::app_replay::ManualReplay>,
-) -> Result<Uuid, ApiError> {
-    let job_id = Uuid::new_v4();
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let artifacts_dir = format!("./data/pkuvideo_jobs/{}_{}", timestamp, job_id);
-    
-    let mut job = PkuVideoJob::new(job_id, user_id, video_url.to_string(), artifacts_dir.clone());
-    job.manual_replay = manual_replay;
-    
-    // 保存到内存和文件存储
-    state.pkuvideo_jobs.write().await.insert(job_id, job.clone());
-    state.store.insert_pkuvideo_job(job).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    tracing::info!("任务已创建并保存, job_id: {}, artifacts_dir: {}", job_id, artifacts_dir);
-
-    // 异步执行任务（不扣除限额）
-    let state_clone = state.clone();
-    let user_id_clone = user_id;
-    let video_url_clone = video_url.to_string();
-    let pku_auth_one_clone = pku_auth_one.to_string();
-    let pku_auth_two_clone = pku_auth_two.to_string();
-
-    let manual_key_clone = manual_key.map(|s| s.to_string());
-
-    tokio::spawn(async move {
-        tracing::info!("开始异步执行任务, job_id: {}", job_id);
-        let result = run_job_pipeline(state_clone, job_id, user_id_clone, video_url_clone, pku_auth_one_clone, pku_auth_two_clone, manual_key_clone).await;
-        if result.is_ok() {
-            tracing::info!("任务执行成功, job_id: {}", job_id);
-        } else {
-            tracing::error!("任务执行失败, job_id: {}, error: {:?}", job_id, result.err());
-        }
-    });
-
-    Ok(job_id)
-}
-
-struct JobResult {
-    success: bool,
-    message: String,
-    notes_path: Option<String>,
-    artifacts_dir: Option<String>,
-}
-
-/// 后台任务：等待任务完成并执行后处理（复制tex、清理资源）
-/// 此任务独立于HTTP客户端连接，即使客户端断开也会继续执行
-async fn background_post_process(
-    state: AppState,
-    job_id: Uuid,
-    username: String,
-    course_id: String,
-    video_id: String,
-    user_id: Uuid,
-) {
-    tracing::info!("[后台任务] 开始等待任务 {} 完成...", job_id);
-
-    // 等待任务完成
-    let max_wait_seconds = 3600u64;
-    let check_interval_ms = 3000u64;
-    let max_checks = max_wait_seconds * 1000 / check_interval_ms;
-
-    let job_result = 'wait: {
-        for _ in 0..max_checks {
-            {
-                let jobs = state.pkuvideo_jobs.read().await;
-                if let Some(job) = jobs.get(&job_id) {
-                    match job.status {
-                        PipelineStatus::Succeeded => {
-                            break 'wait Ok(JobResult {
-                                success: true,
-                                message: "任务成功完成".to_string(),
-                                notes_path: job.notes_path.clone(),
-                                artifacts_dir: Some(job.artifacts_dir.clone()),
-                            });
-                        }
-                        PipelineStatus::Failed => {
-                            let error_msg = job.error.clone().unwrap_or_else(|| "未知错误".to_string());
-                            break 'wait Ok(JobResult {
-                                success: false,
-                                message: error_msg,
-                                notes_path: None,
-                                artifacts_dir: Some(job.artifacts_dir.clone()),
-                            });
-                        }
-                        _ => {
-                            // 任务仍在执行，继续等待
-                        }
-                    }
-                }
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
-        }
-        Err(ApiError::Internal("任务执行超时".to_string()))
-    };
-
-    match job_result {
-        Ok(result) if result.success => {
-            tracing::info!("[后台任务] 任务 {} 执行成功，开始后处理", job_id);
-
-            // 复制tex文件到course_data目录
-            if let Some(notes_path) = &result.notes_path {
-                let base_dir = PathBuf::from("./data/pkuvideo_jobs");
-                let src_path = base_dir.join(notes_path);
-                let lesson_mutex = state.lesson_mutation(user_id).await;
-                let _guard = lesson_mutex.lock().await;
-                if let Err(error) = lesson_storage::install_lesson_notes(&username, &course_id, &video_id, &src_path) {
-                    tracing::error!("[后台任务] 保存顺序笔记失败，保留任务资源: {}", error);
-                    let mut jobs = state.pkuvideo_jobs.write().await;
-                    if let Some(job) = jobs.get_mut(&job_id) {
-                        job.status = PipelineStatus::Failed;
-                        job.error = Some(error);
-                        let _ = state.store.update_pkuvideo_job(job.clone()).await;
-                    }
-                    state.processing_users.write().await.remove(&user_id);
-                    return;
-                }
-            } else {
-                tracing::warn!("[后台任务] 任务完成但未生成tex文件");
-            }
-
-            // 删除pkuvideo对应的资源
-            if let Some(artifacts_dir) = &result.artifacts_dir {
-                match std::fs::remove_dir_all(artifacts_dir) {
-                    Ok(_) => tracing::info!("[后台任务] 已清理pkuvideo任务资源: {}", artifacts_dir),
-                    Err(e) => tracing::warn!("[后台任务] 清理pkuvideo任务资源失败: {}", e),
-                }
-            }
-
-            // 删除内存中的任务记录
-            {
-                let mut jobs = state.pkuvideo_jobs.write().await;
-                jobs.remove(&job_id);
-            }
-            if let Err(e) = state.store.delete_pkuvideo_job(job_id).await {
-                tracing::error!("[后台任务] 删除任务记录失败: {}", e);
-            }
-
-            tracing::info!("[后台任务] 任务 {} 后处理完成", job_id);
-        }
-        Ok(result) => {
-            tracing::error!("[后台任务] 任务 {} 执行失败: {}", job_id, result.message);
-
-            // 失败时也清理资源
-            if let Some(artifacts_dir) = &result.artifacts_dir {
-                match std::fs::remove_dir_all(artifacts_dir) {
-                    Ok(_) => tracing::info!("[后台任务] 已清理失败任务资源: {}", artifacts_dir),
-                    Err(e) => tracing::warn!("[后台任务] 清理失败任务资源出错: {}", e),
-                }
-            }
-            {
-                let mut jobs = state.pkuvideo_jobs.write().await;
-                jobs.remove(&job_id);
-            }
-            let _ = state.store.delete_pkuvideo_job(job_id).await;
-        }
-        Err(e) => {
-            tracing::error!("[后台任务] 等待任务 {} 完成超时: {}", job_id, e);
-
-            // 超时时也清理资源
-            let jobs = state.pkuvideo_jobs.read().await;
-            let artifacts_dir = jobs.get(&job_id).map(|j| j.artifacts_dir.clone());
-            drop(jobs);
-
-            if let Some(artifacts_dir) = artifacts_dir {
-                match std::fs::remove_dir_all(&artifacts_dir) {
-                    Ok(_) => tracing::info!("[后台任务] 已清理超时任务资源: {}", artifacts_dir),
-                    Err(e) => tracing::warn!("[后台任务] 清理超时任务资源出错: {}", e),
-                }
-            }
-            {
-                let mut jobs = state.pkuvideo_jobs.write().await;
-                jobs.remove(&job_id);
-            }
-            let _ = state.store.delete_pkuvideo_job(job_id).await;
-        }
-    }
-
-    // 清除用户的处理状态
-    {
-        let mut processing_users = state.processing_users.write().await;
-        processing_users.remove(&user_id);
-    }
+    drop(jobs);
+    let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
+    let lessons = lesson_storage::load_lessons(user.email.split('@').next().unwrap_or_default(), &course_id).map_err(ApiError::Internal)?;
+    let lesson = lessons.iter().find(|l|l.id == video_id).ok_or_else(||ApiError::BadRequest("课节不存在".into()))?;
+    Ok(Json(serde_json::json!({"status":if lesson.is_processed {"completed"} else {"idle"}})))
 }
 
 async fn download_lesson_pdf(
@@ -1455,7 +1116,7 @@ async fn reprocess_lesson(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let lesson_mutex = state.lesson_mutation(current_user.id).await;
     let _guard = lesson_mutex.lock().await;
-    if state.processing_users.read().await.contains_key(&current_user.id) {
+    if state.course_busy(current_user.id, &course_id).await {
         return Err(ApiError::BadRequest("请等待当前课节处理完成".into()));
     }
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {

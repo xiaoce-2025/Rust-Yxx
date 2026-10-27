@@ -41,6 +41,8 @@ model = "deepseek-v4-flash"
 
 # PKU Video 配置
 [pkuvideo]
+# 同时运行的视频处理任务上限（下载、转写及讲义生成共用）
+processing_concurrency = 1
 m3u8_concurrency = 4
 m3u8_segment_timeout_seconds = 120
 

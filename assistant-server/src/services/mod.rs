@@ -16,3 +16,9 @@ pub mod pkulogin;
 pub mod scheduler;
 pub mod video_downloader;
 pub mod wechat;
+
+pub mod video_queue;
+pub mod prepared_media;
+
+pub mod video_jobs;
+pub mod course_processing;

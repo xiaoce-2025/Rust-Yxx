@@ -40,6 +40,9 @@ pub(super) fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<(), S
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LessonInfo {
+    /// AES key: 16 UTF-8 bytes, or hex: followed by 32 hex digits.
+    #[serde(default, rename = "enc.key", alias = "enc_key")]
+    pub enc_key: Option<String>,
     pub id: String,
     pub video_url: String,
     pub play_url: String,
@@ -193,7 +196,7 @@ mod tests {
     fn manual_delete_requires_typed_confirmation_and_keeps_query_markers(){
         let user=TestUser(format!("test_manual_delete_{}",uuid::Uuid::new_v4().simple()));let course="c";
         let mut old=Vec::new();let dir=init_course_dir(&user.0,course).unwrap();
-        for(i,id)in ["manual","regular"].iter().enumerate(){let name=super::super::lesson_order::filename(course,i+1);fs::write(dir.join(&name),id).unwrap();old.push(LessonInfo{id:id.to_string(),video_url:String::new(),play_url:String::new(),date:format!("2026-01-0{}",i+1),time:"08:00".into(),day_of_week:String::new(),is_processed:true,tex_filename:Some(name),manual_replay:if i==0{Some(super::super::app_replay::ManualReplay{course_id:"app".into(),sub_id:"sub".into(),date:"2026-01-01".into(),lesson_start:Some(1),lesson_end:Some(2)})}else{None}});}
+        for(i,id)in ["manual","regular"].iter().enumerate(){let name=super::super::lesson_order::filename(course,i+1);fs::write(dir.join(&name),id).unwrap();old.push(LessonInfo{enc_key:None,id:id.to_string(),video_url:String::new(),play_url:String::new(),date:format!("2026-01-0{}",i+1),time:"08:00".into(),day_of_week:String::new(),is_processed:true,tex_filename:Some(name),manual_replay:if i==0{Some(super::super::app_replay::ManualReplay{course_id:"app".into(),sub_id:"sub".into(),date:"2026-01-01".into(),lesson_start:Some(1),lesson_end:Some(2)})}else{None}});}
         save_lessons(&user.0,course,&old).unwrap();
         let attempt=ManualAttempt{date:old[0].date.clone(),status:"success".into(),message:"已添加".into(),updated_at:String::new()};save_manual_attempts(&user.0,course,&[attempt]).unwrap();
         assert!(delete_manual_lesson(&user.0,course,"manual","删除").is_err());
@@ -236,14 +239,17 @@ mod tests {
         let lesson: LessonInfo = serde_json::from_str(r#"{"id":"lesson_1","video_url":"","play_url":"",
             "date":"2026-10-13","time":"08:00","day_of_week":"周二","is_processed":false,"tex_filename":null}"#).unwrap();
         assert!(lesson.manual_replay.is_none());
+        assert!(lesson.enc_key.is_none());
     }
 
     #[test]
     fn test_save_and_load_lessons() {
-        let username = "test_user";
+        let fixture = TestUser(format!("test_lessons_{}", uuid::Uuid::new_v4().simple()));
+        let username = fixture.0.as_str();
         let course_id = "_12345_1";
         let lessons = vec![
             LessonInfo {
+                enc_key: Some("0123456789abcdef".into()),
                 id: "1".to_string(),
                 video_url: "http://example.com/video1.mp4".to_string(),
                 play_url: "http://example.com/watch/1".to_string(),
@@ -255,6 +261,7 @@ mod tests {
                 manual_replay: None,
             },
             LessonInfo {
+                enc_key: None,
                 id: "2".to_string(),
                 video_url: "http://example.com/video2.mp4".to_string(),
                 play_url: "http://example.com/watch/2".to_string(),
@@ -274,6 +281,7 @@ mod tests {
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].id, "1");
+        assert_eq!(loaded[0].enc_key.as_deref(), Some("0123456789abcdef"));
         assert_eq!(loaded[1].is_processed, true);
 
         // 清理测试文件

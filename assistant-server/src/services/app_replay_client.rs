@@ -312,6 +312,11 @@ impl AppReplayClient {
         output: &Path,
         progress: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
     ) -> Result<(), String> {
+        let media = self.prepare_media(replay).await?;
+        super::pkuvideo::download_prepared(&media, output, 3, 120, progress).await
+    }
+
+    pub async fn prepare_media(&mut self, replay: &ManualReplay) -> Result<super::prepared_media::PreparedMedia, String> {
         tracing::info!(target:"app_replay_download",course_id=%replay.course_id,sub_id=%replay.sub_id,date=%replay.date,"refreshing date replay list before playback");
         let date = if replay.date.is_empty() {
             return Err("该手动课节缺少日期，请刷新课节列表后重试".into());
@@ -362,7 +367,13 @@ impl AppReplayClient {
             .and_then(|v| v["_cookieToken"].as_str())
             .unwrap_or("")
             .to_string();
-        super::app_replay_media::download(&url, &token, &self.user_agent, output, progress).await
+        let (url, enc_key) = if url.contains(".m3u8") {
+            let (url, playlist) = super::prepared_media::public_playlist(&url, 60).await?;
+            let uri = super::pkuvideo::key_uri(&url, &playlist)?;
+            let key = super::app_replay_media::fetch_key(&uri, &token, &self.user_agent).await?;
+            (url, Some(key))
+        } else { (url, None) };
+        Ok(super::prepared_media::PreparedMedia { url, enc_key })
     }
 }
 

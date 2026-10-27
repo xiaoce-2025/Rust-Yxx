@@ -1,4 +1,3 @@
-use regex::Regex;
 use serde_json::Value;
 
 pub fn get_video_download_url(play_url: &str, login: &super::pkulogin::PkuLoginResult) -> Result<String, String> {
@@ -9,12 +8,12 @@ pub fn get_video_download_url(play_url: &str, login: &super::pkulogin::PkuLoginR
         tracing::info!("开始获取视频下载链接: {}", play_url);
 
         let first_page = fetch_player_page(play_url, &cookie_file, user_agent)?;
-        save_to_file("/tmp/first_page.html", &first_page);
+
     
         let iframe_src = extract_iframe_src_raw(&first_page);
         let one_time_url = match iframe_src {
             Some(src) => {
-                tracing::info!("找到一次性iframe链接: {}", src);
+                tracing::debug!("找到回放鉴权iframe");
                 src
             }
             None => {
@@ -22,11 +21,13 @@ pub fn get_video_download_url(play_url: &str, login: &super::pkulogin::PkuLoginR
             }
         };
     
-        let redirect_url = follow_redirect(&one_time_url, &cookie_file, user_agent)?;
-        tracing::info!("获取到重定向后的URL: {}", redirect_url);
+        let one_time_url = reqwest::Url::parse(play_url).and_then(|base|base.join(&one_time_url))
+            .map_err(|_|"回放iframe地址无效".to_string())?;
+        let redirect_url = follow_redirect(one_time_url.as_str(), &cookie_file, user_agent)?;
+        tracing::debug!("已完成回放重定向");
     
         let params = extract_player_params(&redirect_url);
-        tracing::info!("提取的参数: {:?}", params);
+
     
         let download_url = fetch_video_download_url(&params, &cookie_file, user_agent)?;
         tracing::info!("最终下载链接: {}", download_url);
@@ -48,52 +49,21 @@ fn fetch_player_page(url: &str, cookie_file: &str, user_agent: &str) -> Result<S
     Ok(page)
 }
 
-fn save_to_file(path: &str, content: &str) {
-    match std::fs::write(path, content) {
-        Ok(_) => tracing::info!("页面内容已保存到: {}", path),
-        Err(e) => tracing::warn!("保存页面失败: {}", e),
-    }
-}
-
 fn extract_iframe_src_raw(html: &str) -> Option<String> {
-    let iframe_re = Regex::new(r#"<iframe[^>]+allowfullscreen="allowfullscreen"[^>]+src="([^"]+)"[^>]*>"#).unwrap();
-    
-    if let Some(captures) = iframe_re.captures(html) {
-        let src = captures[1].to_string();
-        tracing::info!("找到带allowfullscreen的iframe: {}", src);
-        return Some(src);
-    }
-    
-    tracing::warn!("未找到带allowfullscreen属性的iframe，尝试其他方式");
-    let iframe_re2 = Regex::new(r#"<iframe[^>]+src="([^"]+)"[^>]*>"#).unwrap();
-    if let Some(captures) = iframe_re2.captures(html) {
-        let src = captures[1].to_string();
-        if src.contains("player.pku.edu.cn") || src.contains("yjapise.pku.edu.cn") {
-            tracing::info!("找到iframe: {}", src);
-            return Some(src);
-        }
-    }
-    
-    None
+    let document = scraper::Html::parse_document(html);
+    let selector = scraper::Selector::parse("iframe[src]").ok()?;
+    let frames: Vec<_> = document.select(&selector).collect();
+    frames.iter().find(|frame|frame.value().attr("allowfullscreen").is_some())
+        .or_else(||frames.iter().find(|frame|frame.value().attr("src").is_some_and(|src|
+            src.contains("yjapise.pku.edu.cn") || src.contains("onlineroomse.pku.edu.cn") || src.contains("player.pku.edu.cn"))))
+        .and_then(|frame|frame.value().attr("src")).map(str::to_string)
 }
 
 fn extract_player_params(url: &str) -> PlayerParams {
-    let course_id_re = Regex::new(r"course_id=([^&]+)").unwrap();
-    let sub_id_re = Regex::new(r"sub_id=([^&]+)").unwrap();
-    let app_id_re = Regex::new(r"app_id=([^&]+)").unwrap();
-    let auth_data_re = Regex::new(r"auth_data=([^&]+)").unwrap();
-    
-    let course_id = course_id_re.captures(url).map(|c| c[1].to_string()).unwrap_or_default();
-    let sub_id = sub_id_re.captures(url).map(|c| c[1].to_string()).unwrap_or_default();
-    let app_id = app_id_re.captures(url).map(|c| c[1].to_string()).unwrap_or_default();
-    let auth_data = auth_data_re.captures(url).map(|c| c[1].to_string()).unwrap_or_default();
-    
-    PlayerParams {
-        course_id,
-        sub_id,
-        app_id,
-        auth_data,
-    }
+    let pairs: std::collections::HashMap<String,String> = reqwest::Url::parse(url).ok()
+        .map(|u|u.query_pairs().into_owned().collect()).unwrap_or_default();
+    let get = |name: &str| pairs.get(name).map(|s|urlencoding::encode(s).into_owned()).unwrap_or_default();
+    PlayerParams { course_id:get("course_id"), sub_id:get("sub_id"), app_id:get("app_id"), auth_data:get("auth_data") }
 }
 
 fn fetch_video_download_url(params: &PlayerParams, cookie_file: &str, user_agent: &str) -> Result<String, String> {
@@ -106,10 +76,10 @@ fn fetch_video_download_url(params: &PlayerParams, cookie_file: &str, user_agent
         params.course_id, params.sub_id, params.app_id, params.auth_data
     );
     
-    tracing::info!("调用视频信息API: {}", api_url);
+    tracing::debug!("调用视频信息API");
     
     let response = fetch_with_cookie_direct(api_url.as_str(), cookie_file, user_agent)?;
-    save_to_file("/tmp/video_api_response.json", &response);
+
     
     extract_download_url_from_api_response(&response)
 }
@@ -125,6 +95,9 @@ fn extract_download_url_from_api_response(response: &str) -> Result<String, Stri
     let json: Result<Value, _> = serde_json::from_str(response);
 
     if let Ok(data) = json {
+        if matches!(data.get("code").and_then(Value::as_i64), Some(401 | 403)) {
+            return Err(super::pkulogin::AUTH_EXPIRED.into());
+        }
         if let Some(list) = data.get("list").and_then(|v| v.as_array()) {
             if let Some(first_item) = list.first() {
                 if let Some(sub_content) = first_item.get("sub_content").and_then(|v| v.as_str()) {
@@ -181,4 +154,16 @@ pub async fn extract_download_url_from_sub_info(sub_info_json: &str) -> Option<S
     }
 
     None
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+    #[test]
+    fn parses_reordered_iframe_attributes_and_html_entities() {
+        let html = "<iframe hidden src='/storage'></iframe><iframe src='https://yjapise.pku.edu.cn/casapi/?r=x&amp;sign=y' allowfullscreen></iframe>";
+        assert_eq!(extract_iframe_src_raw(html).unwrap(), "https://yjapise.pku.edu.cn/casapi/?r=x&sign=y");
+        let params = extract_player_params("https://onlineroomse.pku.edu.cn/player?course_id=1&sub_id=2&app_id=3&auth_data=a%2Bb%3D");
+        assert_eq!(params.auth_data,"a%2Bb%3D");
+    }
 }

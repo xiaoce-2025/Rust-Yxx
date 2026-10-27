@@ -9,7 +9,6 @@ use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
-use crate::services::pkulogin::{self, PkuLoginResult};
 use crate::services::login_cache::LoginCache;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,6 +45,17 @@ pub struct PkuVideoJob {
     pub error: Option<String>,
     #[serde(default)]
     pub manual_replay: Option<super::app_replay::ManualReplay>,
+    #[serde(default)]
+    pub course_id: Option<String>,
+    #[serde(default)]
+    pub lesson_id: Option<String>,
+    #[serde(default = "crate::store::default_processing_priority")]
+    pub priority: u32,
+    #[serde(default)]
+    pub postprocessing: bool,
+    #[serde(default)]
+    pub course_notes_path: Option<String>,
+
 }
 
 impl PkuVideoJob {
@@ -81,23 +91,21 @@ impl PkuVideoJob {
             pdf_path: None,
             error: None,
             manual_replay: None,
+            course_id: None,
+            lesson_id: None,
+            priority: 5,
+            postprocessing: false,
+            course_notes_path: None,
         }
     }
 }
 
 pub async fn run_pipeline(
-    job_id: Uuid,
+    job_dir: PathBuf,
     base_dir: PathBuf,
-    video_url: String,
-    login_credential_one: String,
-    login_credential_two: String,
     settings: &crate::config::Settings,
-    login_cache: &LoginCache,
-    manual_key: Option<&str>,
-    app_download: Option<(Arc<tokio::sync::Mutex<super::app_replay::AppReplayClient>>, super::app_replay::ManualReplay)>,
+    media: super::prepared_media::PreparedMedia,
 ) -> Result<(Option<String>, Option<String>, Option<String>), String> {
-    let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let job_dir = base_dir.join(format!("{}_{}", timestamp, job_id));
     fs::create_dir_all(&job_dir)
         .await
         .map_err(|e| format!("创建任务目录失败: {e}"))?;
@@ -108,24 +116,9 @@ pub async fn run_pipeline(
     let notes_path = job_dir.join("lecture_notes.tex");
     let pdf_path = job_dir.join("lecture_notes.pdf");
 
-    if let Some((client, replay)) = app_download {
-        client.lock().await.download(&replay, &video_path).await
-            .map_err(|e| format!("step=0;{e}"))?;
-    } else {
-    download_video(
-        &video_url,
-        &video_path,
-        &login_credential_one,
-        &login_credential_two,
-        login_cache,
-        manual_key,
-        settings.pkuvideo.m3u8_concurrency,
-        settings.pkuvideo.m3u8_segment_timeout_seconds,
-        None,
-    )
-        .await
+    download_prepared(&media, &video_path, settings.pkuvideo.m3u8_concurrency,
+        settings.pkuvideo.m3u8_segment_timeout_seconds, None).await
         .map_err(|e| format!("step=0;{e}"))?;
-    }
     extract_mp3(&video_path, &mp3_path)
         .await
         .map_err(|e| format!("step=1;{e}"))?;
@@ -167,29 +160,20 @@ pub async fn run_pipeline(
 }
 
 pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str, login_cache: &LoginCache, manual_key: Option<&str>, concurrency: usize, segment_timeout_secs: u64, progress: Option<Arc<AtomicU8>>) -> Result<(), String> {
-    // Check age only here. Every playlist/key/segment holds this same lease.
-    let mut login = pkulogin::login_iaaa_and_get_cookies_with_cache(username, password, login_cache).await?;
-    for attempt in 0..2 {
-        let result = if url.contains(".m3u8") {
-            download_m3u8_video(url, video_path, &login, manual_key, concurrency, segment_timeout_secs, progress.clone()).await
-        } else {
-            match pkulogin::download_video_in_session(&login, url) {
-                Ok(bytes) => fs::write(video_path, bytes).await.map_err(|e| format!("写入视频文件失败: {e}")),
-                Err(error) => Err(error),
-            }
-        };
-        match result {
-            Err(ref error) if attempt == 0 && pkulogin::is_auth_error(error) => {
-                login.invalidate();
-                login = pkulogin::login_iaaa_and_get_cookies_with_cache(username, password, login_cache).await?;
-            }
-            result => {
-                if result.is_ok() { if let Some(p) = &progress { p.store(100, Ordering::SeqCst); } }
-                return result;
-            }
-        }
+    let media = super::prepared_media::prepare_teaching(url, username, password, login_cache, manual_key).await?;
+    download_prepared(&media, video_path, concurrency, segment_timeout_secs, progress).await
+}
+
+pub async fn download_prepared(media: &super::prepared_media::PreparedMedia, path: &Path,
+    concurrency: usize, timeout_secs: u64, progress: Option<Arc<AtomicU8>>) -> Result<(), String> {
+    if media.url.contains(".m3u8") {
+        download_m3u8_video(&media.url, path, media.enc_key.as_deref(), concurrency, timeout_secs, progress.clone()).await?;
+    } else {
+        let bytes = super::prepared_media::public_bytes(&media.url, timeout_secs).await?;
+        fs::write(path, bytes).await.map_err(|e| e.to_string())?;
     }
-    unreachable!()
+    if let Some(p) = progress { p.store(100, Ordering::SeqCst); }
+    Ok(())
 }
 
 /// 下载并解析 m3u8，返回密钥 URI（用于前端弹窗展示）
@@ -199,13 +183,9 @@ pub async fn fetch_m3u8_key_uri(
     password: &str,
     login_cache: &LoginCache,
 ) -> Result<String, String> {
-    let mut login = pkulogin::login_iaaa_and_get_cookies_with_cache(username, password, login_cache).await?;
-    pkulogin::session_operation(&mut login, username, password, login_cache, |session| {
-        let bytes = pkulogin::download_in_session(session, m3u8_url)?;
-        let content = String::from_utf8(bytes).map_err(|e| format!("m3u8编码错误: {e}"))?;
-        let (key_uri, _, _) = parse_m3u8(&content)?;
-        Ok(resolve_url(&resolve_base_url(m3u8_url), &key_uri))
-    }).await
+    let _ = (username, password, login_cache);
+    let (url, content) = super::prepared_media::public_playlist(m3u8_url, 60).await?;
+    key_uri(&url, &content)
 }
 
 /// Fetch the playlist and its key using the session that visited the watching page.
@@ -213,20 +193,14 @@ pub fn fetch_m3u8_key_in_session(
     m3u8_url: &str,
     login: &crate::services::pkulogin::PkuLoginResult,
 ) -> Result<(String, Result<String, String>), String> {
-    let playlist = crate::services::pkulogin::download_in_session(login, m3u8_url)?;
-    let playlist = login.checked(String::from_utf8(playlist).map_err(|_| "m3u8编码错误".to_string()))?;
-    let (key_uri, _, _) = login.checked(parse_m3u8(&playlist))?;
-    let key_uri = login.checked(reqwest::Url::parse(m3u8_url)
-        .and_then(|url| url.join(&key_uri))
-        .map_err(|_| "m3u8密钥地址无效".to_string()))?
-        .to_string();
-    let key = crate::services::pkulogin::download_in_session(login, &key_uri)
+    let (url, playlist) = super::prepared_media::public_playlist_blocking(m3u8_url)?;
+    let key_uri = key_uri(&url, &playlist)?;
+    let key = crate::services::pkulogin::download_playback_key_in_session(login, &key_uri)
         .and_then(|bytes| {
             if bytes.len() != 16 {
                 return Err(format!("密钥应为16字节，实际为{}字节", bytes.len()));
             }
-            // The teaching site's key is 16 ASCII bytes, not a hex-encoded key.
-            String::from_utf8(bytes).map_err(|_| "密钥不是有效的UTF-8文本".to_string())
+            Ok(super::prepared_media::encode_key(&bytes))
         });
     if key.is_err() { login.invalidate(); }
     Ok((key_uri, key))
@@ -269,7 +243,7 @@ async fn decrypt_aes128_cbc(
 }
 
 /// 解析 m3u8 播放列表，返回 (密钥URI, 显式IV_hex, 分片URL列表)
-fn parse_m3u8(content: &str) -> Result<(String, Option<String>, Vec<String>), String> {
+pub(crate) fn parse_m3u8(content: &str) -> Result<(String, Option<String>, Vec<String>), String> {
     let mut key_uri: Option<String> = None;
     let mut iv: Option<String> = None;
     let mut segments: Vec<String> = Vec::new();
@@ -318,53 +292,27 @@ fn resolve_base_url(m3u8_url: &str) -> String {
 
 /// 将相对路径解析为绝对 URL
 fn resolve_url(base_url: &str, url: &str) -> String {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_string()
-    } else {
-        format!("{}{}", base_url, url.trim_start_matches('/'))
-    }
+    reqwest::Url::parse(base_url).and_then(|base| base.join(url))
+        .map(|url|url.to_string()).unwrap_or_else(|_|url.to_string())
 }
 
 /// 下载 m3u8 视频流并解密保存为 mp4
 async fn download_m3u8_video(
     m3u8_url: &str,
     video_path: &Path,
-    login: &PkuLoginResult,
     manual_key: Option<&str>,
     concurrency: usize,
     segment_timeout_secs: u64,
     progress: Option<Arc<AtomicU8>>,
 ) -> Result<(), String> {
     // 1. 获取 m3u8 播放列表
-    let m3u8_bytes = pkulogin::download_in_session(login, m3u8_url)?;
-    let m3u8_content = login.checked(String::from_utf8(m3u8_bytes)
-        .map_err(|e| format!("m3u8播放列表编码错误: {e}")))?;
-    tracing::info!("获取到m3u8播放列表，长度: {}字节", m3u8_content.len());
-
-    // 2. 解析 m3u8
-    let (key_uri, iv_override, segments) = login.checked(parse_m3u8(&m3u8_content))?;
-    let base_url = resolve_base_url(m3u8_url);
-    let key_uri = resolve_url(&base_url, &key_uri);
-
-    tracing::info!("解析m3u8: 密钥URI={}, 分片数={}", key_uri, segments.len());
-    if segments.is_empty() {
-        return login.checked(Err("m3u8中未找到分片".to_string()));
-    }
-
-    // 3. 下载密钥（跨域，需要显式传 _token Cookie）
-    let key_bytes = if let Some(key_str) = manual_key {
-        tracing::info!("使用手动提供的密钥，长度: {}字节", key_str.len());
-        key_str.as_bytes().to_vec()
-    } else {
-        let bytes = pkulogin::download_token_in_session(login, &key_uri)?;
-        tracing::info!("密钥下载: {}字节", bytes.len());
-        bytes
-    };
-    if manual_key.is_none() && key_bytes.len() != 16 {
-        return login.checked(Err(format!("密钥应为16字节，实际为{}字节", key_bytes.len())));
-    }
-    tracing::info!("密钥下载: {}字节", key_bytes.len());
-
+    let (m3u8_url, m3u8_content) = super::prepared_media::public_playlist(m3u8_url, segment_timeout_secs).await?;
+    let (_, iv_override, segments) = parse_m3u8(&m3u8_content)?;
+    let base_url = resolve_base_url(&m3u8_url);
+    if segments.is_empty() { return Err("m3u8中未找到分片".into()); }
+    let key_bytes = super::prepared_media::decode_key(manual_key.ok_or("缺少解密密钥")?)?;
+    let sequence = m3u8_content.lines().find_map(|line| line.trim().strip_prefix("#EXT-X-MEDIA-SEQUENCE:"))
+        .unwrap_or("0").parse::<u64>().map_err(|_|"无效的分片序号")?;
     // 密钥文件的内容直接作为 AES-128 的 16 字节密钥，需编码为 hex 传给 openssl
     let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
 
@@ -390,7 +338,7 @@ async fn download_m3u8_video(
     tracing::info!("调试文件已保存到: {}", temp_dir.display());
 
     // 5. 并行下载并解密每个分片（带超时和重试）
-    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
     let total = segments.len();
     let mut tasks = futures_util::stream::FuturesUnordered::new();
 
@@ -400,9 +348,8 @@ async fn download_m3u8_video(
         let dec_path = temp_dir.join(format!("seg_{:04}.ts", i));
         let iv_hex = iv_override
             .clone()
-            .unwrap_or_else(|| format!("{:032x}", i as u64));
+            .unwrap_or_else(|| format!("{:032x}", sequence + i as u64));
         let key_hex = key_hex.clone();
-        let login = login.clone();
         let sem = semaphore.clone();
         let dur = Duration::from_secs(segment_timeout_secs);
 
@@ -414,7 +361,7 @@ async fn download_m3u8_video(
             );
 
             let result = timeout(dur, async {
-                let seg_bytes = pkulogin::download_token_in_session(&login, &full_url)?;
+                let seg_bytes = super::prepared_media::public_bytes(&full_url, segment_timeout_secs).await?;
                 tokio::fs::write(&enc_path, &seg_bytes)
                     .await
                     .map_err(|e| format!("写入分片文件失败: {e}"))?;
@@ -460,11 +407,11 @@ async fn download_m3u8_video(
         let dec_path = temp_dir.join(format!("seg_{:04}.ts", *idx));
         let iv_hex = iv_override
             .clone()
-            .unwrap_or_else(|| format!("{:032x}", *idx as u64));
+            .unwrap_or_else(|| format!("{:032x}", sequence + *idx as u64));
         let dur = Duration::from_secs(segment_timeout_secs);
 
         let retry_result = timeout(dur, async {
-            let seg_bytes = pkulogin::download_token_in_session(login, &full_url)?;
+            let seg_bytes = super::prepared_media::public_bytes(&full_url, segment_timeout_secs).await?;
             tokio::fs::write(&enc_path, &seg_bytes)
                 .await
                 .map_err(|e| format!("写入分片文件失败: {e}"))?;
@@ -1231,4 +1178,9 @@ async fn create_full_latex_doc(chapter_path: &Path) -> Result<String, String> {
     let full_doc = format!("\\documentclass[lang=cn,10pt,scheme=chinese,a4paper]{{elegantbook}}\n\n\\title{{课堂讲义}}\n\\author{{自动生成}}\n\\date{{}}\n\n\\begin{{document}}\n\n\\mainmatter\n\n{}\n\n\\end{{document}}\n", chapter_content);
     
     Ok(full_doc)
+}
+
+pub(crate) fn key_uri(url: &str, playlist: &str) -> Result<String, String> {
+    let (uri, _, _) = parse_m3u8(playlist)?;
+    reqwest::Url::parse(url).and_then(|base|base.join(&uri)).map(|v|v.to_string()).map_err(|e|e.to_string())
 }

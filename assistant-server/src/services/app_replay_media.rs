@@ -214,7 +214,9 @@ fn media_request(
     send_cookie: bool,
     range: Option<&reqwest::header::HeaderValue>,
 ) -> reqwest::RequestBuilder {
-    let mut request = client.get(url).header("User-Agent", &state.user_agent);
+    let mut request = client.get(url).header("User-Agent", &state.user_agent)
+        .header("Origin", "https://onlineroomse.pku.edu.cn")
+        .header("Referer", "https://onlineroomse.pku.edu.cn/");
     if send_cookie && !state.token.is_empty() {
         request = request.header("Cookie", format!("_token={}", state.token));
     }
@@ -738,4 +740,17 @@ mod tests {
         assert!(global_ip("8.8.8.8".parse().unwrap()));
         assert!(check_media_url(&Url::parse("http://media.example/a.mp4").unwrap()).is_err());
     }
+}
+
+pub(super) async fn fetch_key(url: &str, token: &str, user_agent: &str) -> Result<String, String> {
+    let state = MediaState {
+        download_id: uuid::Uuid::new_v4(), urls: Mutex::new(HashMap::new()),
+        token: token.into(), user_agent: user_agent.into(), progress: None,
+        segments: Mutex::new(HashMap::new()), mp4_bytes: Mutex::new((Vec::new(), 0)),
+    };
+    let url = Url::parse(url).map_err(|e|e.to_string())?;
+    check_media_url(&url)?;
+    let bytes = upstream(&state, url, None).await?.bytes().await.map_err(|e|e.to_string())?;
+    if bytes.len() != 16 { return Err(format!("密钥必须为16字节，实际为{}",bytes.len())); }
+    Ok(super::prepared_media::encode_key(&bytes))
 }

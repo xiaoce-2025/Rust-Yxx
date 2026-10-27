@@ -15,8 +15,6 @@ const IAAA_OAUTH_LOGIN_URL: &str = "https://iaaa.pku.edu.cn/iaaa/oauthlogin.do";
 const BLACKBOARD_APP_ID: &str = "blackboard";
 const BLACKBOARD_REDIR_URL: &str =
     "http://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin";
-const BLACKBOARD_REDIR_URL_HTTPS: &str =
-    "https://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin";
 
 pub type PkuLoginResult = super::login_cache::LoginCacheEntry;
 
@@ -142,9 +140,18 @@ pub async fn login_iaaa_and_get_cookies(
     let cookie_file_str = cookie_file.to_string_lossy().to_string();
     tracing::debug!("步骤2: 创建临时Cookie文件 - {}", cookie_file_str);
 
+    // Establish the same IAAA session as the browser before submitting credentials.
+    fetch_with_cookie(&cookie_file_str, &user_agent,
+        "https://course.pku.edu.cn/webapps/bb-sso-BBLEARN/login.html")?;
+    run_curl_text(&["-sS".into(), "-L".into(), "-k".into(), "-A".into(), user_agent.clone(),
+        "-b".into(), cookie_file_str.clone(), "-c".into(), cookie_file_str.clone(),
+        "-e".into(), "https://course.pku.edu.cn/".into(),
+        "--data-raw".into(), format!("appID=blackboard&appName=1&redirectUrl={}", urlencoding::encode(BLACKBOARD_REDIR_URL)),
+        "https://iaaa.pku.edu.cn/iaaa/oauth.jsp".into()])?;
+
     // Step 1: IAAA oauthlogin -> token
     let form_body = format!(
-        "appid={}&userName={}&password={}&remTrustChk=false&redirUrl={}",
+        "appid={}&userName={}&password={}&randCode=&smsCode=&otpCode=&remTrustChk=false&redirUrl={}",
         urlencoding::encode(BLACKBOARD_APP_ID),
         urlencoding::encode(username),
         urlencoding::encode(password),
@@ -165,6 +172,9 @@ pub async fn login_iaaa_and_get_cookies(
         cookie_file_str.clone(),
         "--data-raw".to_string(),
         form_body,
+        "-e".into(), "https://iaaa.pku.edu.cn/iaaa/oauth.jsp".into(),
+        "-H".into(), "Origin: https://iaaa.pku.edu.cn".into(),
+        "-H".into(), "X-Requested-With: XMLHttpRequest".into(),
         IAAA_OAUTH_LOGIN_URL.to_string(),
     ];
 
@@ -180,25 +190,14 @@ pub async fn login_iaaa_and_get_cookies(
     tracing::info!("步骤5完成: Token解析成功 - token长度: {}", token.len());
 
     // Step 2: campusLogin?_rand=...&token=...
-    let campus_urls = vec![
-        format!(
-            "{}?_rand={:.16}&token={}",
-            BLACKBOARD_REDIR_URL_HTTPS,
-            rand::random::<f64>(),
-            urlencoding::encode(&token)
-        ),
-        format!(
-            "{}?_rand={:.16}&token={}",
-            BLACKBOARD_REDIR_URL,
-            rand::random::<f64>(),
-            urlencoding::encode(&token)
-        ),
-    ];
-    tracing::debug!("步骤6: 准备教学网重定向URL - HTTPS: {}, HTTP: {}", campus_urls[0].len(), campus_urls[1].len());
+    // The browser enters the HTTP callback and follows its 307 to HTTPS.
+    // A token is single-use; never try a second callback with that same token.
+    let campus_urls = vec![format!("{}?_rand={:.16}&token={}", BLACKBOARD_REDIR_URL,
+        rand::random::<f64>(), urlencoding::encode(&token))];
 
     let mut last_err = String::new();
     for (idx, campus_url) in campus_urls.iter().enumerate() {
-        tracing::info!("步骤7: 尝试第{}次教学网登录 (URL类型: {})...", idx + 1, if idx == 0 { "HTTPS" } else { "HTTP" });
+        tracing::info!("步骤7: 尝试第{}次教学网登录 (URL类型: {})...", idx + 1, "HTTP → HTTPS");
         
         let campus_args = vec![
             "-sS".to_string(),
@@ -438,7 +437,8 @@ mod session_tests {
                     assert!(len > 0);
                     request.extend_from_slice(&buffer[..len]);
                 }
-                requests.push(String::from_utf8(request).unwrap());
+                let request = String::from_utf8(request).unwrap();
+                requests.push(request);
                 stream.write_all(response.as_bytes()).unwrap();
             }
             requests
@@ -452,7 +452,7 @@ mod session_tests {
             login.cookie_file.to_str().unwrap(), &login.user_agent, &format!("{base}/watch"),
         ).unwrap();
         assert_eq!(read_token_from_cookie_file(login.cookie_file.to_str().unwrap()).as_deref(), Some("watch-token"));
-        assert_eq!(download_in_session(&login, &format!("{base}/key")).unwrap(), b"0123456789abcdef");
+        assert_eq!(download_playback_key_in_session(&login, &format!("{base}/key")).unwrap(), b"0123456789abcdef");
         assert!(cache.get("test-user").await.is_some());
         assert!(download_in_session(&login, &format!("{base}/denied")).unwrap_err().contains("401"));
         assert!(cache.get("test-user").await.is_none());
@@ -461,13 +461,15 @@ mod session_tests {
         assert!(requests[1].contains("login=yes"));
         assert!(requests[3].contains("login=yes"));
         assert!(requests[3].contains("_token=watch-token"));
+        assert!(requests[3].contains("Origin: https://onlineroomse.pku.edu.cn"));
+        assert!(requests[3].contains("Referer: https://onlineroomse.pku.edu.cn/"));
         assert!(requests.iter().all(|r| r.contains("session-test-agent")));
     }
 }
 
 fn parse_token(body: &str) -> Result<String, String> {
     let value: Value = serde_json::from_str(body)
-        .map_err(|e| format!("解析 IAAA 登录响应 JSON 失败: {e}; body={body}"))?;
+        .map_err(|e| format!("解析 IAAA 登录响应 JSON 失败: {e}"))?;
 
     if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
         let msg = value
@@ -514,7 +516,7 @@ fn run_curl_text(args: &[String]) -> Result<String, String> {
 pub(crate) fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
     let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = Command::new(curl_cmd)
-        .args(["--fail", "--connect-timeout", "15"])
+        .args(["--fail", "--connect-timeout", "15", "--max-time", "60"])
         .args(args)
         .output()
         .map_err(|e| format!("调用 {} 失败: {}", curl_cmd, e))?;
@@ -575,4 +577,16 @@ fn load_user_agents_from_gzip(path: &str) -> Result<Vec<String>, String> {
         .collect();
 
     Ok(candidates)
+}
+
+pub fn download_playback_key_in_session(login: &PkuLoginResult, url: &str) -> Result<Vec<u8>, String> {
+    let _guard = login.lock_cookie();
+    let cookie = login.cookie_file.to_string_lossy().to_string();
+    login.checked(run_curl_bytes(&["-sS".into(), "-L".into(), "-k".into(),
+        "-A".into(),login.user_agent.clone(), "-b".into(),cookie.clone(),"-c".into(),cookie,
+        "-H".into(),"Origin: https://onlineroomse.pku.edu.cn".into(),
+        "-e".into(),"https://onlineroomse.pku.edu.cn/".into(), url.into()]).and_then(|bytes| {
+            if let Ok(text) = std::str::from_utf8(&bytes) { validate_page(text)?; }
+            Ok(bytes)
+        }))
 }

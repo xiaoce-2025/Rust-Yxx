@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub video_queue: Arc<crate::services::video_queue::VideoQueue>,
     pub settings: Arc<Settings>,
     pub store: Arc<FileStore>,
     pub wechat_service: Arc<WeChatService>,
@@ -24,7 +25,6 @@ pub struct AppState {
     pub video_translations: Arc<crate::services::video_translation::TranslationManager>,
     pub fw_slots: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
     pub login_cache: Arc<LoginCache>,
-    pub processing_users: Arc<RwLock<HashMap<Uuid, ProcessingState>>>,
     pub app_replay_clients: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<crate::services::app_replay::AppReplayClient>>>>>,
     pub lesson_mutations: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
 }
@@ -37,14 +37,17 @@ pub struct RuntimeWechatSession {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ProcessingState {
-    pub course_id: String,
-    pub video_id: String,
-    pub started_at: DateTime<Utc>,
-}
 
 impl AppState {
+    pub async fn course_busy(&self, user_id: Uuid, course: &str) -> bool {
+        self.pkuvideo_jobs.read().await.values().any(|j|j.user_id == user_id
+            && j.course_id.as_deref() == Some(course) && matches!(j.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running))
+    }
+    pub async fn lesson_busy(&self, user_id: Uuid, course: &str, lesson: &str) -> bool {
+        self.pkuvideo_jobs.read().await.values().any(|j|j.user_id == user_id
+            && j.course_id.as_deref() == Some(course) && j.lesson_id.as_deref() == Some(lesson)
+            && matches!(j.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running))
+    }
     pub async fn fw_slot(&self, user_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
         self.fw_slots.lock().await.entry(user_id).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
@@ -67,9 +70,9 @@ impl AppState {
 
         let login_cache = Arc::new(LoginCache::new(60)); // 仅在操作开始时检查 1 小时有效期
 
-        let processing_users = Arc::new(RwLock::new(HashMap::new()));
 
-        Self {
+        let state = Self {
+            video_queue: crate::services::video_queue::VideoQueue::new(settings.pkuvideo.processing_concurrency),
             settings: Arc::new(settings),
             store,
             wechat_service: Arc::new(wechat_service),
@@ -80,14 +83,24 @@ impl AppState {
             video_translations: Arc::new(crate::services::video_translation::TranslationManager::new()),
             fw_slots: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             login_cache,
-            processing_users,
             app_replay_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             lesson_mutations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        }
+        };
+        state.video_queue.start(Arc::new(crate::services::video_jobs::VideoTaskHandler { state: state.clone() }));
+        state
     }
 
     pub async fn load_pkuvideo_jobs(&self) {
-        let jobs = self.store.get_all_pkuvideo_jobs().await;
+        let mut jobs = self.store.get_all_pkuvideo_jobs().await;
+        for job in jobs.values_mut() {
+            if matches!(job.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running) {
+                job.status = crate::services::pkuvideo::PipelineStatus::Failed;
+                job.postprocessing = false;
+                job.error = Some("服务重启中断任务，请重新提交；已保存的课节密钥可直接复用".into());
+                job.updated_at = Utc::now();
+                let _ = self.store.update_pkuvideo_job(job.clone()).await;
+            }
+        }
         let mut in_memory_jobs = self.pkuvideo_jobs.write().await;
         *in_memory_jobs = jobs;
     }

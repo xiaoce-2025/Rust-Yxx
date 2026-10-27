@@ -278,6 +278,7 @@ mod tests {
 
     fn lesson(id: &str, day: u32, processed: bool) -> LessonInfo {
         LessonInfo {
+            enc_key: None,
             id: id.into(),
             video_url: String::new(),
             play_url: String::new(),
