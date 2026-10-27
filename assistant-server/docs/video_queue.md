@@ -53,6 +53,16 @@ m3u8_segment_timeout_seconds = 120
 
 验证：`cargo test --offline`；前端守卫测试使用 `node --test tests/batch_submission_guard.test.cjs`，覆盖恢复遮罩、启动与状态查询并发、服务端锁响应和断网保持锁定。
 
+## User-Agent 失败名单与日志
+
+失败名单自动保存在服务工作目录下的 `data/failed_user_agents.txt`，每行一个完整 UA，重复失败不会重复写入。教学网登录、会话请求或 curl 请求失败时记录本次 UA；名单不保存密码、Cookie、IAAA token 或请求参数。网络错误也会按当前策略记录，所以名单表示“使用时发生过失败”，并不能证明失败由该 UA 导致。
+
+每次加载 UA 时先读取失败名单，再过滤 `user_agents.txt`；纯文本没有可用候选时，再从 `user_agents.txt.gz` 中过滤选择。空白、重复和含控制字符的候选也会排除。全部不可用时明确报错，不会回退到已失败 UA。名单读取错误也不会被静默忽略。名单在磁盘上保留，重启仍有效；手动删除某一行可允许重新使用该 UA。成功教学网缓存会话如果使用了名单中的 UA，下次获取会话时会丢弃缓存并重新登录。重新加载好学 App 的持久化会话时同样过滤已失败 UA，并重新认证。
+
+INFO 日志输出完整的 `user_agent` 字段，包括随机选中 UA、教学网登录所用 UA、复用缓存时的 UA，以及好学客户端所用 UA；选择时还输出可用数量、失败名单数量和来源文件。失败时 WARN 日志包含完整 UA、curl 退出码（适用时）和失败名单路径，不再截取前 50 个字符。
+
+IAAA token 是当前登录事务的一次性短期票据：获取后立即用于一次 HTTPS 教学网回调，不进入缓存结构，也不保存在日志或失败名单中。若 IAAA 成功但教学网回调或门户验证失败，该次登录不能进入缓存，下次从 IAAA 登录重新获取新 token。只有教学网回调及门户验证成功后才缓存教学网 Cookie jar，保存前移除 IAAA 域的 Cookie；教学网及回放环境自己的 Cookie/token 保留在该 jar 中。
+
 ## 本次交互记录的兼容点
 
 登录流程先访问教学网入口，再向 IAAA `oauth.jsp` POST `appID/appName/redirectUrl`，沿用同一个 Cookie jar 和 User-Agent 提交 OAuth。补齐空的 `randCode/smsCode/otpCode` 和浏览器的 Origin、Referer；IAAA 表单中的 `redirectUrl/redirUrl` 保持教学网声明的 HTTP 地址，但实际回调请求直接使用 HTTPS，模拟浏览器本地 HSTS 升级。抓包中的 HTTP 307 带 `Non-Authoritative-Reason: HSTS`，没有 HTTP 网络连接，不能当作服务器重定向交给 curl `-L` 复现；不复用一次性 token 尝试第二个回调。回放 iframe 使用 HTML 解析器读取，兼容属性顺序、单引号和 `&amp;`，URL 查询参数先解码再编码。

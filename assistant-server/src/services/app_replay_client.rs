@@ -24,14 +24,12 @@ impl AppReplayClient {
     }
     pub async fn for_user(user_id: uuid::Uuid) -> Result<Self, String> {
         let saved = super::app_replay_vault::load::<Value>(user_id, "session")?;
-        let ua = saved
-            .as_ref()
-            .and_then(|s| s["user_agent"].as_str())
-            .map(str::to_string)
-            .unwrap_or(super::pkulogin::random_user_agent("./user_agents.txt.gz")?);
+        let saved_ua=saved.as_ref().and_then(|session|session["user_agent"].as_str());
+        let reusable=match saved_ua {Some(ua)=>!super::user_agents::is_failed(ua)?,None=>false};
+        let ua=if reusable {saved_ua.unwrap().to_string()} else {super::pkulogin::random_user_agent("./user_agents.txt.gz")?};
         let mut client = Self::with_user_agent(ua)?;
         client.user_id = Some(user_id);
-        if let Some(saved) = saved {
+        if let Some(saved) = saved.filter(|_|reusable) {
             if saved["user"]["_token"]
                 .as_str()
                 .is_some_and(|s| !s.is_empty() && !s.contains(['\r', '\n']))
@@ -87,6 +85,7 @@ impl AppReplayClient {
             .timeout(Duration::from_secs(25))
             .build()
             .map_err(|_| "创建 App API 客户端失败")?;
+        tracing::info!(user_agent=%user_agent,"好学 App 客户端使用 User-Agent（完整值）");
         Ok(Self {
             auth,
             api_client,

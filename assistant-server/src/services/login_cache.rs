@@ -23,14 +23,13 @@ impl Drop for CookieFile {
 pub struct LoginCacheEntry {
     pub cookie_file: PathBuf,
     pub user_agent: String,
-    pub token: String,
     pub created_at: DateTime<Utc>,
     file: Arc<CookieFile>,
     owner: Weak<Entries>,
     username: String,
 }
 impl LoginCacheEntry {
-    pub fn new(cookie_file: PathBuf, user_agent: String, token: String) -> Self {
+    pub fn new(cookie_file: PathBuf, user_agent: String) -> Self {
         Self {
             file: Arc::new(CookieFile {
                 path: cookie_file.clone(),
@@ -38,7 +37,6 @@ impl LoginCacheEntry {
             }),
             cookie_file,
             user_agent,
-            token,
             created_at: Utc::now(),
             owner: Weak::new(),
             username: String::new(),
@@ -61,6 +59,7 @@ impl LoginCacheEntry {
     }
     pub fn checked<T>(&self, result: Result<T, String>) -> Result<T, String> {
         if result.is_err() {
+            super::user_agents::record_failure(&self.user_agent,"教学网会话操作失败");
             self.invalidate();
         }
         result
@@ -134,7 +133,7 @@ mod tests {
     fn session() -> LoginCacheEntry {
         let path = std::env::temp_dir().join(format!("pku-test-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&path, "cookies").unwrap();
-        LoginCacheEntry::new(path, "test-ua".into(), "test-token".into())
+        LoginCacheEntry::new(path, "test-ua".into())
     }
     #[tokio::test]
     async fn expiry_removes_cache_but_keeps_running_task_alive() {

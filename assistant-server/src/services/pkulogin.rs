@@ -1,12 +1,6 @@
-use std::{
-    fs,
-    fs::File,
-    io::{BufRead, BufReader},
-    process::Command,
-};
+use std::process::Command;
 
 use chrono::Utc;
-use rand::{seq::SliceRandom, thread_rng};
 use serde_json::Value;
 
 use crate::services::login_cache::LoginCache;
@@ -25,6 +19,17 @@ fn campus_login_url(token: &str) -> String {
     url.query_pairs_mut().append_pair("_rand", &format!("{:.16}", rand::random::<f64>()))
         .append_pair("token", token);
     url.into()
+}
+
+/// Keep only the established teaching/replay environment; IAAA's own cookies are not cached.
+fn discard_iaaa_cookies(path:&std::path::Path)->Result<(),String> {
+    let content=std::fs::read_to_string(path).map_err(|e|format!("读取教学网 Cookie jar 失败: {e}"))?;
+    let lines:Vec<_>=content.lines().filter(|line| {
+        let row=line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        let domain=row.split('\t').next().unwrap_or_default().trim_start_matches('.');
+        !domain.eq_ignore_ascii_case("iaaa.pku.edu.cn")
+    }).collect();
+    std::fs::write(path,format!("{}\n",lines.join("\n"))).map_err(|e|format!("保存教学网 Cookie jar 失败: {e}"))
 }
 
 pub type PkuLoginResult = super::login_cache::LoginCacheEntry;
@@ -67,7 +72,7 @@ async fn session_operation_with_refresh<T, F, Fut>(
     refresh: F,
 ) -> Result<T, String>
 where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Result<PkuLoginResult, String>> {
-    let result = operation(login);
+    let result = login.checked(operation(login));
     if let Err(ref error) = result {
         login.invalidate();
         if is_auth_error(error) {
@@ -125,29 +130,48 @@ pub async fn login_iaaa_and_get_cookies_with_cache(
     password: &str,
     login_cache: &LoginCache,
 ) -> Result<PkuLoginResult, String> {
-    let lock = login_cache.login_lock(username).await;
-    let _guard = lock.lock().await;
-    if let Some(entry) = login_cache.get(username).await { return Ok(entry); }
-    let result = login_iaaa_and_get_cookies(username, password).await?;
-    Ok(login_cache.insert(username, result).await)
+    cached_teaching_login(username, login_cache,
+        || login_iaaa_and_get_cookies(username,password)).await
 }
 
-pub async fn login_iaaa_and_get_cookies(
-    username: &str,
-    password: &str,
-) -> Result<PkuLoginResult, String> {
+/// A factory encompasses the complete IAAA -> single callback -> portal verification transaction.
+/// Only its successful teaching session can enter the cache; failed callbacks leave no reusable ticket.
+async fn cached_teaching_login<F,Fut>(username:&str, cache:&LoginCache, login:F) -> Result<PkuLoginResult,String>
+where F:FnOnce()->Fut, Fut:std::future::Future<Output=Result<PkuLoginResult,String>> {
+    let lock=cache.login_lock(username).await;
+    let _guard=lock.lock().await;
+    if let Some(entry)=cache.get(username).await {
+        if super::user_agents::is_failed(&entry.user_agent)? {
+            tracing::warn!(user_agent=%entry.user_agent,"缓存会话的 User-Agent 已在失败名单中，重新登录");
+            entry.invalidate();
+        } else {
+            tracing::info!(user_agent=%entry.user_agent,"复用教学网缓存会话，使用 User-Agent（完整值）");
+            return Ok(entry);
+        }
+    }
+    let session=login().await?;
+    Ok(cache.insert(username,session).await)
+}
+
+pub async fn login_iaaa_and_get_cookies(username: &str, password: &str) -> Result<PkuLoginResult, String> {
+    let user_agent = random_user_agent("./user_agents.txt.gz")?;
+    tracing::info!(user_agent=%user_agent,"教学网登录使用 User-Agent（完整值）");
+    let result = login_with_user_agent(username, password, user_agent.clone()).await;
+    if result.is_err() { super::user_agents::record_failure(&user_agent,"教学网登录流程失败"); }
+    result
+}
+
+async fn login_with_user_agent(username: &str, password: &str, user_agent: String) -> Result<PkuLoginResult, String> {
     let start_time = chrono::Utc::now();
     tracing::info!("IAAA登录流程开始 - 用户名: {}, 时间: {}", username, start_time);
 
-    let user_agent = random_user_agent("./user_agents.txt.gz")?;
-    tracing::debug!("步骤1: 获取随机User-Agent成功 - {}", user_agent.chars().take(50).collect::<String>());
 
     let cookie_file = std::env::temp_dir().join(format!(
         "pku_cookie_{}_{}.txt",
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    let mut session = PkuLoginResult::new(cookie_file.clone(), user_agent.clone(), String::new());
+    let mut session = PkuLoginResult::new(cookie_file.clone(), user_agent.clone());
     let cookie_file_str = cookie_file.to_string_lossy().to_string();
     tracing::debug!("步骤2: 创建临时Cookie文件 - {}", cookie_file_str);
 
@@ -200,61 +224,29 @@ pub async fn login_iaaa_and_get_cookies(
     let token = parse_token(&login_body)?;
     tracing::info!("步骤5完成: Token解析成功 - token长度: {}", token.len());
 
-    // HAR's 307 is an internal HSTS upgrade (no HTTP connection), not a server redirect.
-    // curl -L cannot reproduce that upgrade unless HSTS is configured: enter HTTPS directly.
-    let campus_urls = vec![campus_login_url(&token)];
-
-    let mut last_err = String::new();
-    for (idx, campus_url) in campus_urls.iter().enumerate() {
-        tracing::info!("步骤7: 尝试第{}次教学网登录 (URL类型: {})...", idx + 1, "HTTPS（模拟浏览器 HSTS 升级）");
-        
-        let campus_args = vec![
-            "-sS".to_string(),
-            "-k".to_string(),
-            "-L".to_string(),
-            "-A".to_string(),
-            user_agent.clone(),
-            "-c".to_string(),
-            cookie_file_str.clone(),
-            "-b".to_string(),
-            cookie_file_str.clone(),
-            "--fail".to_string(),
-            campus_url.clone(),
-        ];
-
-        match run_curl_text(&campus_args) {
-            Ok(page) if validate_page(&page).is_ok() => {
-                // SSO callbacks may return only a redirect script; verify the portal itself.
-                let portal = fetch_page_in_session(&session,
-                    "https://course.pku.edu.cn/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1");
-                match portal {
-                    Ok(portal) if is_teaching_portal(&portal) => {},
-                    Ok(_) => { last_err = "教学网登录后未返回可识别的门户页面".into(); continue; },
-                    Err(error) => { last_err = error; continue; },
-                }
-                tracing::info!("步骤7完成: 第{}次教学网登录成功", idx + 1);
-                last_err.clear();
-                break;
-            }
-            Ok(_) => { last_err = AUTH_EXPIRED.into(); }
-            Err(e) => {
-                tracing::warn!("步骤7: 第{}次教学网登录失败: {}", idx + 1, e);
-                last_err = e;
-            }
-        }
+    // This IAAA ticket is ephemeral and single-use. Never retry a callback with it,
+    // and never retain it in the teaching-session cache, even if IAAA itself succeeded.
+    let campus_url=campus_login_url(&token);
+    tracing::info!(user_agent=%user_agent,"步骤7: 使用本次新取得的 IAAA token，执行一次 HTTPS 教学网回调");
+    let callback=(|| {
+        let page=fetch_with_cookie(&cookie_file_str,&user_agent,&campus_url)?;
+        validate_page(&page)?;
+        let portal=fetch_page_in_session(&session,
+            "https://course.pku.edu.cn/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1")?;
+        if !is_teaching_portal(&portal) {return Err("教学网登录后未返回可识别的门户页面".to_string());}
+        Ok(())
+    })();
+    if let Err(error)=callback {
+        tracing::error!(user_agent=%user_agent,error=%error,"教学网回调失败；本次 IAAA token 作废，下次必须重新进行 IAAA 登录");
+        return Err(format!("教学网 token 登录失败: {error}"));
     }
-
-    if !last_err.is_empty() {
-        let _ = fs::remove_file(&cookie_file);
-        tracing::error!("教学网登录失败: {}", last_err);
-        return Err(format!("教学网 token 登录失败: {last_err}"));
-    }
+    tracing::info!("步骤7完成: 教学网回调及门户验证成功，可以缓存教学网 Cookie 会话");
 
     let end_time = chrono::Utc::now();
     let duration = end_time - start_time;
     tracing::info!("IAAA登录流程完成 - 总耗时: {}ms", duration.num_milliseconds());
 
-    session.token = token;
+    discard_iaaa_cookies(&session.cookie_file)?;
     session.created_at = Utc::now();
     Ok(session)
 }
@@ -353,7 +345,67 @@ mod session_tests {
     fn test_session() -> PkuLoginResult {
         let path = std::env::temp_dir().join(format!("pku-auth-test-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&path, "cookies").unwrap();
-        PkuLoginResult::new(path, "test-agent".into(), String::new())
+        PkuLoginResult::new(path, "test-agent".into())
+    }
+
+    #[tokio::test]
+    async fn failed_teaching_callback_is_not_cached_and_next_attempt_restarts_iaaa() {
+        let cache=LoginCache::new(60);
+        let mut iaaa_calls=0;
+        let first:Result<PkuLoginResult,String>=cached_teaching_login("ticket-test",&cache,|| {
+            iaaa_calls+=1;
+            async {Err("IAAA已成功，但教学网回调失败".into())}
+        }).await;
+        assert!(first.is_err());
+        assert!(cache.get("ticket-test").await.is_none());
+        let dir=tempdir::TempDir::new("teaching-cache").unwrap();
+        let cookie=dir.path().join("cookies.txt");
+        std::fs::write(&cookie,"teaching-cookie").unwrap();
+        let expected=cookie.clone();
+        let session=cached_teaching_login("ticket-test",&cache,|| {
+            iaaa_calls+=1;
+            async {Ok(PkuLoginResult::new(cookie,format!("successful-ua-{}",uuid::Uuid::new_v4())))}
+        }).await.unwrap();
+        assert_eq!(iaaa_calls,2);
+        assert_eq!(session.cookie_file,expected);
+        let reused=cached_teaching_login("ticket-test",&cache,||async {
+            panic!("verified teaching cookies must be reused without obtaining an IAAA ticket")
+        }).await.unwrap();
+        assert_eq!(reused.cookie_file,expected);
+    }
+
+    #[tokio::test]
+    async fn quarantined_cached_user_agent_requires_a_fresh_login() {
+        let cache=LoginCache::new(60);
+        let dir=tempdir::TempDir::new("ua-cache").unwrap();
+        let old=dir.path().join("old.txt");let fresh=dir.path().join("new.txt");
+        std::fs::write(&old,"old cookie").unwrap();std::fs::write(&fresh,"new cookie").unwrap();
+        let failed_ua=format!("failed-cached-ua-{}",uuid::Uuid::new_v4());
+        cache.insert("ua-test",PkuLoginResult::new(old.clone(),failed_ua.clone())).await;
+        super::super::user_agents::record_failure(&failed_ua,"test failure");
+        let expected=fresh.clone();
+        let entry=cached_teaching_login("ua-test",&cache,||async {
+            Ok(PkuLoginResult::new(fresh,format!("fresh-ua-{}",uuid::Uuid::new_v4())))
+        }).await.unwrap();
+        assert_eq!(entry.cookie_file,expected);
+        assert_ne!(entry.user_agent,failed_ua);
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn cached_cookie_jar_excludes_iaaa_and_preserves_teaching_and_replay_cookies() {
+        let dir=tempdir::TempDir::new("iaaa-cookie-filter").unwrap();let path=dir.path().join("cookies.txt");
+        std::fs::write(&path,concat!("# Netscape HTTP Cookie File\n",
+            "#HttpOnly_iaaa.pku.edu.cn\tFALSE\t/\tTRUE\t0\tJSESSIONID\tiaaa-cookie\n",
+            ".iaaa.pku.edu.cn\tTRUE\t/\tTRUE\t0\tlogin\tiaaa-cookie\n",
+            "#HttpOnly_course.pku.edu.cn\tFALSE\t/\tTRUE\t0\tJSESSIONID\tteaching-cookie\n",
+            ".pku.edu.cn\tTRUE\t/\tTRUE\t0\t_token\treplay-cookie\n")).unwrap();
+        discard_iaaa_cookies(&path).unwrap();
+        let cached=std::fs::read_to_string(&path).unwrap();
+        assert!(!cached.contains("iaaa.pku.edu.cn"));
+        assert!(cached.contains("#HttpOnly_course.pku.edu.cn"));
+        assert!(cached.contains("teaching-cookie"));
+        assert!(cached.contains("replay-cookie"));
     }
 
     #[test]
@@ -467,7 +519,7 @@ mod session_tests {
             requests
         });
         let dir = tempdir::TempDir::new("pku-session-test").unwrap();
-        let login = PkuLoginResult::new(dir.path().join("cookies.txt"), "session-test-agent".into(), String::new());
+        let login = PkuLoginResult::new(dir.path().join("cookies.txt"), "session-test-agent".into());
         download_in_session(&login, &format!("{base}/login")).unwrap();
         let cache = LoginCache::new(60);
         let login = cache.insert("test-user", login).await;
@@ -478,6 +530,7 @@ mod session_tests {
         assert_eq!(download_playback_key_in_session(&login, &format!("{base}/key")).unwrap(), b"0123456789abcdef");
         assert!(cache.get("test-user").await.is_some());
         assert!(download_in_session(&login, &format!("{base}/denied")).unwrap_err().contains("401"));
+        assert!(super::super::user_agents::is_failed(&login.user_agent).unwrap());
         assert!(cache.get("test-user").await.is_none());
         assert!(login.cookie_file.is_file());
         let requests = server.join().unwrap();
@@ -511,7 +564,7 @@ fn parse_token(body: &str) -> Result<String, String> {
     let token = value
         .get("token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("IAAA 登录响应缺少 token 字段: {body}"))?;
+        .ok_or_else(|| "IAAA 登录响应缺少 token 字段".to_string())?;
 
     if token.trim().is_empty() {
         return Err("IAAA 登录 token 为空".to_string());
@@ -521,85 +574,34 @@ fn parse_token(body: &str) -> Result<String, String> {
 }
 
 fn run_curl_text(args: &[String]) -> Result<String, String> {
-    let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
-    let output = Command::new(curl_cmd)
-        .args(["--fail", "--connect-timeout", "15", "--max-time", "60"])
-        .args(args)
-        .output()
-        .map_err(|e| format!("调用 {} 失败: {}", curl_cmd, e))?;
+    run_curl_bytes(args).map(|bytes|String::from_utf8_lossy(&bytes).into_owned())
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("curl 返回非 0: {}", stderr.trim()));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+fn curl_user_agent(args: &[String]) -> Option<&str> {
+    args.windows(2).find(|pair|pair[0] == "-A" || pair[0] == "--user-agent").map(|pair|pair[1].as_str())
 }
 
 pub(crate) fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
     let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = Command::new(curl_cmd)
         .args(["--fail", "--connect-timeout", "15", "--max-time", "60"])
-        .args(args)
-        .output()
-        .map_err(|e| format!("调用 {} 失败: {}", curl_cmd, e))?;
-
+        .args(args).output().map_err(|error| {
+            if let Some(ua)=curl_user_agent(args) { super::user_agents::record_failure(ua,"curl 调用失败"); }
+            format!("调用 {curl_cmd} 失败: {error}")
+        })?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("curl 返回非 0: {}", stderr.trim()));
+        if let Some(ua)=curl_user_agent(args) {
+            tracing::warn!(user_agent=%ua,curl_exit_code=?output.status.code(),"curl 请求失败，记录完整 User-Agent");
+            super::user_agents::record_failure(ua,"curl 请求返回非零状态");
+        }
+        let stderr=String::from_utf8_lossy(&output.stderr);
+        return Err(format!("curl 返回非 0: {}",stderr.trim()));
     }
-
     Ok(output.stdout)
 }
 
 pub fn random_user_agent(gz_file: &str) -> Result<String, String> {
-    let mut candidates = load_user_agents_from_plain_file("./user_agents.txt").unwrap_or_default();
-    if candidates.is_empty() {
-        candidates = load_user_agents_from_gzip(gz_file)?;
-    }
-
-    if candidates.is_empty() {
-        return Err("user_agents.txt.gz 中没有可用 user-agent".to_string());
-    }
-
-    candidates
-        .choose(&mut thread_rng())
-        .cloned()
-        .ok_or_else(|| "随机选择 user-agent 失败".to_string())
-}
-
-fn load_user_agents_from_plain_file(path: &str) -> Result<Vec<String>, String> {
-    let file = File::open(path).map_err(|e| format!("打开 {path} 失败: {e}"))?;
-    let reader = BufReader::new(file);
-    let mut candidates = Vec::new();
-
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("读取 {path} 失败: {e}"))?;
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            candidates.push(trimmed.to_string());
-        }
-    }
-
-    Ok(candidates)
-}
-
-fn load_user_agents_from_gzip(path: &str) -> Result<Vec<String>, String> {
-    use std::io::Read;
-    
-    let file = File::open(path).map_err(|e| format!("打开 {path} 失败: {e}"))?;
-    let mut gz = flate2::read::GzDecoder::new(file);
-    let mut content = String::new();
-    gz.read_to_string(&mut content).map_err(|e| format!("解压 {path} 失败: {e}"))?;
-
-    let candidates: Vec<String> = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToString::to_string)
-        .collect();
-
-    Ok(candidates)
+    super::user_agents::choose(gz_file)
 }
 
 pub fn download_playback_key_in_session(login: &PkuLoginResult, url: &str) -> Result<Vec<u8>, String> {
