@@ -76,6 +76,13 @@ async fn submit_api(
         return Err(ApiError::Unauthorized);
     }
 
+    // This API also supports password authentication without a session cookie.
+    let gate = state.batch_submissions.gate(user.id).await;
+    let _operation = gate.read_owned().await;
+    if state.batch_submissions.active(user.id).await {
+        return Err(ApiError::Locked("任务正在提交中，请等待批量提交完成后再操作".into()));
+    }
+
     let job_id = enqueue_job(
         state,
         user.id,

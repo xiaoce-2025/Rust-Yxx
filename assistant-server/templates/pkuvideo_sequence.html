@@ -433,6 +433,7 @@
         </div>
       </div>
       <div id="lessonList" class="lesson-list"></div>
+      <div id="batchSubmissionResults" class="status error" hidden></div>
       <details id="manualRecords" style="margin-top:16px;display:none"><summary>手动查询记录（成功和失败均会保留）</summary><div id="manualRecordList"></div></details>
     </div>
   </main>
@@ -1179,6 +1180,38 @@
         statusEl.className = "status error";
       }
     }
+
+    processAllBtnEl.addEventListener('click', async () => {
+      if (isProcessing || !selectedCourse || window.BatchSubmission.active) return;
+      if (!currentLessons.some(lesson => !lesson.is_processed && !activeLessons.has(lesson.id))) {
+        statusEl.textContent = '没有需要提交的课节，已处理或已入队的课节会自动跳过';
+        return;
+      }
+      try {
+        await window.BatchSubmission.start({course_id:selectedCourse});
+      } catch (error) {
+        statusEl.textContent = '批量提交失败: ' + error.message;
+        statusEl.className = 'status error';
+      }
+    });
+    window.addEventListener('batchsubmissioncomplete', async event => {
+      const batch=event.detail;
+      if (!batch.id) return;
+      if (selectedCourse && selectedCourse===batch.course_id) {
+        await handleCourseSelect({currentTarget:{dataset:{courseId:selectedCourse,courseName:selectedCourseName}}});
+      }
+      statusEl.textContent = batch.error || `批量提交完成：${batch.submitted} 个课节已入队，${batch.failed} 个提交失败。视频将在队列中继续处理。`;
+      statusEl.className = batch.failed || batch.error ? 'status error' : 'status success';
+      const results=document.getElementById('batchSubmissionResults');
+      results.replaceChildren();
+      for(const item of batch.results || []) {
+        if(item.status!=='failed') continue;
+        const row=document.createElement('p');
+        row.textContent=`${item.video_id}: ${item.message || '提交失败'}`;
+        results.appendChild(row);
+      }
+      results.hidden=!results.childElementCount;
+    });
 
     downloadAllBtnEl.addEventListener("click", handleDownloadCoursePdf);
 

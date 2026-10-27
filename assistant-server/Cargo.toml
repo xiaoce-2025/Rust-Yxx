@@ -35,6 +35,9 @@ flate2 = "1"
 scraper = "0.18"
 tempdir = "0.3"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

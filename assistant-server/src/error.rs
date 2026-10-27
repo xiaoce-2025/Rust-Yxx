@@ -17,6 +17,8 @@ pub enum ApiError {
     BadRequest(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("locked: {0}")]
+    Locked(String),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("internal: {0}")]
@@ -36,6 +38,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::Locked(_) => StatusCode::LOCKED,
             ApiError::Http(_) | ApiError::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

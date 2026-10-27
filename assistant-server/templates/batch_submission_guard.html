@@ -1,0 +1,161 @@
+
+<style>
+  html[data-batch-locked], html[data-batch-locked] body { overflow:hidden!important; }
+  html[data-batch-checking] body > :not(#globalBatchSubmissionOverlay) { visibility:hidden!important; }
+  #globalBatchSubmissionOverlay { position:fixed;inset:0;z-index:2147483647;display:none;place-items:center;background:rgba(8,15,30,.74);backdrop-filter:blur(5px);padding:24px;box-sizing:border-box;visibility:visible!important; }
+  #globalBatchSubmissionOverlay .batch-dialog { width:min(100%,460px);box-sizing:border-box;background:#fff;color:#172033;border-radius:18px;padding:32px;box-shadow:0 24px 80px #0005;text-align:center;font:16px/1.7 system-ui,sans-serif; }
+  #globalBatchSubmissionOverlay h2 {font-size:21px;margin:16px 0 12px;color:#172033;}
+  #globalBatchSubmissionOverlay p {margin:10px 0;color:#475569;}
+  #globalBatchSubmissionOverlay .batch-spinner {width:32px;height:32px;border:3px solid #dbeafe;border-top-color:#2563eb;border-radius:50%;margin:auto;animation:global-batch-spin 1s linear infinite;}
+  @keyframes global-batch-spin {to{transform:rotate(360deg)}}
+</style>
+<script>
+(() => {
+  'use strict';
+  const STATUS = '/api/pkuvideofullclass/batch-submit/status';
+  const START = '/api/pkuvideofullclass/batch-submit';
+  const HINT = 'assistant.batch-submission.active';
+  const rawFetch = window.fetch.bind(window);
+  let state = {active:false};
+  let checking = true;
+  let receivedAt = Date.now();
+  let overlay;
+  let readyResolved = false;
+  let resolveReady;
+  let statusFlight;
+  let starting=false;
+  const previousInert = new Map();
+  const ready = new Promise(resolve => {resolveReady=resolve;});
+  document.documentElement.setAttribute('data-batch-checking','');
+
+  function mount() {
+    if (!document.body) return;
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'globalBatchSubmissionOverlay';
+      overlay.setAttribute('role','alertdialog');
+      overlay.setAttribute('aria-modal','true');
+      overlay.setAttribute('aria-labelledby','globalBatchTitle');
+      overlay.tabIndex = -1;
+      overlay.innerHTML = '<div class="batch-dialog"><div class="batch-spinner" aria-hidden="true"></div><h2 id="globalBatchTitle">任务正在提交中</h2><p id="globalBatchMessage" role="status" aria-live="polite"></p><p id="globalBatchProgress"></p></div>';
+      document.body.appendChild(overlay);
+    }
+    draw();
+  }
+  function draw() {
+    document.documentElement.toggleAttribute('data-batch-checking',checking);
+    const blocked = checking || state.active;
+    document.documentElement.toggleAttribute('data-batch-locked',blocked);
+    if (!overlay || !document.body) return;
+    overlay.style.display = blocked ? 'grid' : 'none';
+    overlay.setAttribute('aria-hidden',String(!blocked));
+    if (blocked) {
+      for (const child of document.body.children) {
+        if (child === overlay) continue;
+        if (!previousInert.has(child)) previousInert.set(child,child.inert);
+        child.inert=true;
+      }
+      const remaining = Math.max(1,Math.ceil((state.estimated_remaining_seconds || 15)-(Date.now()-receivedAt)/1000));
+      document.getElementById('globalBatchMessage').textContent = checking ? '正在确认任务提交状态，请稍候…' : `任务正在提交中，请不要离开本页面，预计还需要${remaining}s提交完成`;
+      document.getElementById('globalBatchProgress').textContent = state.total ? `已提交 ${state.completed || 0} / ${state.total} 个课节（成功入队 ${state.submitted || 0}，失败 ${state.failed || 0}）` : '';
+      if (!overlay.contains(document.activeElement)) overlay.focus({preventScroll:true});
+    } else {
+      for (const [child,inert] of previousInert) child.inert=inert;
+      previousInert.clear();
+    }
+  }
+  function apply(value) {
+    const wasActive = state.active;
+    state=value;
+    checking=false;
+    receivedAt=Date.now();
+    try {
+      if (value.active) localStorage.setItem(HINT,JSON.stringify({id:value.id || 'starting'}));
+      else localStorage.removeItem(HINT);
+    } catch (_) {}
+    draw();
+    if (!value.active && !readyResolved) {readyResolved=true;resolveReady();}
+    if (wasActive && !value.active) window.dispatchEvent(new CustomEvent('batchsubmissioncomplete',{detail:value}));
+  }
+  function poll() {
+    if (statusFlight) return statusFlight;
+    statusFlight=(async () => {
+      try {
+        const response=await rawFetch(STATUS,{credentials:'include',cache:'no-store'});
+        if (response.status===401) {apply({active:false});return;}
+        if (!response.ok) throw new Error('无法确认提交状态');
+        const value=await response.json();
+        if (typeof value.active!=='boolean') throw new Error('提交状态无效');
+        if (!starting || value.active) apply(value);
+      } catch (error) {
+        // Fail closed during restoration; a network failure must not dismiss an active mask.
+        draw();
+      } finally {statusFlight=null;}
+    })();
+    return statusFlight;
+  }
+  function isApi(input) {
+    const url=new URL(typeof input==='string' || input instanceof URL ? input : input.url,location.href);
+    return url.origin===location.origin && url.pathname.startsWith('/api/');
+  }
+  function isLightweight(input) {
+    const url=new URL(typeof input==='string' || input instanceof URL ? input : input.url,location.href);
+    return url.pathname===STATUS || ['/api/auth/me','/api/auth/login'].includes(url.pathname);
+  }
+  window.fetch=async function(input,options) {
+    if (isApi(input) && !isLightweight(input)) {
+      await ready;
+      if (state.active || checking) throw new Error('任务正在提交中，请等待批量提交完成后再操作');
+    }
+    const response=await rawFetch(input,options);
+    if (isApi(input) && response.status===423) {
+      try {
+        const value=await response.clone().json();
+        if (value.submission) apply(value.submission);
+        else {apply({active:true});poll();}
+      } catch (_) {apply({active:true});poll();}
+    }
+    return response;
+  };
+  window.BatchSubmission={
+    ready,
+    get active() {return checking || state.active;},
+    get status() {return state;},
+    refresh:poll,
+    async start(body) {
+      await ready;
+      if (state.active) throw new Error('已有任务正在提交中');
+      starting=true;
+      apply({active:true,estimated_remaining_seconds:15});
+      try {
+        const response=await rawFetch(START,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        const value=await response.json();
+        if (!response.ok || !value.success) throw new Error(value.error || value.message || '批量提交启动失败');
+        starting=false;
+        apply(value.batch);
+        return value.batch;
+      } catch (error) {starting=false;await poll();throw error;}
+    }
+  };
+  document.addEventListener('DOMContentLoaded',mount,{once:true});
+  if (document.body) mount();
+  for (const name of ['click','submit','pointerdown']) document.addEventListener(name,event => {
+    if ((checking || state.active) && (!overlay || !overlay.contains(event.target))) {event.preventDefault();event.stopImmediatePropagation();}
+  },true);
+  document.addEventListener('keydown',event => {
+    if ((checking || state.active) && ['Escape','Tab','Enter',' '].includes(event.key)) {
+      event.preventDefault();event.stopImmediatePropagation();if (overlay) overlay.focus({preventScroll:true});
+    }
+  },true);
+  window.addEventListener('beforeunload',event => {if(state.active){event.preventDefault();event.returnValue='';}});
+  window.addEventListener('storage',event => {
+    if(event.key===HINT) {
+      if(event.newValue && !state.active) apply({active:true});
+      poll();
+    }
+  });
+  setInterval(draw,1000);
+  setInterval(poll,2000);
+  poll();
+})();
+</script>

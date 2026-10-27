@@ -22,3 +22,6 @@ pub mod prepared_media;
 
 pub mod video_jobs;
 pub mod course_processing;
+
+pub mod batch_submission;
+pub mod lesson_submission;

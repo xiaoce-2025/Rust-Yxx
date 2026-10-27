@@ -14,8 +14,7 @@ use crate::{
     auth::CurrentUser,
     error::ApiError,
     services::{
-        course_parser, course_storage, lesson_parser, lesson_storage, pkulogin, pkuvideo::{PipelineStatus, PkuVideoJob}, 
-        video_downloader
+        course_parser, course_storage, lesson_parser, lesson_storage, pkulogin, pkuvideo::PipelineStatus
     },
 };
 use lesson_storage::LessonInfo;
@@ -64,6 +63,7 @@ struct Video {
 #[derive(Debug, Deserialize)]
 struct BatchSubmitRequest {
     course_id: String,
+    #[serde(default)]
     video_ids: Vec<String>,
 }
 
@@ -83,6 +83,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideofullclass/courses/:course_id/videos", get(get_course_videos))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/refresh", post(refresh_lessons))
         .route("/api/pkuvideofullclass/batch-submit", post(batch_submit))
+        .route("/api/pkuvideofullclass/batch-submit/status", get(batch_submit_status))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/process", post(process_lesson))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/reprocess", post(reprocess_lesson))
         .route("/api/pkuvideofullclass/courses/:course_id/videos/:video_id/process-status", get(get_process_status))
@@ -537,16 +538,36 @@ async fn batch_submit(
     State(state): State<AppState>, current_user: CurrentUser,
     Json(req): Json<BatchSubmitRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut results = Vec::new();
-    for video_id in req.video_ids {
-        let result = process_lesson(State(state.clone()), axum::extract::Path((req.course_id.clone(),video_id.clone())),
-            current_user.clone(), Json(ProcessLessonRequest { manual_key: None })).await;
-        results.push(match result {
-            Ok(Json(value)) => serde_json::json!({"video_id":video_id,"result":value}),
-            Err(error) => serde_json::json!({"video_id":video_id,"error":error.to_string()}),
-        });
+    use crate::services::batch_submission::{CourseSubmitter, BatchSubmitter};
+    let gate = state.batch_submissions.gate(current_user.id).await;
+    let _exclusive = gate.write().await;
+    if state.batch_submissions.active(current_user.id).await {
+        return Err(ApiError::Conflict("任务正在提交中，请等待当前批量提交完成".into()));
     }
-    Ok(Json(serde_json::json!({"success":true,"results":results})))
+    let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
+    let username = user.email.split('@').next().unwrap_or_default();
+    let lessons = lesson_storage::load_lessons(username, &req.course_id).map_err(ApiError::Internal)?;
+    let requested: HashSet<_> = req.video_ids.into_iter().collect();
+    if requested.iter().any(|id|!lessons.iter().any(|lesson|&lesson.id==id)) {
+        return Err(ApiError::BadRequest("批量提交包含不存在的课节".into()));
+    }
+    let mut ids = Vec::new();
+    for lesson in lessons {
+        if (requested.is_empty() || requested.contains(&lesson.id)) && !lesson.is_processed
+            && !state.lesson_busy(current_user.id,&req.course_id,&lesson.id).await { ids.push(lesson.id); }
+    }
+    if ids.is_empty() { return Err(ApiError::BadRequest("没有需要提交的课节，已处理或已入队的课节会自动跳过".into())); }
+    let submitter: std::sync::Arc<dyn BatchSubmitter> = std::sync::Arc::new(CourseSubmitter { state:state.clone(),user_id:current_user.id });
+    let batch = state.batch_submissions.start(current_user.id,req.course_id,ids,submitter).await.map_err(ApiError::Conflict)?;
+    Ok(Json(serde_json::json!({"success":true,"batch":batch})))
+}
+
+async fn batch_submit_status(State(state): State<AppState>, current_user: CurrentUser)
+    -> impl IntoResponse {
+    let value = state.batch_submissions.snapshot(current_user.id).await
+        .map(|batch|serde_json::to_value(batch).expect("batch snapshot"))
+        .unwrap_or_else(||serde_json::json!({"active":false}));
+    ([(axum::http::header::CACHE_CONTROL,"no-store")],Json(value))
 }
 
 async fn process_lesson(
@@ -555,77 +576,7 @@ async fn process_lesson(
     current_user: CurrentUser,
     Json(req): Json<ProcessLessonRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let lesson_mutex = state.lesson_mutation(current_user.id).await;
-    let _mutation_guard = lesson_mutex.lock().await;
-    if state.lesson_busy(current_user.id, &course_id, &video_id).await {
-        return Err(ApiError::BadRequest("该课节已在队列中或正在处理".into()));
-    }
-    let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
-    let username = user.email.split('@').next().unwrap_or_default().to_string();
-    let mut lessons = lesson_storage::load_lessons(&username, &course_id).map_err(ApiError::Internal)?;
-    let index = lessons.iter().position(|l|l.id == video_id)
-        .ok_or_else(||ApiError::BadRequest("课节不存在".into()))?;
-    let supplied_key = req.manual_key.or_else(||lessons[index].enc_key.clone());
-    let media = if !lessons[index].video_url.is_empty() && supplied_key.is_some() {
-        crate::services::prepared_media::prepare_teaching(&lessons[index].video_url, "", "",
-            &state.login_cache, supplied_key.as_deref()).await.map_err(ApiError::BadRequest)?
-    } else if let Some(mut replay) = lessons[index].manual_replay.clone() {
-        if replay.date.is_empty() { replay.date = lessons[index].date.clone(); }
-        let client = state.app_replay_client(current_user.id).await.map_err(ApiError::Internal)?;
-        let mut client = client.lock().await;
-        let status = client.login_bound(&user, &serde_json::json!({})).await.map_err(ApiError::Internal)?;
-        if status["data"]["logged_in"] != true {
-            return Ok(Json(serde_json::json!({"success":false,"needs_app_login":true,
-                "message":status["error"].as_str().unwrap_or("好学认证需要验证码")})));
-        }
-        client.prepare_media(&replay).await.map_err(ApiError::BadRequest)?
-    } else {
-        let password = user.iaaa_encrypted_password.as_deref()
-            .ok_or_else(||ApiError::BadRequest("未绑定IAAA账号，请先绑定".into()))?;
-        let play_url = lessons[index].play_url.clone();
-        if play_url.is_empty() { return Err(ApiError::BadRequest("播放链接为空，请先刷新课节列表".into())); }
-        let mut login = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, password, &state.login_cache)
-            .await.map_err(ApiError::BadRequest)?;
-        let (url, key_uri, key) = pkulogin::session_operation(&mut login, &username, password, &state.login_cache, |session| {
-            // Retry the entire watching-page -> signed URL -> key transaction after authentication expires.
-            let url = video_downloader::get_video_download_url(&play_url, session)?;
-            if !url.contains(".m3u8") { return Ok((url, String::new(), Ok(None))); }
-            if let Some(key) = &supplied_key {
-                crate::services::prepared_media::decode_key(key)?;
-                return Ok((url, String::new(), Ok(Some(key.clone()))));
-            }
-            let (uri, key) = crate::services::pkuvideo::fetch_m3u8_key_in_session(&url, session)?;
-            if let Err(error) = &key { if pkulogin::is_auth_error(error) { return Err(error.clone()); } }
-            Ok((url, uri, key.map(Some)))
-        }).await.map_err(ApiError::BadRequest)?;
-        lessons[index].video_url = url.clone();
-        match key {
-            Ok(enc_key) => crate::services::prepared_media::PreparedMedia { url, enc_key },
-            Err(_) => {
-                lesson_storage::save_lessons(&username, &course_id, &lessons).map_err(ApiError::Internal)?;
-                return Ok(Json(serde_json::json!({"success":true,"needs_key":true,"key_uri":key_uri,"video_url":url})));
-            }
-        }
-    };
-    lessons[index].video_url = media.url.clone();
-    lessons[index].enc_key = media.enc_key.clone();
-    lesson_storage::save_lessons(&username, &course_id, &lessons).map_err(ApiError::Internal)?;
-    let job_id = Uuid::new_v4();
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let mut job = PkuVideoJob::new(job_id, current_user.id, media.url.clone(),
-        format!("./data/pkuvideo_jobs/{timestamp}_{job_id}"));
-    job.course_id = Some(course_id.clone());
-    job.lesson_id = Some(video_id.clone());
-    state.store.insert_pkuvideo_job(job.clone()).await.map_err(|e|ApiError::Internal(e.to_string()))?;
-    state.pkuvideo_jobs.write().await.insert(job_id, job);
-    if let Err(error) = crate::services::video_jobs::enqueue_prepared_job(&state, job_id, current_user.id, media).await {
-        state.pkuvideo_jobs.write().await.remove(&job_id);
-        let _ = state.store.delete_pkuvideo_job(job_id).await;
-        return Err(ApiError::Internal(error));
-    }
-    Ok(Json(serde_json::json!({"success":true,"job_id":job_id,"task_id":job_id,
-        "status_url":format!("/api/pkuvideo/jobs/{job_id}"),
-        "status":"queued","message":"已加入视频处理队列"})))
+    crate::services::lesson_submission::submit_lesson(state, current_user.id, course_id, video_id, req.manual_key).await
 }
 
 async fn get_process_status(

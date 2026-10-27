@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub batch_submissions: Arc<crate::services::batch_submission::BatchSubmissionManager>,
     pub video_queue: Arc<crate::services::video_queue::VideoQueue>,
     pub settings: Arc<Settings>,
     pub store: Arc<FileStore>,
@@ -72,6 +73,7 @@ impl AppState {
 
 
         let state = Self {
+            batch_submissions: Arc::new(crate::services::batch_submission::BatchSubmissionManager::new()),
             video_queue: crate::services::video_queue::VideoQueue::new(settings.pkuvideo.processing_concurrency),
             settings: Arc::new(settings),
             store,

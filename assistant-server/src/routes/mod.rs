@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod batch_guard;
 pub mod manual_lessons;
 pub mod conversations;
 pub mod health;
@@ -51,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .merge(settings::routes())
         .merge(wechat::routes())
         .merge(user_api_config::routes())
+        .layer(axum::middleware::from_fn_with_state(state.clone(), batch_guard::guard))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
