@@ -42,6 +42,6 @@ m3u8_segment_timeout_seconds = 120
 
 ## 本次交互记录的兼容点
 
-登录流程先访问教学网入口，再向 IAAA `oauth.jsp` POST `appID/appName/redirectUrl`，沿用同一个 Cookie jar 和 User-Agent 提交 OAuth。补齐空的 `randCode/smsCode/otpCode` 和浏览器的 Origin、Referer；HTTP 回调跟随到 HTTPS，不复用一次性 token 尝试第二个回调。回放 iframe 使用 HTML 解析器读取，兼容属性顺序、单引号和 `&amp;`，URL 查询参数先解码再编码。
+登录流程先访问教学网入口，再向 IAAA `oauth.jsp` POST `appID/appName/redirectUrl`，沿用同一个 Cookie jar 和 User-Agent 提交 OAuth。补齐空的 `randCode/smsCode/otpCode` 和浏览器的 Origin、Referer；IAAA 表单中的 `redirectUrl/redirUrl` 保持教学网声明的 HTTP 地址，但实际回调请求直接使用 HTTPS，模拟浏览器本地 HSTS 升级。抓包中的 HTTP 307 带 `Non-Authoritative-Reason: HSTS`，没有 HTTP 网络连接，不能当作服务器重定向交给 curl `-L` 复现；不复用一次性 token 尝试第二个回调。回放 iframe 使用 HTML 解析器读取，兼容属性顺序、单引号和 `&amp;`，URL 查询参数先解码再编码。
 
 抓包仅用作离线协议参考，没有把真实密码、token、Cookie 或原始 HAR 写入仓库，也没有使用记录中的凭证发起真实登录。验证码、短信验证及上游故障仍需要按服务端提示处理；离线测试不能保证外部服务始终登录成功。

@@ -13,8 +13,19 @@ use crate::services::login_cache::LoginCache;
 
 const IAAA_OAUTH_LOGIN_URL: &str = "https://iaaa.pku.edu.cn/iaaa/oauthlogin.do";
 const BLACKBOARD_APP_ID: &str = "blackboard";
+// Match the redirectUrl declared by Blackboard's IAAA form.
 const BLACKBOARD_REDIR_URL: &str =
     "http://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin";
+// The browser upgrades that URL locally through HSTS before making a network request.
+const BLACKBOARD_CALLBACK_URL: &str =
+    "https://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin";
+
+fn campus_login_url(token: &str) -> String {
+    let mut url = reqwest::Url::parse(BLACKBOARD_CALLBACK_URL).expect("constant callback URL");
+    url.query_pairs_mut().append_pair("_rand", &format!("{:.16}", rand::random::<f64>()))
+        .append_pair("token", token);
+    url.into()
+}
 
 pub type PkuLoginResult = super::login_cache::LoginCacheEntry;
 
@@ -189,15 +200,13 @@ pub async fn login_iaaa_and_get_cookies(
     let token = parse_token(&login_body)?;
     tracing::info!("步骤5完成: Token解析成功 - token长度: {}", token.len());
 
-    // Step 2: campusLogin?_rand=...&token=...
-    // The browser enters the HTTP callback and follows its 307 to HTTPS.
-    // A token is single-use; never try a second callback with that same token.
-    let campus_urls = vec![format!("{}?_rand={:.16}&token={}", BLACKBOARD_REDIR_URL,
-        rand::random::<f64>(), urlencoding::encode(&token))];
+    // HAR's 307 is an internal HSTS upgrade (no HTTP connection), not a server redirect.
+    // curl -L cannot reproduce that upgrade unless HSTS is configured: enter HTTPS directly.
+    let campus_urls = vec![campus_login_url(&token)];
 
     let mut last_err = String::new();
     for (idx, campus_url) in campus_urls.iter().enumerate() {
-        tracing::info!("步骤7: 尝试第{}次教学网登录 (URL类型: {})...", idx + 1, "HTTP → HTTPS");
+        tracing::info!("步骤7: 尝试第{}次教学网登录 (URL类型: {})...", idx + 1, "HTTPS（模拟浏览器 HSTS 升级）");
         
         let campus_args = vec![
             "-sS".to_string(),
@@ -345,6 +354,20 @@ mod session_tests {
         let path = std::env::temp_dir().join(format!("pku-auth-test-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&path, "cookies").unwrap();
         PkuLoginResult::new(path, "test-agent".into(), String::new())
+    }
+
+    #[test]
+    fn callback_uses_https_before_sending_token_and_preserves_form_redirect() {
+        // Reserved characters must survive URL construction without changing the token.
+        let token = "sample+token/with=&reserved";
+        let callback = reqwest::Url::parse(&campus_login_url(token)).unwrap();
+        assert_eq!(callback.scheme(), "https");
+        assert_eq!(callback.host_str(), Some("course.pku.edu.cn"));
+        assert_eq!(callback.path(), "/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin");
+        let query: std::collections::HashMap<_,_> = callback.query_pairs().into_owned().collect();
+        assert_eq!(query.get("token").unwrap(), token);
+        assert!(query.contains_key("_rand"));
+        assert_eq!(reqwest::Url::parse(BLACKBOARD_REDIR_URL).unwrap().scheme(), "http");
     }
 
     #[test]
