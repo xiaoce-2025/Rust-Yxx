@@ -11,6 +11,8 @@ use crate::app_state::AppState;
 
 const LOGIN_IMAGE_URL: &str = "/auth/login-picture.cf4a1b3511c8.webp";
 
+const LOGIN_PREVIEW_URL: &str = "/auth/login-preview.ef807508d656.webp";
+
 pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/auth", get(auth_page))
@@ -27,6 +29,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
                 (CACHE_CONTROL, "public, max-age=31536000, immutable")],
                 include_bytes!("../../assest/login_picture.cf4a1b3511c8.webp").as_slice())
         }))
+        .route(LOGIN_PREVIEW_URL, get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "image/webp"),
+                (CACHE_CONTROL, "public, max-age=31536000, immutable")],
+                include_bytes!("../../assest/login_preview.ef807508d656.webp").as_slice())
+        }))
         .route("/", get(app_page))
         .route("/app", get(app_page))
         .route("/pkuvideo", get(pkuvideo_page))
@@ -38,7 +45,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
 }
 
 async fn require_login(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    if matches!(request.uri().path(), "/auth" | "/auth/iaaa-login.css" | "/auth/login-picture.png" | LOGIN_IMAGE_URL) {
+    if matches!(request.uri().path(), "/auth" | "/auth/iaaa-login.css" | "/auth/login-picture.png" | LOGIN_IMAGE_URL | LOGIN_PREVIEW_URL) {
         return next.run(request).await;
     }
     let target = request.uri().path_and_query().map(|uri| uri.as_str()).unwrap_or("/app").to_string();
@@ -123,6 +130,11 @@ mod tests {
         assert_eq!(image.headers()["content-type"], "image/webp");
         assert_eq!(image.headers()["cache-control"], "public, max-age=31536000, immutable");
         assert_eq!(image.bytes().await.unwrap().as_ref(), include_bytes!("../../assest/login_picture.cf4a1b3511c8.webp").as_slice());
+        let preview = client.get(format!("{base}{LOGIN_PREVIEW_URL}")).send().await.unwrap();
+        assert_eq!(preview.status(), 200);
+        assert_eq!(preview.headers()["content-type"], "image/webp");
+        assert_eq!(preview.headers()["cache-control"], "public, max-age=31536000, immutable");
+        assert_eq!(preview.bytes().await.unwrap().as_ref(), include_bytes!("../../assest/login_preview.ef807508d656.webp").as_slice());
         let now = Utc::now();
         for (active, expired, expected) in [(true, false, 200), (true, true, 303), (false, false, 303)] {
             let id = Uuid::new_v4();

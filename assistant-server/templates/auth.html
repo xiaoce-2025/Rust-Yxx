@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>登录 | 「严小希」小助手</title>
   <link rel="stylesheet" href="/auth/iaaa-login.css" />
-  <link rel="preload" as="image" type="image/webp" href="/auth/login-picture.cf4a1b3511c8.webp" fetchpriority="high" />
+  <link rel="preload" as="image" type="image/webp" href="/auth/login-preview.ef807508d656.webp" fetchpriority="high" />
   <style>
     [hidden] { display: none !important; }
     body { display: block; margin: 0; min-height: 100vh; background: #fff; color: #222; font-family: Arial, "Microsoft YaHei", sans-serif; }
     .auth-layout .brand { color: #9b0000; font-size: 30px; font-weight: bold; }
     .auth-layout { width: min(980px, calc(100% - 48px)); }
     .auth-layout .mid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 48px; align-items: center; float: none; }
-    .auth-layout .welcome { width: 100%; min-width: 0; aspect-ratio: 1672 / 941; background: center / contain no-repeat url("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYWGDEjJR0oOjM9PDkzODdASFxOQERXRTc4UG1RV19iZ2hnPk1xeXBkeFxlZ2P/2wBDARESEhgVGC8aGi9jQjhCY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2P/wAARCAAkAEADASIAAhEBAxEB/8QAGgAAAgMBAQAAAAAAAAAAAAAAAAUCAwQBBv/EAC0QAAIBAwMCBQIHAQAAAAAAAAECAwAEERIhMQUTIkFRYYFxoRQykbHB0eHw/8QAFgEBAQEAAAAAAAAAAAAAAAAAAQAC/8QAFxEBAQEBAAAAAAAAAAAAAAAAAAERQf/aAAwDAQACEQMRAD8A9vLHuXJOwz9PWs6GSGUBoy0ZAIbnO+1cvZCY3Rd9xt671zvEWbrGQZFQhBjhvegsdx1bpsM7Qq0skmfEyrqCn601t5DJGkkbiVX8xsB8V5ToNhBf2z91zrRjkA8j3+a2dEufwvU7qxR9SAnQSdsigvSvIqaQxwWOB7mqxdQliocErjOPehnRlGrRqU7AnzqASZZCy9tVwuAB+tIxpBzwaKymGV/zzPjBBCgDOa0Rr20VQSQBgZpBffoNROeCCcc0puUvOoSNBCohj1aWZjp+owOacXRYS6iQAPbI+TQZVSMFV3zlmAyMfzQ0VXdnH0hIJUSMurBQVXBY+YPr/lR6jZQpOJ0kEc2dQA2DeufTmmJgHULmGW4jKxx7rG/JPqRQLdb+KRJ00FWIVgdyp/77UNTOqI7hjAJH5OOB8YxVwkvjjQ74+MCrBAY4REEBxkeFsfvXG70QUmBxpPOcj5ApZQhvLqKQrKNexYg8/amMEhmUMVK5+9L4FLEnSCC2SAcn+6aRjwjYioB40c+IA1SYwpCoSqjfAooqpiw+FMioSRKG7gGGxjI8xRRUBEoYaiN6tCgDYYooqTulTuQM1LiiikP/2Q=="); }
+    .auth-layout .welcome { width: 100%; min-width: 0; aspect-ratio: 1672 / 941; background: center / contain no-repeat url("/auth/login-preview.ef807508d656.webp"); }
     .auth-layout .welcome img { display: block; width: 100%; height: auto; object-fit: contain; opacity: 0; transition: opacity .2s ease; }
     .auth-layout .welcome img.is-ready { opacity: 1; }
     @media (prefers-reduced-motion: reduce) { .auth-layout .welcome img { transition: none; } }
@@ -46,7 +46,7 @@
       <p class="tip">严小希账户登录</p>
     </header>
     <div class="mid">
-      <aside class="welcome"><picture><source type="image/webp" srcset="/auth/login-picture.cf4a1b3511c8.webp" /><img src="/auth/login-picture.png" width="1672" height="941" decoding="async" fetchpriority="high" alt="严小希校园插画：学习路上，小希与你相伴。" /></picture></aside>
+      <aside class="welcome"><picture><source type="image/webp" srcset="/auth/login-picture.cf4a1b3511c8.webp" /><img src="/auth/login-picture.png" width="1672" height="941" decoding="async" fetchpriority="low" alt="严小希校园插画：学习路上，小希与你相伴。" /></picture></aside>
       <section class="single_col_panel" aria-label="严小希账户">
         <div class="row" role="tablist" aria-label="账户操作">
           <div class="row_50 center row-title"><button type="button" id="tabLogin" class="current" role="tab" aria-controls="loginForm" aria-selected="true">登录</button></div>
@@ -78,7 +78,7 @@
       <p class="tip">IAAA 账号认证</p>
     </header>
     <div class="mid">
-      <aside class="welcome"><picture><source type="image/webp" srcset="/auth/login-picture.cf4a1b3511c8.webp" /><img src="/auth/login-picture.png" width="1672" height="941" decoding="async" fetchpriority="high" alt="严小希校园插画：学习路上，小希与你相伴。" /></picture></aside>
+      <aside class="welcome"><picture><source type="image/webp" srcset="/auth/login-picture.cf4a1b3511c8.webp" /><img src="/auth/login-picture.png" width="1672" height="941" decoding="async" fetchpriority="low" alt="严小希校园插画：学习路上，小希与你相伴。" /></picture></aside>
       <section class="single_col_panel" aria-label="IAAA 登录">
         <div class="row" role="tablist" aria-label="登录方式">
           <div class="row_50 center row-title"><button type="button" id="iaaaAccountTab" role="tab" aria-controls="iaaaForm" aria-selected="true" class="current">账号登录</button></div>
