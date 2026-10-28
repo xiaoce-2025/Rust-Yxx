@@ -86,10 +86,25 @@ fn verify_response(result: &Value) -> Result<(), ApiError> {
         .filter(|code| code.len() <= 64 && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'));
     let success = result.get("success").and_then(Value::as_bool);
     let token_present = result.get("token").and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty());
+    let captcha_required = result.get("showCode").and_then(Value::as_bool).unwrap_or(false);
+    let reason = match code {
+        Some("E01") => "IAAA 拒绝了账号或密码，请使用北京大学统一身份认证密码（与教学网一致），而非严小希账户密码",
+        Some("E02") => "IAAA 账号尚未激活，请先在北京大学统一身份认证页面完成激活",
+        Some("E03") => "IAAA 要求图形验证码或验证码校验失败，当前登录页面暂不支持图形验证码",
+        Some("E04") => "IAAA 短信验证码校验失败，当前登录页面暂不支持短信验证",
+        Some("E05") => "IAAA 手机令牌校验失败，当前登录页面暂不支持手机令牌验证",
+        _ => "IAAA 认证未通过或未返回有效 token，请稍后重试",
+    };
+    // Only known, fixed messages are surfaced; never copy arbitrary upstream data
+    // into logs or the browser (the response may also contain authentication secrets).
     tracing::warn!(host="iaaa.pku.edu.cn", stage="校验登录响应", iaaa_code=code,
-        success=?success, token_present,
+        success=?success, token_present, captcha_required, reason,
         "IAAA rejected authentication or returned no usable token");
-    Err(ApiError::BadRequest("IAAA 认证未通过，请检查学号和密码；如需验证码或二次验证，请先前往 IAAA 完成验证后重试".into()))
+    let mut message = format!("{}：{reason}", code.unwrap_or("IAAA"));
+    if captcha_required && code != Some("E03") {
+        message.push_str("；IAAA 同时要求图形验证码，当前登录页面暂不支持，请勿连续重复尝试");
+    }
+    Err(ApiError::BadRequest(message))
 }
 
 #[cfg(test)]
@@ -124,5 +139,20 @@ mod tests {
         let error = upstream_error("获取公钥（getPublicKey.do）", source).to_string();
         assert!(error.contains("getPublicKey.do"));
         assert!(error.contains("HTTP 503"));
+    }
+
+    #[test]
+    fn credential_rejection_is_distinct_from_verification_challenges() {
+        let credential = verify_response(&json!({"success":false,"errors":{"code":"E01"}})).unwrap_err().to_string();
+        assert!(credential.contains("E01"));
+        assert!(credential.contains("统一身份认证密码"));
+        assert!(!credential.contains("图形验证码"));
+        let challenge = verify_response(&json!({"success":false,"showCode":true,"errors":{"code":"E01"}})).unwrap_err().to_string();
+        assert!(challenge.contains("同时要求图形验证码"));
+        let captcha = verify_response(&json!({"success":false,"errors":{"code":"E03"}})).unwrap_err().to_string();
+        assert!(captcha.contains("图形验证码"));
+        assert!(!captcha.contains("密码"));
+        let unknown = verify_response(&json!({"success":false,"errors":{"code":"secret\ncode","msg":"secret-response"}})).unwrap_err().to_string();
+        assert!(!unknown.contains("secret"));
     }
 }
