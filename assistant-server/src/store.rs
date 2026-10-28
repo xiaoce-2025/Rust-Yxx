@@ -236,9 +236,11 @@ impl FileStore {
     pub async fn resolve_iaaa_user(&self, mut candidate: FileUser) -> Result<Option<FileUser>, Box<dyn std::error::Error>> {
         let mut users = self.users.write().await;
         if let Some(user) = users.values().find(|u| u.email == candidate.email) {
+            tracing::info!(user_id=%user.id, is_active=user.is_active, "IAAA identity resolved to existing account");
             return Ok(Some(user.clone()));
         }
         if !self.is_email_in_whitelist(&candidate.email).await {
+            tracing::warn!(email=%candidate.email, "IAAA registration denied: email is not in the whitelist");
             return Ok(None);
         }
         if users.values().any(|u| u.username == candidate.username) {
@@ -248,6 +250,7 @@ impl FileStore {
         updated.insert(candidate.id, candidate.clone());
         self.save_users_data(&updated).await?;
         *users = updated;
+        tracing::info!(user_id=%candidate.id, "IAAA whitelist check passed; new account registered");
         Ok(Some(candidate))
     }
 

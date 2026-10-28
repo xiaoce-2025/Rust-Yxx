@@ -210,6 +210,9 @@ async fn iaaa_login(
     if req.password.is_empty() || req.password.len() > 1024 {
         return Err(ApiError::BadRequest("请输入有效的 IAAA 密码".into()));
     }
+    let account_exists = state.store.get_user_by_email(&email).await.is_some();
+    tracing::info!(account=%username, account_exists,
+        "IAAA login requested; unregistered identities will be checked against the whitelist after authentication");
     crate::services::iaaa_login::verify(username, &req.password).await?;
 
     // A random local password prevents the university password from becoming the
@@ -240,6 +243,7 @@ async fn iaaa_login(
         username: user.username, email: user.email, expires_at,
     };
     let cookie = build_auth_cookie(&resp.token, state.settings.security.session_ttl_hours);
+    tracing::info!(user_id=%resp.user_id, "IAAA assistant session created");
     Ok(([(SET_COOKIE, cookie)], Json(resp)).into_response())
 }
 
