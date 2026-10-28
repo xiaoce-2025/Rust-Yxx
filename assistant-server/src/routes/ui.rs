@@ -16,6 +16,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
             ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
                 include_str!("../../templates/iaaa-login.css"))
         }))
+        .route("/auth/login-picture.png", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "image/png")],
+                include_bytes!("../../assest/login_picture.png").as_slice())
+        }))
         .route("/", get(app_page))
         .route("/app", get(app_page))
         .route("/pkuvideo", get(pkuvideo_page))
@@ -27,7 +31,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
 }
 
 async fn require_login(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    if matches!(request.uri().path(), "/auth" | "/auth/iaaa-login.css") {
+    if matches!(request.uri().path(), "/auth" | "/auth/iaaa-login.css" | "/auth/login-picture.png") {
         return next.run(request).await;
     }
     let target = request.uri().path_and_query().map(|uri| uri.as_str()).unwrap_or("/app").to_string();

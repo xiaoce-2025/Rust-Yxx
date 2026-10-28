@@ -114,7 +114,7 @@
       <p class="tip">IAAA 账号认证</p>
     </header>
     <div class="mid">
-      <aside class="welcome"><span class="welcome-mark">希</span><h1>学习路上，<br />小希与你相伴。</h1><p>欢迎使用「严小希」小助手</p></aside>
+      <aside class="welcome"><img src="/auth/login-picture.png" width="1672" height="941" alt="严小希校园插画：学习路上，小希与你相伴。" /></aside>
       <section class="single_col_panel" aria-label="IAAA 登录">
         <div class="row" role="tablist" aria-label="登录方式">
           <div class="row_50 center row-title"><button type="button" id="iaaaAccountTab" role="tab" aria-controls="iaaaForm" aria-selected="true" class="current">账号登录</button></div>
@@ -138,10 +138,11 @@
     [hidden] { display: none !important; }
     body.iaaa-mode { display: block; margin: 0; min-height: 100vh; background: #fff; color: #222; font-family: Arial, "Microsoft YaHei", sans-serif; }
     #iaaaView .brand { color: #9b0000; font-size: 30px; font-weight: bold; }
-    #iaaaView .welcome { float: left; width: 385px; padding-top: 10px; }
-    #iaaaView .welcome-mark { display: inline-block; color: #9b0000; font-size: 64px; border-bottom: 3px solid #9b0000; }
-    #iaaaView .welcome h1 { font-size: 32px; line-height: 1.6; font-weight: normal; }
-    #iaaaView .welcome p { color: #777; }
+    #iaaaView { width: min(980px, calc(100% - 48px)); }
+    #iaaaView .mid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 48px; align-items: center; float: none; }
+    #iaaaView .welcome { width: 100%; min-width: 0; }
+    #iaaaView .welcome img { display: block; width: 100%; height: auto; object-fit: contain; }
+    #iaaaView .single_col_panel { float: none; width: 280px; margin: 0; }
     #iaaaView button { font-family: inherit; }
     #iaaaView .row-title button { border: 0; background: transparent; color: #222; font-size: 18px; padding: 0; cursor: pointer; }
     #iaaaView .row-title button.current { color: #9b0000; }
@@ -151,11 +152,18 @@
     #iaaaStatus { min-height: 20px; font-size: 13px; line-height: 1.6; margin: 6px 0; overflow-wrap: anywhere; }
     #iaaaView .lx_info { width: auto; text-align: center; }
     #iaaaView :focus-visible { outline: 2px solid #9b0000; outline-offset: 3px; }
+    #iaaaView input:focus, #iaaaView input:focus-visible { outline: none; box-shadow: none; border-color: #9b0000; }
+    .auth-card input:focus, .auth-card input:focus-visible { outline: none; box-shadow: none; border-color: var(--accent); }
     #iaaaView button:disabled { opacity: .6; cursor: wait; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
-    @media (max-width: 800px) { #iaaaView .welcome { width: 340px; } }
-    @media (max-width: 640px) { #iaaaView .welcome { width: 180px; } #iaaaView .welcome h1 { font-size: 23px; } }
-    @media (max-width: 480px) { #iaaaView .welcome { display: none; } #iaaaView .mid { height: auto; min-height: 350px; } #iaaaView .single_col_panel { margin-top: 15px; } #iaaaView .brand { font-size: 25px; } }
+    @media (max-width: 700px) {
+      #iaaaView { width: calc(100% - 32px); }
+      #iaaaView .top { margin: 24px 0; text-align: center; }
+      #iaaaView .mid { grid-template-columns: minmax(0, 1fr); gap: 24px; height: auto; min-height: 0; }
+      #iaaaView .single_col_panel { width: 100%; max-width: 360px; justify-self: center; }
+      #iaaaView .welcome { grid-row: 2; max-width: 520px; justify-self: center; }
+      #iaaaView .brand { font-size: 25px; }
+    }
   </style>
 
   <script>
