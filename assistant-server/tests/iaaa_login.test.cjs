@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, '../templates/auth.html'), 'utf8');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
-function environment(search = '', api = async () => ({ok: true, text: async () => '{}'})) {
+function environment(search = '', api = async () => ({ok: true, text: async () => '{}'}), images = []) {
   const nodes = new Map(), calls = [];
   function node(id) {
     if (!nodes.has(id)) nodes.set(id, {
@@ -20,7 +20,7 @@ function environment(search = '', api = async () => ({ok: true, text: async () =
   }
   const location = {origin: 'https://assistant.example', search, href: ''};
   vm.runInNewContext(script, {
-    document: {getElementById: node, querySelector: () => node('card'), body: node('body')},
+    document: {getElementById: node, querySelector: () => node('card'), querySelectorAll: () => images, body: node('body')},
     location, URL, URLSearchParams,
     fetch: async (url, options) => {
       if (url === '/api/auth/me') return {ok: false};
@@ -84,4 +84,34 @@ test('malformed and external redirect targets fall back to the app', async () =>
     await node('iaaaForm').listeners.submit(event);
     assert.equal(location.href, '/app');
   }
+});
+
+test('full illustration stays hidden until decoding completes, including cached images', async () => {
+  for (const cached of [false, true]) {
+    let finishDecoding;
+    const decoded = new Promise(resolve => {finishDecoding = resolve;});
+    const classes = new Set(), handlers = {};
+    const image = {complete: cached, naturalWidth: cached ? 1672 : 0,
+      decode: () => decoded, classList: {add: value => classes.add(value)},
+      addEventListener: (name, fn) => {handlers[name] = fn;}};
+    environment('', undefined, [image]);
+    assert.equal(classes.has('is-ready'), false);
+    const loading = cached ? undefined : handlers.load();
+    assert.equal(classes.has('is-ready'), false);
+    finishDecoding();
+    await loading;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(classes.has('is-ready'), true);
+  }
+});
+
+test('decoding failure keeps the full preview visible', async () => {
+  const classes = new Set(), handlers = {};
+  const image = {complete: false, naturalWidth: 0,
+    decode: async () => {throw new Error('decode failed');},
+    classList: {add: value => classes.add(value)},
+    addEventListener: (name, fn) => {handlers[name] = fn;}};
+  environment('', undefined, [image]);
+  await handlers.load();
+  assert.equal(classes.has('is-ready'), false);
 });

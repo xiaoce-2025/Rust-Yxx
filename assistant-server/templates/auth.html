@@ -5,6 +5,39 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>登录 | 「严小希」小助手</title>
   <link rel="stylesheet" href="/auth/iaaa-login.css" />
+  <link rel="preload" as="image" type="image/webp" href="/auth/login-picture.cf4a1b3511c8.webp" fetchpriority="high" />
+  <style>
+    [hidden] { display: none !important; }
+    body { display: block; margin: 0; min-height: 100vh; background: #fff; color: #222; font-family: Arial, "Microsoft YaHei", sans-serif; }
+    .auth-layout .brand { color: #9b0000; font-size: 30px; font-weight: bold; }
+    .auth-layout { width: min(980px, calc(100% - 48px)); }
+    .auth-layout .mid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 48px; align-items: center; float: none; }
+    .auth-layout .welcome { width: 100%; min-width: 0; aspect-ratio: 1672 / 941; background: center / contain no-repeat url("data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYWGDEjJR0oOjM9PDkzODdASFxOQERXRTc4UG1RV19iZ2hnPk1xeXBkeFxlZ2P/2wBDARESEhgVGC8aGi9jQjhCY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2P/wAARCAAkAEADASIAAhEBAxEB/8QAGgAAAgMBAQAAAAAAAAAAAAAAAAUCAwQBBv/EAC0QAAIBAwMCBQIHAQAAAAAAAAECAwAEERIhMQUTIkFRYYFxoRQykbHB0eHw/8QAFgEBAQEAAAAAAAAAAAAAAAAAAQAC/8QAFxEBAQEBAAAAAAAAAAAAAAAAAAERQf/aAAwDAQACEQMRAD8A9vLHuXJOwz9PWs6GSGUBoy0ZAIbnO+1cvZCY3Rd9xt671zvEWbrGQZFQhBjhvegsdx1bpsM7Qq0skmfEyrqCn601t5DJGkkbiVX8xsB8V5ToNhBf2z91zrRjkA8j3+a2dEufwvU7qxR9SAnQSdsigvSvIqaQxwWOB7mqxdQliocErjOPehnRlGrRqU7AnzqASZZCy9tVwuAB+tIxpBzwaKymGV/zzPjBBCgDOa0Rr20VQSQBgZpBffoNROeCCcc0puUvOoSNBCohj1aWZjp+owOacXRYS6iQAPbI+TQZVSMFV3zlmAyMfzQ0VXdnH0hIJUSMurBQVXBY+YPr/lR6jZQpOJ0kEc2dQA2DeufTmmJgHULmGW4jKxx7rG/JPqRQLdb+KRJ00FWIVgdyp/77UNTOqI7hjAJH5OOB8YxVwkvjjQ74+MCrBAY4REEBxkeFsfvXG70QUmBxpPOcj5ApZQhvLqKQrKNexYg8/amMEhmUMVK5+9L4FLEnSCC2SAcn+6aRjwjYioB40c+IA1SYwpCoSqjfAooqpiw+FMioSRKG7gGGxjI8xRRUBEoYaiN6tCgDYYooqTulTuQM1LiiikP/2Q=="); }
+    .auth-layout .welcome img { display: block; width: 100%; height: auto; object-fit: contain; opacity: 0; transition: opacity .2s ease; }
+    .auth-layout .welcome img.is-ready { opacity: 1; }
+    @media (prefers-reduced-motion: reduce) { .auth-layout .welcome img { transition: none; } }
+    .auth-layout .single_col_panel { float: none; width: 280px; margin: 0; }
+    .auth-layout button { font-family: inherit; }
+    .auth-layout .row-title button { border: 0; background: transparent; color: #222; font-size: 18px; padding: 0; cursor: pointer; }
+    .auth-layout .row-title button.current { color: #9b0000; }
+    .auth-layout .auth-note { font-size: 13px; line-height: 1.8; margin: 8px 0; }
+    .auth-layout .account-switch { border: 0; background: transparent; color: #9b0000; font-size: 14px; padding: 5px 0; cursor: pointer; }
+    .auth-layout .coming-soon { min-height: 220px; padding-top: 55px; }
+    .auth-status, #iaaaStatus { min-height: 20px; font-size: 13px; line-height: 1.6; margin: 6px 0; overflow-wrap: anywhere; }
+    .auth-layout .lx_info { width: auto; text-align: center; }
+    .auth-layout :focus-visible { outline: 2px solid #9b0000; outline-offset: 3px; }
+    .auth-layout input:focus, .auth-layout input:focus-visible { outline: none; box-shadow: none; border-color: #9b0000; }
+    .auth-layout button:disabled { opacity: .6; cursor: wait; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+    @media (max-width: 700px) {
+      .auth-layout { width: calc(100% - 32px); }
+      .auth-layout .top { margin: 24px 0; text-align: center; }
+      .auth-layout .mid { grid-template-columns: minmax(0, 1fr); gap: 24px; height: auto; min-height: 0; }
+      .auth-layout .single_col_panel { width: 100%; max-width: 360px; justify-self: center; }
+      .auth-layout .welcome { grid-row: 2; max-width: 520px; justify-self: center; }
+      .auth-layout .brand { font-size: 25px; }
+    }
+  </style>
 </head>
 <body>
   <main id="accountView" class="main auth-layout">
@@ -13,7 +46,7 @@
       <p class="tip">严小希账户登录</p>
     </header>
     <div class="mid">
-      <aside class="welcome"><img src="/auth/login-picture.png" width="1672" height="941" alt="严小希校园插画：学习路上，小希与你相伴。" /></aside>
+      <aside class="welcome"><picture><source type="image/webp" srcset="/auth/login-picture.cf4a1b3511c8.webp" /><img src="/auth/login-picture.png" width="1672" height="941" decoding="async" fetchpriority="high" alt="严小希校园插画：学习路上，小希与你相伴。" /></picture></aside>
       <section class="single_col_panel" aria-label="严小希账户">
         <div class="row" role="tablist" aria-label="账户操作">
           <div class="row_50 center row-title"><button type="button" id="tabLogin" class="current" role="tab" aria-controls="loginForm" aria-selected="true">登录</button></div>
@@ -45,7 +78,7 @@
       <p class="tip">IAAA 账号认证</p>
     </header>
     <div class="mid">
-      <aside class="welcome"><img src="/auth/login-picture.png" width="1672" height="941" alt="严小希校园插画：学习路上，小希与你相伴。" /></aside>
+      <aside class="welcome"><picture><source type="image/webp" srcset="/auth/login-picture.cf4a1b3511c8.webp" /><img src="/auth/login-picture.png" width="1672" height="941" decoding="async" fetchpriority="high" alt="严小希校园插画：学习路上，小希与你相伴。" /></picture></aside>
       <section class="single_col_panel" aria-label="IAAA 登录">
         <div class="row" role="tablist" aria-label="登录方式">
           <div class="row_50 center row-title"><button type="button" id="iaaaAccountTab" role="tab" aria-controls="iaaaForm" aria-selected="true" class="current">账号登录</button></div>
@@ -55,7 +88,7 @@
           <div class="row"><label class="sr-only" for="iaaaUsername">学号</label><input class="input-txt-row" id="iaaaUsername" name="username" type="text" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" placeholder="学号" autocomplete="username" required /></div>
           <div class="row"><label class="sr-only" for="iaaaPassword">IAAA 密码</label><input class="input-txt-row" id="iaaaPassword" name="password" type="password" placeholder="IAAA 密码（与教学网一致）" autocomplete="current-password" required /></div>
           <div class="row-thin"><p class="tip auth-note">使用北京大学 IAAA 账号密码认证，成功后登录对应学号邮箱账户。首次使用须通过注册白名单校验。</p></div>
-          <div class="row"><button class="input-btn-row" id="iaaaSubmit" type="submit">登录严小希小助手</button></div>
+          <div class="row"><button class="input-btn-row" id="iaaaSubmit" type="submit">通过IAAA登录</button></div>
         </form>
         <div id="iaaaQrPanel" role="tabpanel" aria-labelledby="iaaaQrTab" hidden><div class="row center coming-soon"><p class="pku-red">敬请期待</p><p class="tip">严小希小助手扫码登录即将上线</p></div></div>
         <div class="row-thin"><p id="iaaaStatus" role="status" aria-live="polite" class="pku-red"></p></div>
@@ -65,38 +98,21 @@
     <footer class="bottom"><div class="lx_info"><span>「严小希」小助手</span><span>由 cxxdgc 开发</span></div></footer>
   </main>
 
-  <style>
-    [hidden] { display: none !important; }
-    body { display: block; margin: 0; min-height: 100vh; background: #fff; color: #222; font-family: Arial, "Microsoft YaHei", sans-serif; }
-    .auth-layout .brand { color: #9b0000; font-size: 30px; font-weight: bold; }
-    .auth-layout { width: min(980px, calc(100% - 48px)); }
-    .auth-layout .mid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 48px; align-items: center; float: none; }
-    .auth-layout .welcome { width: 100%; min-width: 0; }
-    .auth-layout .welcome img { display: block; width: 100%; height: auto; object-fit: contain; }
-    .auth-layout .single_col_panel { float: none; width: 280px; margin: 0; }
-    .auth-layout button { font-family: inherit; }
-    .auth-layout .row-title button { border: 0; background: transparent; color: #222; font-size: 18px; padding: 0; cursor: pointer; }
-    .auth-layout .row-title button.current { color: #9b0000; }
-    .auth-layout .auth-note { font-size: 13px; line-height: 1.8; margin: 8px 0; }
-    .auth-layout .account-switch { border: 0; background: transparent; color: #9b0000; font-size: 14px; padding: 5px 0; cursor: pointer; }
-    .auth-layout .coming-soon { min-height: 220px; padding-top: 55px; }
-    .auth-status, #iaaaStatus { min-height: 20px; font-size: 13px; line-height: 1.6; margin: 6px 0; overflow-wrap: anywhere; }
-    .auth-layout .lx_info { width: auto; text-align: center; }
-    .auth-layout :focus-visible { outline: 2px solid #9b0000; outline-offset: 3px; }
-    .auth-layout input:focus, .auth-layout input:focus-visible { outline: none; box-shadow: none; border-color: #9b0000; }
-    .auth-layout button:disabled { opacity: .6; cursor: wait; }
-    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
-    @media (max-width: 700px) {
-      .auth-layout { width: calc(100% - 32px); }
-      .auth-layout .top { margin: 24px 0; text-align: center; }
-      .auth-layout .mid { grid-template-columns: minmax(0, 1fr); gap: 24px; height: auto; min-height: 0; }
-      .auth-layout .single_col_panel { width: 100%; max-width: 360px; justify-self: center; }
-      .auth-layout .welcome { grid-row: 2; max-width: 520px; justify-self: center; }
-      .auth-layout .brand { font-size: 25px; }
-    }
-  </style>
+
 
   <script>
+    // Keep the complete preview visible until the full image is loaded and decoded.
+    for (const image of document.querySelectorAll('.welcome img')) {
+      const reveal = async () => {
+        try {
+          if (image.decode) await image.decode();
+          image.classList.add('is-ready');
+        } catch (_) { /* Keep the preview on download or decoding failure. */ }
+      };
+      image.addEventListener('load', reveal, {once: true});
+      if (image.complete && image.naturalWidth > 0) reveal();
+    }
+
     const statusEl = document.getElementById("status");
     const tabLogin = document.getElementById("tabLogin");
     const tabRegister = document.getElementById("tabRegister");
