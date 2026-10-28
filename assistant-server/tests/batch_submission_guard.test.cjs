@@ -11,8 +11,10 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 function response(value, status = 200) {
   return {status, ok: status >= 200 && status < 300, json: async () => structuredClone(value), clone() { return response(value,status); }};
 }
-function environment(fetcher) {
+function environment(fetcher, page='/settings') {
   const calls = [], events = [], docListeners = new Map(), windowListeners = new Map(), nodes = new Map();
+  const timers = new Map();
+  let timerId=0;
   let document;
   class Element {
     constructor(id) {this.id=id;this.children=[];this.style={};this.attributes=new Map();this.inert=false;this.textContent='';this.innerHTML='';}
@@ -34,11 +36,13 @@ function environment(fetcher) {
     addEventListener: (name,handler) => {if(!windowListeners.has(name))windowListeners.set(name,[]);windowListeners.get(name).push(handler);},
     dispatchEvent: event => {events.push(event);for(const handler of windowListeners.get(event.type)||[])handler(event);return true;}
   };
-  vm.runInNewContext(script,{window,document,URL,Date,location:{href:'https://assistant.example/settings',origin:'https://assistant.example'},
+  vm.runInNewContext(script,{window,document,URL,Date,location:{href:'https://assistant.example'+page,origin:'https://assistant.example'},
     localStorage:{setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
-    CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},setInterval:()=>0,console
+    CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
+    setInterval:(fn,delay)=>{const id=++timerId;timers.set(id,{fn,delay});return id;},clearInterval:id=>timers.delete(id),console
   });
-  return {window,document,app,calls,events,docListeners,nodes};
+  return {window,document,app,calls,events,docListeners,nodes,timers,
+    tick:async()=>{for(const {fn,delay} of [...timers.values()])if(delay===2000)await fn();await flush();}};
 }
 
 test('reopening a page restores the non-dismissible mask before substantive APIs run', async () => {
@@ -102,4 +106,46 @@ test('server lock response activates other tabs and a network error never unlock
   const calls=env.calls.length;
   await assert.rejects(env.window.fetch('/api/pkuvideo/jobs'),/任务正在提交中/);
   assert.equal(env.calls.length,calls);
+});
+
+test('login page never polls task status, including refresh and cross-tab notifications', async () => {
+  const env=environment(async()=>response({}), '/auth?next=/settings');
+  await env.window.BatchSubmission.ready;
+  await env.tick();
+  await env.window.BatchSubmission.refresh();
+  env.window.dispatchEvent({type:'storage',key:'assistant.batch-submission.active',newValue:'active'});
+  await env.tick();
+  assert.deepEqual(env.calls,[]);
+  assert.equal(env.window.BatchSubmission.active,false);
+  await env.window.fetch('/api/auth/iaaa');
+  await env.tick();
+  assert.deepEqual(env.calls,['/api/auth/iaaa']);
+});
+
+test('unauthorized status cancels polling and successful login resumes it', async () => {
+  let authenticated=false;
+  const env=environment(async route=>route===STATUS?response({active:false},authenticated?200:401):response({}));
+  await env.window.BatchSubmission.ready;
+  assert.equal(env.calls.filter(p=>p===STATUS).length,1);
+  for(let i=0;i<3;i++)await env.tick();
+  await env.window.BatchSubmission.refresh();
+  assert.equal(env.calls.filter(p=>p===STATUS).length,1);
+  authenticated=true;
+  await env.window.fetch('/api/auth/login');
+  await flush();
+  await env.tick();
+  assert.equal(env.calls.filter(p=>p===STATUS).length,3);
+  await env.window.fetch('/api/auth/logout');
+  const count=env.calls.length;
+  await env.tick();
+  assert.equal(env.calls.length,count);
+});
+
+test('unauthorized business request stops subsequent status polling', async () => {
+  const env=environment(async route=>response({active:false},route===STATUS?200:401));
+  await env.window.BatchSubmission.ready;
+  await env.window.fetch('/api/user/api-config');
+  const count=env.calls.length;
+  await env.tick();
+  assert.equal(env.calls.length,count);
 });

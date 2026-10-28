@@ -16,6 +16,9 @@
   const START = '/api/pkuvideofullclass/batch-submit';
   const HINT = 'assistant.batch-submission.active';
   const rawFetch = window.fetch.bind(window);
+  const authPage = new URL(location.href).pathname === '/auth';
+  let pollingEnabled = !authPage;
+  let pollTimer;
   let state = {active:false};
   let checking = true;
   let receivedAt = Date.now();
@@ -77,12 +80,26 @@
     if (!value.active && !readyResolved) {readyResolved=true;resolveReady();}
     if (wasActive && !value.active) window.dispatchEvent(new CustomEvent('batchsubmissioncomplete',{detail:value}));
   }
+  function stopPolling() {
+    pollingEnabled=false;
+    if (pollTimer !== undefined) {clearInterval(pollTimer);pollTimer=undefined;}
+    apply({active:false});
+  }
+  function resumePolling() {
+    // The login page navigates away after authentication and never needs task status.
+    if (authPage) return;
+    pollingEnabled=true;
+    if (pollTimer === undefined) pollTimer=setInterval(poll,2000);
+    poll();
+  }
   function poll() {
+    if (!pollingEnabled) return Promise.resolve();
     if (statusFlight) return statusFlight;
     statusFlight=(async () => {
       try {
         const response=await rawFetch(STATUS,{credentials:'include',cache:'no-store'});
-        if (response.status===401) {apply({active:false});return;}
+        if (response.status===401) {stopPolling();return;}
+        if (!pollingEnabled) return;
         if (!response.ok) throw new Error('无法确认提交状态');
         const value=await response.json();
         if (typeof value.active!=='boolean') throw new Error('提交状态无效');
@@ -108,6 +125,11 @@
       if (state.active || checking) throw new Error('任务正在提交中，请等待批量提交完成后再操作');
     }
     const response=await rawFetch(input,options);
+    if (isApi(input)) {
+      const path=new URL(typeof input==='string' || input instanceof URL ? input : input.url,location.href).pathname;
+      if (response.status===401 || (response.ok && path==='/api/auth/logout')) stopPolling();
+      else if (response.ok && ['/api/auth/me','/api/auth/login','/api/auth/register','/api/auth/iaaa'].includes(path)) resumePolling();
+    }
     if (isApi(input) && response.status===423) {
       try {
         const value=await response.clone().json();
@@ -129,6 +151,7 @@
       apply({active:true,estimated_remaining_seconds:15});
       try {
         const response=await rawFetch(START,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        if (response.status===401) stopPolling();
         const value=await response.json();
         if (!response.ok || !value.success) throw new Error(value.error || value.message || '批量提交启动失败');
         starting=false;
@@ -149,13 +172,13 @@
   },true);
   window.addEventListener('beforeunload',event => {if(state.active){event.preventDefault();event.returnValue='';}});
   window.addEventListener('storage',event => {
-    if(event.key===HINT) {
+    if(event.key===HINT && pollingEnabled) {
       if(event.newValue && !state.active) apply({active:true});
       poll();
     }
   });
   setInterval(draw,1000);
-  setInterval(poll,2000);
-  poll();
+  if (authPage) stopPolling();
+  else resumePolling();
 })();
 </script>

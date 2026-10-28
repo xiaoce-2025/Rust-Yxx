@@ -41,7 +41,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health::health))
-        .merge(ui::routes())
+        .merge(ui::routes(state.clone()))
         .merge(auth::routes())
         .merge(conversations::routes())
         .merge(pkuvideo::routes())
