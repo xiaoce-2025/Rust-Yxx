@@ -29,6 +29,12 @@ struct LoginRequest {
     password: String,
 }
 
+#[derive(Deserialize)]
+struct IaaaLoginRequest {
+    username: String,
+    password: String,
+}
+
 #[derive(Debug, Serialize)]
 struct AuthResponse {
     token: String,
@@ -57,6 +63,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/me", get(me))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
+        .route("/api/auth/iaaa", post(iaaa_login))
         .route("/api/auth/logout", post(logout))
 }
 
@@ -186,6 +193,56 @@ async fn login(
     Ok(([ (SET_COOKIE, cookie) ], Json(resp)).into_response())
 }
 
+fn iaaa_email(username: &str) -> Result<String, ApiError> {
+    if username.len() != 10 || !username.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(ApiError::BadRequest("请输入 10 位学号".into()));
+    }
+    Ok(format!("{username}@stu.pku.edu.cn"))
+}
+
+async fn iaaa_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<IaaaLoginRequest>,
+) -> Result<axum::response::Response, ApiError> {
+    let username = req.username.trim();
+    let email = iaaa_email(username)?;
+    if req.password.is_empty() || req.password.len() > 1024 {
+        return Err(ApiError::BadRequest("请输入有效的 IAAA 密码".into()));
+    }
+    crate::services::iaaa_login::verify(username, &req.password).await?;
+
+    // A random local password prevents the university password from becoming the
+    // assistant password. Existing passwords and bindings are left intact.
+    let now = Utc::now();
+    let candidate = FileUser {
+        id: Uuid::new_v4(), username: username.to_string(), email,
+        password_hash: hash_password(&Uuid::new_v4().to_string())?,
+        is_active: true, created_at: now, updated_at: now,
+        processing_priority: 5, storage_quota: 3, processing_quota: 1,
+        iaaa_encrypted_password: None, iaaa_public_key: None,
+    };
+    let user = state.store.resolve_iaaa_user(candidate).await
+        .map_err(|_| ApiError::Internal("创建 IAAA 账户失败，请稍后重试".into()))?
+        .ok_or_else(|| ApiError::Forbidden("该学号邮箱不在注册白名单中，请联系管理员".into()))?;
+    if !user.is_active {
+        return Err(ApiError::Forbidden("用户未激活".into()));
+    }
+    let session_id = Uuid::new_v4();
+    let expires_at = session_expiry(state.settings.security.session_ttl_hours);
+    state.store.insert_session(FileUserSession {
+        session_id, user_id: user.id, expires_at, created_at: Utc::now(),
+        user_agent: headers.get("user-agent").and_then(|v| v.to_str().ok()).map(ToString::to_string),
+        ip_address: None,
+    }).await.map_err(|_| ApiError::Internal("创建登录会话失败，请稍后重试".into()))?;
+    let resp = AuthResponse {
+        token: session_id.to_string(), user_id: user.id,
+        username: user.username, email: user.email, expires_at,
+    };
+    let cookie = build_auth_cookie(&resp.token, state.settings.security.session_ttl_hours);
+    Ok(([(SET_COOKIE, cookie)], Json(resp)).into_response())
+}
+
 async fn logout(
     State(state): State<AppState>,
     _current_user: CurrentUser,
@@ -209,4 +266,65 @@ fn build_auth_cookie(token: &str, ttl_hours: i64) -> HeaderValue {
         token, max_age_seconds
     );
     HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("assistant_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"))
+}
+#[cfg(test)]
+mod iaaa_tests {
+    use super::*;
+    use crate::store::FileStore;
+
+    fn candidate() -> FileUser {
+        FileUser {
+            id: Uuid::new_v4(), username: "2400012345".into(),
+            email: "2400012345@stu.pku.edu.cn".into(), password_hash: "original-hash".into(),
+            is_active: true, created_at: Utc::now(), updated_at: Utc::now(),
+            processing_priority: 5, storage_quota: 3, processing_quota: 1,
+            iaaa_encrypted_password: None, iaaa_public_key: None,
+        }
+    }
+
+    #[test]
+    fn student_identity_cannot_override_email_domain() {
+        assert_eq!(iaaa_email("2400012345").unwrap(), "2400012345@stu.pku.edu.cn");
+        for invalid in ["", "123", "2400012345@stu.pku.edu.cn", "２４０００１２３４５", "240001234a"] {
+            assert!(iaaa_email(invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn iaaa_registration_requires_whitelist_and_reuses_existing_identity() {
+        let dir = tempdir::TempDir::new("iaaa-users").unwrap();
+        let store = FileStore::new(dir.path().into()).await.unwrap();
+        assert!(store.resolve_iaaa_user(candidate()).await.unwrap().is_none());
+        assert!(store.get_user_by_email(&candidate().email).await.is_none());
+        std::fs::write(dir.path().join("whitelist.json"),
+            r#"{"allowed_emails":["2400012345@stu.pku.edu.cn"]}"#).unwrap();
+        store.reload_whitelist().await.unwrap();
+        let (first, second) = tokio::join!(store.resolve_iaaa_user(candidate()), store.resolve_iaaa_user(candidate()));
+        let first = first.unwrap().unwrap();
+        assert_eq!(first.id, second.unwrap().unwrap().id);
+        assert_eq!(first.storage_quota, 3);
+        assert_eq!(first.processing_quota, 1);
+        assert!(first.iaaa_encrypted_password.is_none());
+        std::fs::write(dir.path().join("whitelist.json"), r#"{"allowed_emails":[]}"#).unwrap();
+        store.reload_whitelist().await.unwrap();
+        let mut replacement = candidate();
+        replacement.password_hash = "replacement-hash".into();
+        let resolved = store.resolve_iaaa_user(replacement).await.unwrap().unwrap();
+        assert_eq!(resolved.id, first.id);
+        assert_eq!(resolved.password_hash, "original-hash");
+        let reopened = FileStore::new(dir.path().into()).await.unwrap();
+        assert_eq!(reopened.get_user_by_email(&first.email).await.unwrap().id, first.id);
+    }
+
+    #[tokio::test]
+    async fn iaaa_resolution_preserves_disabled_accounts() {
+        let dir = tempdir::TempDir::new("iaaa-disabled").unwrap();
+        let store = FileStore::new(dir.path().into()).await.unwrap();
+        let mut user = candidate();
+        user.is_active = false;
+        store.insert_user(user.clone()).await.unwrap();
+        let resolved = store.resolve_iaaa_user(candidate()).await.unwrap().unwrap();
+        assert_eq!(resolved.id, user.id);
+        assert!(!resolved.is_active);
+    }
 }

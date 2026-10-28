@@ -41,6 +41,7 @@ cargo run
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `POST /api/auth/iaaa`：提交 `username`（10 位学号）和 `password`，使用当前 IAAA 公钥加密密码后校验；仅取得 IAAA token，不访问教学网。认证成功后登录 `学号@stu.pku.edu.cn`，不存在则校验 `whitelist.json` 并创建账户。每次重新认证，不复用教学网缓存；密码和 IAAA token 不落盘。新账户使用随机本地密码，可继续通过 IAAA 登录；已有账户密码、配额和绑定不变。
 - `GET /api/auth/me`
 - `POST /api/auth/logout`
 - `GET /api/settings/profile`

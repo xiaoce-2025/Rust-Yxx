@@ -221,12 +221,34 @@ impl FileStore {
     }
 
     pub async fn insert_user(&self, user: FileUser) -> Result<(), Box<dyn std::error::Error>> {
-        let users = {
-            let mut users = self.users.write().await;
-            users.insert(user.id, user);
-            users.clone()
-        };
-        self.save_users_data(&users).await
+        let mut users = self.users.write().await;
+        if users.values().any(|u| u.email == user.email) {
+            return Err("邮箱已存在".into());
+        }
+        let mut updated = users.clone();
+        updated.insert(user.id, user);
+        self.save_users_data(&updated).await?;
+        *users = updated;
+        Ok(())
+    }
+
+    /// Resolve a verified IAAA identity atomically. Only new accounts require the whitelist.
+    pub async fn resolve_iaaa_user(&self, mut candidate: FileUser) -> Result<Option<FileUser>, Box<dyn std::error::Error>> {
+        let mut users = self.users.write().await;
+        if let Some(user) = users.values().find(|u| u.email == candidate.email) {
+            return Ok(Some(user.clone()));
+        }
+        if !self.is_email_in_whitelist(&candidate.email).await {
+            return Ok(None);
+        }
+        if users.values().any(|u| u.username == candidate.username) {
+            candidate.username = format!("{}-{}", candidate.username, candidate.id);
+        }
+        let mut updated = users.clone();
+        updated.insert(candidate.id, candidate.clone());
+        self.save_users_data(&updated).await?;
+        *users = updated;
+        Ok(Some(candidate))
     }
 
     pub async fn decrease_processing_quota(&self, user_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {

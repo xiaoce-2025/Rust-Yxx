@@ -19,7 +19,7 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
         || (method == Method::POST
             && matches!(
                 path,
-                START_PATH | "/api/pkuvideo/submit" | "/api/auth/login"
+                START_PATH | "/api/pkuvideo/submit" | "/api/auth/login" | "/api/auth/iaaa"
             ))
     {
         return next.run(request).await;

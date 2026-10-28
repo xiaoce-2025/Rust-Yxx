@@ -7,7 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
-  <style>
+  <link id="iaaaStyle" rel="stylesheet" href="/auth/iaaa-login.css" disabled />
+  <style id="accountStyle">
     :root {
       --bg: #e8efe7;
       --ink: #10221c;
@@ -104,7 +105,58 @@
 
     <div id="status" class="status"></div>
     <div class="next">登录后将跳转到 <span id="nextPath"></span></div>
+    <div class="row"><button type="button" id="useIaaa">通过IAAA登录</button></div>
   </main>
+
+  <main id="iaaaView" class="main" hidden>
+    <header class="top">
+      <a href="/auth" class="brand">「严小希」小助手</a>
+      <p class="tip">IAAA 账号认证</p>
+    </header>
+    <div class="mid">
+      <aside class="welcome"><span class="welcome-mark">希</span><h1>学习路上，<br />小希与你相伴。</h1><p>欢迎使用「严小希」小助手</p></aside>
+      <section class="single_col_panel" aria-label="IAAA 登录">
+        <div class="row" role="tablist" aria-label="登录方式">
+          <div class="row_50 center row-title"><button type="button" id="iaaaAccountTab" role="tab" aria-controls="iaaaForm" aria-selected="true" class="current">账号登录</button></div>
+          <div class="row_50 center row-title"><button type="button" id="iaaaQrTab" role="tab" aria-controls="iaaaQrPanel" aria-selected="false">扫码登录</button></div>
+        </div>
+        <form id="iaaaForm" role="tabpanel" aria-labelledby="iaaaAccountTab">
+          <div class="row"><label class="sr-only" for="iaaaUsername">学号</label><input class="input-txt-row" id="iaaaUsername" name="username" type="text" inputmode="numeric" pattern="[0-9]{10}" maxlength="10" placeholder="学号" autocomplete="username" required /></div>
+          <div class="row"><label class="sr-only" for="iaaaPassword">IAAA 密码</label><input class="input-txt-row" id="iaaaPassword" name="password" type="password" placeholder="IAAA 密码（与教学网一致）" autocomplete="current-password" required /></div>
+          <div class="row-thin"><p class="tip auth-note">使用北京大学 IAAA 账号密码认证，成功后登录对应学号邮箱账户。首次使用须通过注册白名单校验。</p></div>
+          <div class="row"><button class="input-btn-row" id="iaaaSubmit" type="submit">登录严小希小助手</button></div>
+        </form>
+        <div id="iaaaQrPanel" role="tabpanel" aria-labelledby="iaaaQrTab" hidden><div class="row center coming-soon"><p class="pku-red">敬请期待</p><p class="tip">严小希小助手扫码登录即将上线</p></div></div>
+        <div class="row-thin"><p id="iaaaStatus" role="status" aria-live="polite" class="pku-red"></p></div>
+        <div class="row center"><button type="button" id="useAccount" class="account-switch">通过严小希账户登录</button></div>
+      </section>
+    </div>
+    <footer class="bottom"><div class="lx_info"><span>「严小希」小助手</span><span>由 cxxdgc 开发</span></div></footer>
+  </main>
+
+  <style>
+    [hidden] { display: none !important; }
+    body.iaaa-mode { display: block; margin: 0; min-height: 100vh; background: #fff; color: #222; font-family: Arial, "Microsoft YaHei", sans-serif; }
+    #iaaaView .brand { color: #9b0000; font-size: 30px; font-weight: bold; }
+    #iaaaView .welcome { float: left; width: 385px; padding-top: 10px; }
+    #iaaaView .welcome-mark { display: inline-block; color: #9b0000; font-size: 64px; border-bottom: 3px solid #9b0000; }
+    #iaaaView .welcome h1 { font-size: 32px; line-height: 1.6; font-weight: normal; }
+    #iaaaView .welcome p { color: #777; }
+    #iaaaView button { font-family: inherit; }
+    #iaaaView .row-title button { border: 0; background: transparent; color: #222; font-size: 18px; padding: 0; cursor: pointer; }
+    #iaaaView .row-title button.current { color: #9b0000; }
+    #iaaaView .auth-note { font-size: 13px; line-height: 1.8; margin: 8px 0; }
+    #iaaaView .account-switch { border: 0; background: transparent; color: #9b0000; font-size: 14px; padding: 5px 0; cursor: pointer; }
+    #iaaaView .coming-soon { min-height: 220px; padding-top: 55px; }
+    #iaaaStatus { min-height: 20px; font-size: 13px; line-height: 1.6; margin: 6px 0; overflow-wrap: anywhere; }
+    #iaaaView .lx_info { width: auto; text-align: center; }
+    #iaaaView :focus-visible { outline: 2px solid #9b0000; outline-offset: 3px; }
+    #iaaaView button:disabled { opacity: .6; cursor: wait; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+    @media (max-width: 800px) { #iaaaView .welcome { width: 340px; } }
+    @media (max-width: 640px) { #iaaaView .welcome { width: 180px; } #iaaaView .welcome h1 { font-size: 23px; } }
+    @media (max-width: 480px) { #iaaaView .welcome { display: none; } #iaaaView .mid { height: auto; min-height: 350px; } #iaaaView .single_col_panel { margin-top: 15px; } #iaaaView .brand { font-size: 25px; } }
+  </style>
 
   <script>
     const statusEl = document.getElementById("status");
@@ -113,7 +165,14 @@
     const loginForm = document.getElementById("loginForm");
     const registerForm = document.getElementById("registerForm");
 
-    const next = new URLSearchParams(location.search).get("next") || "/app";
+    const requestedNext = new URLSearchParams(location.search).get("next") || "/app";
+    let next = "/app";
+    try {
+      const nextUrl = new URL(requestedNext, location.origin);
+      if (nextUrl.origin === location.origin && ["http:", "https:"].includes(nextUrl.protocol)) {
+        next = nextUrl.pathname + nextUrl.search + nextUrl.hash;
+      }
+    } catch (_) {}
     document.getElementById("nextPath").textContent = next;
 
     function setTab(name) {
@@ -141,6 +200,56 @@
 
     tabLogin.addEventListener("click", () => setTab("login"));
     tabRegister.addEventListener("click", () => setTab("register"));
+
+    const iaaaForm = document.getElementById("iaaaForm");
+    const iaaaStatus = document.getElementById("iaaaStatus");
+    function setLoginMode(iaaa) {
+      document.querySelector(".auth-card").hidden = iaaa;
+      document.getElementById("iaaaView").hidden = !iaaa;
+      document.getElementById("accountStyle").sheet.disabled = iaaa;
+      document.getElementById("iaaaStyle").disabled = !iaaa;
+      document.body.classList.toggle("iaaa-mode", iaaa);
+      document.getElementById("iaaaPassword").value = "";
+      document.getElementById("loginPassword").value = "";
+      document.getElementById("regPassword").value = "";
+      iaaaStatus.textContent = "";
+      if (!iaaa) setTab("login");
+      document.getElementById(iaaa ? "iaaaUsername" : "loginEmail").focus();
+    }
+    document.getElementById("useIaaa").addEventListener("click", () => setLoginMode(true));
+    document.getElementById("useAccount").addEventListener("click", () => setLoginMode(false));
+    function setIaaaTab(qr) {
+      iaaaForm.hidden = qr;
+      document.getElementById("iaaaQrPanel").hidden = !qr;
+      for (const [id, selected] of [["iaaaAccountTab", !qr], ["iaaaQrTab", qr]]) {
+        const tab = document.getElementById(id);
+        tab.classList.toggle("current", selected);
+        tab.setAttribute("aria-selected", String(selected));
+      }
+      document.getElementById("iaaaPassword").value = "";
+      iaaaStatus.textContent = "";
+    }
+    document.getElementById("iaaaAccountTab").addEventListener("click", () => setIaaaTab(false));
+    document.getElementById("iaaaQrTab").addEventListener("click", () => setIaaaTab(true));
+    iaaaForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const button = document.getElementById("iaaaSubmit");
+      if (button.disabled) return;
+      button.disabled = true;
+      iaaaStatus.textContent = "IAAA 认证中…";
+      try {
+        await callApi("/api/auth/iaaa", {
+          username: document.getElementById("iaaaUsername").value.trim(),
+          password: document.getElementById("iaaaPassword").value
+        });
+        location.href = next;
+      } catch (err) {
+        iaaaStatus.textContent = "登录失败：" + err.message;
+      } finally {
+        document.getElementById("iaaaPassword").value = "";
+        button.disabled = false;
+      }
+    });
 
     loginForm.addEventListener("submit", async (e) => {
       e.preventDefault();

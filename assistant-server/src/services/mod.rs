@@ -13,6 +13,7 @@ pub mod pkuvideo;
 pub mod pkuvideo_fw;
 pub mod video_translation;
 pub mod pkulogin;
+pub mod iaaa_login;
 pub mod scheduler;
 pub mod video_downloader;
 pub mod wechat;

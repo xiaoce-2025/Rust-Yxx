@@ -5,6 +5,10 @@ use crate::app_state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/auth", get(auth_page))
+        .route("/auth/iaaa-login.css", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                include_str!("../../templates/iaaa-login.css"))
+        }))
         .route("/", get(app_page))
         .route("/app", get(app_page))
         .route("/pkuvideo", get(pkuvideo_page))
