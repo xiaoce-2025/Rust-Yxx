@@ -35,10 +35,8 @@ const event = {preventDefault() {}};
 test('IAAA and local account modes, including QR placeholder, switch without network requests', () => {
   const {node, calls} = environment();
   node('useIaaa').listeners.click();
-  assert.equal(node('card').hidden, true);
+  assert.equal(node('accountView').hidden, true);
   assert.equal(node('iaaaView').hidden, false);
-  assert.equal(node('accountStyle').sheet.disabled, true);
-  assert.equal(node('iaaaStyle').disabled, false);
   node('iaaaQrTab').listeners.click();
   assert.equal(node('iaaaForm').hidden, true);
   assert.equal(node('iaaaQrPanel').hidden, false);
@@ -47,8 +45,13 @@ test('IAAA and local account modes, including QR placeholder, switch without net
   node('iaaaAccountTab').listeners.click();
   assert.equal(node('iaaaForm').hidden, false);
   node('useAccount').listeners.click();
-  assert.equal(node('card').hidden, false);
-  assert.equal(node('iaaaStyle').disabled, true);
+  assert.equal(node('accountView').hidden, false);
+  assert.equal(node('loginForm').style.display, 'block');
+  node('tabRegister').listeners.click();
+  assert.equal(node('loginForm').style.display, 'none');
+  assert.equal(node('registerForm').style.display, 'block');
+  assert.equal(node('tabRegister').attributes['aria-selected'], 'true');
+  node('tabLogin').listeners.click();
   assert.equal(node('loginForm').style.display, 'block');
   assert.equal(calls.length, 0);
 });

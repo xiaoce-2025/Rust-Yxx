@@ -4,111 +4,42 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>登录 | 「严小希」小助手</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
-  <link id="iaaaStyle" rel="stylesheet" href="/auth/iaaa-login.css" disabled />
-  <style id="accountStyle">
-    :root {
-      --bg: #e8efe7;
-      --ink: #10221c;
-      --panel: rgba(255,255,255,.82);
-      --line: rgba(16,34,28,.16);
-      --accent: #0e7f5b;
-      --accent2: #ca5f27;
-      --warn: #8f2437;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      color: var(--ink);
-      font-family: "Manrope", "Segoe UI", sans-serif;
-      background:
-        radial-gradient(42rem 24rem at 15% -10%, rgba(202,95,39,.2), transparent 56%),
-        radial-gradient(55rem 28rem at 110% 110%, rgba(14,127,91,.25), transparent 56%),
-        linear-gradient(135deg, #eef3ec, var(--bg));
-    }
-    .auth-card {
-      width: min(520px, 92vw);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      background: var(--panel);
-      backdrop-filter: blur(8px);
-      box-shadow: 0 24px 44px rgba(0,0,0,.12);
-      padding: 22px;
-    }
-    h1 {
-      margin: 0;
-      font-family: "Noto Serif SC", serif;
-      font-size: 28px;
-    }
-    .sub {
-      margin-top: 6px;
-      color: #4f615a;
-      font-size: 13px;
-    }
-    .tabs { margin-top: 16px; display: flex; gap: 8px; }
-    button {
-      border: 0;
-      border-radius: 12px;
-      padding: 10px 12px;
-      cursor: pointer;
-      font-weight: 700;
-    }
-    .tab { flex: 1; background: #edf4f1; color: var(--ink); }
-    .tab.active { background: var(--accent); color: #fff; }
-    .alt { background: var(--accent2); color: #fff; }
-    .field { margin-top: 10px; }
-    .field label { font-size: 12px; color: #506059; display: block; margin-bottom: 4px; }
-    .field input {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 10px;
-      font: inherit;
-      background: #fff;
-    }
-    .row { display: flex; gap: 8px; margin-top: 14px; }
-    .row button { flex: 1; }
-    .status { min-height: 18px; margin-top: 10px; color: var(--warn); font-size: 12px; }
-    .next { margin-top: 12px; font-size: 12px; color: #60736a; }
-  </style>
+  <link rel="stylesheet" href="/auth/iaaa-login.css" />
 </head>
 <body>
-  <main class="auth-card">
-    <h1>「严小希」小助手</h1>
-    <div class="sub">欢迎使用「严小希」小助手！本项目由cxxdgc开发~</div>
-
-    <div class="tabs">
-      <button id="tabLogin" class="tab active">登录</button>
-      <button id="tabRegister" class="tab">注册</button>
+  <main id="accountView" class="main auth-layout">
+    <header class="top">
+      <a href="/auth" class="brand">「严小希」小助手</a>
+      <p class="tip">严小希账户登录</p>
+    </header>
+    <div class="mid">
+      <aside class="welcome"><img src="/auth/login-picture.png" width="1672" height="941" alt="严小希校园插画：学习路上，小希与你相伴。" /></aside>
+      <section class="single_col_panel" aria-label="严小希账户">
+        <div class="row" role="tablist" aria-label="账户操作">
+          <div class="row_50 center row-title"><button type="button" id="tabLogin" class="current" role="tab" aria-controls="loginForm" aria-selected="true">登录</button></div>
+          <div class="row_50 center row-title"><button type="button" id="tabRegister" role="tab" aria-controls="registerForm" aria-selected="false">注册</button></div>
+        </div>
+        <form id="loginForm" role="tabpanel" aria-labelledby="tabLogin">
+          <div class="row"><label class="sr-only" for="loginEmail">邮箱</label><input class="input-txt-row" id="loginEmail" type="email" placeholder="邮箱" autocomplete="username" required /></div>
+          <div class="row"><label class="sr-only" for="loginPassword">严小希账户密码</label><input class="input-txt-row" id="loginPassword" type="password" placeholder="严小希账户密码" autocomplete="current-password" required /></div>
+          <div class="row-thin"><p class="tip auth-note">使用严小希账户的邮箱和密码登录。</p></div>
+          <div class="row"><button class="input-btn-row" type="submit">登录严小希小助手</button></div>
+        </form>
+        <form id="registerForm" style="display:none;" role="tabpanel" aria-labelledby="tabRegister">
+          <div class="row"><label class="sr-only" for="regName">用户名</label><input class="input-txt-row" id="regName" placeholder="用户名" autocomplete="nickname" required /></div>
+          <div class="row"><label class="sr-only" for="regEmail">学号邮箱</label><input class="input-txt-row" id="regEmail" type="email" placeholder="学号邮箱" autocomplete="email" required /></div>
+          <div class="row"><label class="sr-only" for="regPassword">设置严小希账户密码</label><input class="input-txt-row" id="regPassword" type="password" placeholder="设置严小希账户密码" autocomplete="new-password" required /></div>
+          <div class="row-thin"><p class="tip auth-note">请使用白名单中的学号邮箱注册，并设置严小希账户密码。</p></div>
+          <div class="row"><button class="input-btn-row" type="submit">注册并登录</button></div>
+        </form>
+        <div class="row-thin"><p id="status" class="auth-status pku-red" role="status" aria-live="polite"></p></div>
+        <div class="row center"><button type="button" id="useIaaa" class="account-switch">通过IAAA登录</button></div>
+      </section>
     </div>
-
-    <form id="loginForm">
-      <div class="field"><label for="loginEmail">邮箱</label><input id="loginEmail" type="email" required /></div>
-      <div class="field"><label for="loginPassword">密码</label><input id="loginPassword" type="password" required /></div>
-      <div class="row"><button type="submit">登录</button></div>
-    </form>
-
-    <form id="registerForm" style="display:none;">
-      <div class="field"><label for="regName">用户名</label><input id="regName" required /></div>
-      <div class="field">
-        <label for="regEmail">邮箱 (请使用学号邮箱)</label>
-        <input id="regEmail" type="email" placeholder="2x000xxxxx@pku.edu.cn" required />
-      </div>
-      <div class="field"><label for="regPassword">密码</label><input id="regPassword" type="password" required /></div>
-      <div class="row"><button type="submit" class="alt">注册并登录</button></div>
-    </form>
-
-    <div id="status" class="status"></div>
-    <div class="next">登录后将跳转到 <span id="nextPath"></span></div>
-    <div class="row"><button type="button" id="useIaaa">通过IAAA登录</button></div>
+    <footer class="bottom"><div class="lx_info"><span>「严小希」小助手</span><span>由 cxxdgc 开发</span></div></footer>
   </main>
 
-  <main id="iaaaView" class="main" hidden>
+  <main id="iaaaView" class="main auth-layout" hidden>
     <header class="top">
       <a href="/auth" class="brand">「严小希」小助手</a>
       <p class="tip">IAAA 账号认证</p>
@@ -136,33 +67,32 @@
 
   <style>
     [hidden] { display: none !important; }
-    body.iaaa-mode { display: block; margin: 0; min-height: 100vh; background: #fff; color: #222; font-family: Arial, "Microsoft YaHei", sans-serif; }
-    #iaaaView .brand { color: #9b0000; font-size: 30px; font-weight: bold; }
-    #iaaaView { width: min(980px, calc(100% - 48px)); }
-    #iaaaView .mid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 48px; align-items: center; float: none; }
-    #iaaaView .welcome { width: 100%; min-width: 0; }
-    #iaaaView .welcome img { display: block; width: 100%; height: auto; object-fit: contain; }
-    #iaaaView .single_col_panel { float: none; width: 280px; margin: 0; }
-    #iaaaView button { font-family: inherit; }
-    #iaaaView .row-title button { border: 0; background: transparent; color: #222; font-size: 18px; padding: 0; cursor: pointer; }
-    #iaaaView .row-title button.current { color: #9b0000; }
-    #iaaaView .auth-note { font-size: 13px; line-height: 1.8; margin: 8px 0; }
-    #iaaaView .account-switch { border: 0; background: transparent; color: #9b0000; font-size: 14px; padding: 5px 0; cursor: pointer; }
-    #iaaaView .coming-soon { min-height: 220px; padding-top: 55px; }
-    #iaaaStatus { min-height: 20px; font-size: 13px; line-height: 1.6; margin: 6px 0; overflow-wrap: anywhere; }
-    #iaaaView .lx_info { width: auto; text-align: center; }
-    #iaaaView :focus-visible { outline: 2px solid #9b0000; outline-offset: 3px; }
-    #iaaaView input:focus, #iaaaView input:focus-visible { outline: none; box-shadow: none; border-color: #9b0000; }
-    .auth-card input:focus, .auth-card input:focus-visible { outline: none; box-shadow: none; border-color: var(--accent); }
-    #iaaaView button:disabled { opacity: .6; cursor: wait; }
+    body { display: block; margin: 0; min-height: 100vh; background: #fff; color: #222; font-family: Arial, "Microsoft YaHei", sans-serif; }
+    .auth-layout .brand { color: #9b0000; font-size: 30px; font-weight: bold; }
+    .auth-layout { width: min(980px, calc(100% - 48px)); }
+    .auth-layout .mid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 48px; align-items: center; float: none; }
+    .auth-layout .welcome { width: 100%; min-width: 0; }
+    .auth-layout .welcome img { display: block; width: 100%; height: auto; object-fit: contain; }
+    .auth-layout .single_col_panel { float: none; width: 280px; margin: 0; }
+    .auth-layout button { font-family: inherit; }
+    .auth-layout .row-title button { border: 0; background: transparent; color: #222; font-size: 18px; padding: 0; cursor: pointer; }
+    .auth-layout .row-title button.current { color: #9b0000; }
+    .auth-layout .auth-note { font-size: 13px; line-height: 1.8; margin: 8px 0; }
+    .auth-layout .account-switch { border: 0; background: transparent; color: #9b0000; font-size: 14px; padding: 5px 0; cursor: pointer; }
+    .auth-layout .coming-soon { min-height: 220px; padding-top: 55px; }
+    .auth-status, #iaaaStatus { min-height: 20px; font-size: 13px; line-height: 1.6; margin: 6px 0; overflow-wrap: anywhere; }
+    .auth-layout .lx_info { width: auto; text-align: center; }
+    .auth-layout :focus-visible { outline: 2px solid #9b0000; outline-offset: 3px; }
+    .auth-layout input:focus, .auth-layout input:focus-visible { outline: none; box-shadow: none; border-color: #9b0000; }
+    .auth-layout button:disabled { opacity: .6; cursor: wait; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
     @media (max-width: 700px) {
-      #iaaaView { width: calc(100% - 32px); }
-      #iaaaView .top { margin: 24px 0; text-align: center; }
-      #iaaaView .mid { grid-template-columns: minmax(0, 1fr); gap: 24px; height: auto; min-height: 0; }
-      #iaaaView .single_col_panel { width: 100%; max-width: 360px; justify-self: center; }
-      #iaaaView .welcome { grid-row: 2; max-width: 520px; justify-self: center; }
-      #iaaaView .brand { font-size: 25px; }
+      .auth-layout { width: calc(100% - 32px); }
+      .auth-layout .top { margin: 24px 0; text-align: center; }
+      .auth-layout .mid { grid-template-columns: minmax(0, 1fr); gap: 24px; height: auto; min-height: 0; }
+      .auth-layout .single_col_panel { width: 100%; max-width: 360px; justify-self: center; }
+      .auth-layout .welcome { grid-row: 2; max-width: 520px; justify-self: center; }
+      .auth-layout .brand { font-size: 25px; }
     }
   </style>
 
@@ -181,14 +111,15 @@
         next = nextUrl.pathname + nextUrl.search + nextUrl.hash;
       }
     } catch (_) {}
-    document.getElementById("nextPath").textContent = next;
 
     function setTab(name) {
       const isLogin = name === "login";
       loginForm.style.display = isLogin ? "block" : "none";
       registerForm.style.display = isLogin ? "none" : "block";
-      tabLogin.classList.toggle("active", isLogin);
-      tabRegister.classList.toggle("active", !isLogin);
+      tabLogin.classList.toggle("current", isLogin);
+      tabLogin.setAttribute("aria-selected", String(isLogin));
+      tabRegister.classList.toggle("current", !isLogin);
+      tabRegister.setAttribute("aria-selected", String(!isLogin));
       statusEl.textContent = "";
     }
 
@@ -212,11 +143,8 @@
     const iaaaForm = document.getElementById("iaaaForm");
     const iaaaStatus = document.getElementById("iaaaStatus");
     function setLoginMode(iaaa) {
-      document.querySelector(".auth-card").hidden = iaaa;
+      document.getElementById("accountView").hidden = iaaa;
       document.getElementById("iaaaView").hidden = !iaaa;
-      document.getElementById("accountStyle").sheet.disabled = iaaa;
-      document.getElementById("iaaaStyle").disabled = !iaaa;
-      document.body.classList.toggle("iaaa-mode", iaaa);
       document.getElementById("iaaaPassword").value = "";
       document.getElementById("loginPassword").value = "";
       document.getElementById("regPassword").value = "";
