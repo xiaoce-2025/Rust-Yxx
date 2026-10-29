@@ -21,7 +21,6 @@
     .auth-layout .row-title button { border: 0; background: transparent; color: #222; font-size: 18px; padding: 0; cursor: pointer; }
     .auth-layout .row-title button.current { color: #9b0000; }
     .auth-layout .auth-note { font-size: 13px; line-height: 1.8; margin: 8px 0; }
-    .auth-layout .account-switch { border: 0; background: transparent; color: #9b0000; font-size: 14px; padding: 5px 0; cursor: pointer; }
     .auth-layout .coming-soon { min-height: 220px; padding-top: 55px; }
     .auth-status, #iaaaStatus { min-height: 20px; font-size: 13px; line-height: 1.6; margin: 6px 0; overflow-wrap: anywhere; }
     .auth-layout .lx_info { width: auto; text-align: center; }
@@ -40,42 +39,10 @@
   </style>
 </head>
 <body>
-  <main id="accountView" class="main auth-layout">
+  <main id="iaaaView" class="main auth-layout">
     <header class="top">
       <a href="/auth" class="brand">「严小希」小助手</a>
-      <p class="tip">严小希账户登录</p>
-    </header>
-    <div class="mid">
-      <aside class="welcome"><picture><source type="image/webp" srcset="/auth/login-picture.cf4a1b3511c8.webp" /><img src="/auth/login-picture.png" width="1672" height="941" decoding="async" fetchpriority="low" alt="严小希校园插画：学习路上，小希与你相伴。" /></picture></aside>
-      <section class="single_col_panel" aria-label="严小希账户">
-        <div class="row" role="tablist" aria-label="账户操作">
-          <div class="row_50 center row-title"><button type="button" id="tabLogin" class="current" role="tab" aria-controls="loginForm" aria-selected="true">登录</button></div>
-          <div class="row_50 center row-title"><button type="button" id="tabRegister" role="tab" aria-controls="registerForm" aria-selected="false">注册</button></div>
-        </div>
-        <form id="loginForm" role="tabpanel" aria-labelledby="tabLogin">
-          <div class="row"><label class="sr-only" for="loginEmail">邮箱</label><input class="input-txt-row" id="loginEmail" type="email" placeholder="邮箱" autocomplete="username" required /></div>
-          <div class="row"><label class="sr-only" for="loginPassword">严小希账户密码</label><input class="input-txt-row" id="loginPassword" type="password" placeholder="严小希账户密码" autocomplete="current-password" required /></div>
-          <div class="row-thin"><p class="tip auth-note">使用严小希账户的邮箱和密码登录。</p></div>
-          <div class="row"><button class="input-btn-row" type="submit">登录严小希小助手</button></div>
-        </form>
-        <form id="registerForm" style="display:none;" role="tabpanel" aria-labelledby="tabRegister">
-          <div class="row"><label class="sr-only" for="regName">用户名</label><input class="input-txt-row" id="regName" placeholder="用户名" autocomplete="nickname" required /></div>
-          <div class="row"><label class="sr-only" for="regEmail">学号邮箱</label><input class="input-txt-row" id="regEmail" type="email" placeholder="学号邮箱" autocomplete="email" required /></div>
-          <div class="row"><label class="sr-only" for="regPassword">设置严小希账户密码</label><input class="input-txt-row" id="regPassword" type="password" placeholder="设置严小希账户密码" autocomplete="new-password" required /></div>
-          <div class="row-thin"><p class="tip auth-note">请使用白名单中的学号邮箱注册，并设置严小希账户密码。</p></div>
-          <div class="row"><button class="input-btn-row" type="submit">注册并登录</button></div>
-        </form>
-        <div class="row-thin"><p id="status" class="auth-status pku-red" role="status" aria-live="polite"></p></div>
-        <div class="row center"><button type="button" id="useIaaa" class="account-switch">通过IAAA登录</button></div>
-      </section>
-    </div>
-    <footer class="bottom"><div class="lx_info"><span>「严小希」小助手</span><span>由 cxxdgc 开发</span></div></footer>
-  </main>
-
-  <main id="iaaaView" class="main auth-layout" hidden>
-    <header class="top">
-      <a href="/auth" class="brand">「严小希」小助手</a>
-      <p class="tip">IAAA 账号认证</p>
+      <p class="tip">北京大学 IAAA 认证登录</p>
     </header>
     <div class="mid">
       <aside class="welcome"><picture><source type="image/webp" srcset="/auth/login-picture.cf4a1b3511c8.webp" /><img src="/auth/login-picture.png" width="1672" height="941" decoding="async" fetchpriority="low" alt="严小希校园插画：学习路上，小希与你相伴。" /></picture></aside>
@@ -92,7 +59,6 @@
         </form>
         <div id="iaaaQrPanel" role="tabpanel" aria-labelledby="iaaaQrTab" hidden><div class="row center coming-soon"><p class="pku-red">敬请期待</p><p class="tip">严小希小助手扫码登录即将上线</p></div></div>
         <div class="row-thin"><p id="iaaaStatus" role="status" aria-live="polite" class="pku-red"></p></div>
-        <div class="row center"><button type="button" id="useAccount" class="account-switch">通过严小希账户登录</button></div>
       </section>
     </div>
     <footer class="bottom"><div class="lx_info"><span>「严小希」小助手</span><span>由 cxxdgc 开发</span></div></footer>
@@ -113,12 +79,6 @@
       if (image.complete && image.naturalWidth > 0) reveal();
     }
 
-    const statusEl = document.getElementById("status");
-    const tabLogin = document.getElementById("tabLogin");
-    const tabRegister = document.getElementById("tabRegister");
-    const loginForm = document.getElementById("loginForm");
-    const registerForm = document.getElementById("registerForm");
-
     const requestedNext = new URLSearchParams(location.search).get("next") || "/app";
     let next = "/app";
     try {
@@ -127,17 +87,6 @@
         next = nextUrl.pathname + nextUrl.search + nextUrl.hash;
       }
     } catch (_) {}
-
-    function setTab(name) {
-      const isLogin = name === "login";
-      loginForm.style.display = isLogin ? "block" : "none";
-      registerForm.style.display = isLogin ? "none" : "block";
-      tabLogin.classList.toggle("current", isLogin);
-      tabLogin.setAttribute("aria-selected", String(isLogin));
-      tabRegister.classList.toggle("current", !isLogin);
-      tabRegister.setAttribute("aria-selected", String(!isLogin));
-      statusEl.textContent = "";
-    }
 
     async function callApi(path, body) {
       const res = await fetch(path, {
@@ -153,23 +102,8 @@
       return payload;
     }
 
-    tabLogin.addEventListener("click", () => setTab("login"));
-    tabRegister.addEventListener("click", () => setTab("register"));
-
     const iaaaForm = document.getElementById("iaaaForm");
     const iaaaStatus = document.getElementById("iaaaStatus");
-    function setLoginMode(iaaa) {
-      document.getElementById("accountView").hidden = iaaa;
-      document.getElementById("iaaaView").hidden = !iaaa;
-      document.getElementById("iaaaPassword").value = "";
-      document.getElementById("loginPassword").value = "";
-      document.getElementById("regPassword").value = "";
-      iaaaStatus.textContent = "";
-      if (!iaaa) setTab("login");
-      document.getElementById(iaaa ? "iaaaUsername" : "loginEmail").focus();
-    }
-    document.getElementById("useIaaa").addEventListener("click", () => setLoginMode(true));
-    document.getElementById("useAccount").addEventListener("click", () => setLoginMode(false));
     function setIaaaTab(qr) {
       iaaaForm.hidden = qr;
       document.getElementById("iaaaQrPanel").hidden = !qr;
@@ -200,35 +134,6 @@
       } finally {
         document.getElementById("iaaaPassword").value = "";
         button.disabled = false;
-      }
-    });
-
-    loginForm.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      statusEl.textContent = "登录中...";
-      try {
-        await callApi("/api/auth/login", {
-          email: document.getElementById("loginEmail").value.trim(),
-          password: document.getElementById("loginPassword").value
-        });
-        location.href = next;
-      } catch (err) {
-        statusEl.textContent = "登录失败: " + err.message;
-      }
-    });
-
-    registerForm.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      statusEl.textContent = "注册中...";
-      try {
-        await callApi("/api/auth/register", {
-          username: document.getElementById("regName").value.trim(),
-          email: document.getElementById("regEmail").value.trim(),
-          password: document.getElementById("regPassword").value
-        });
-        location.href = next;
-      } catch (err) {
-        statusEl.textContent = "注册失败: " + err.message;
       }
     });
 

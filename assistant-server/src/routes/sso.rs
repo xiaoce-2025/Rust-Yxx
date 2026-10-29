@@ -90,7 +90,7 @@ pub fn local_next(value: Option<&str>) -> String {
 fn validate(config: &SsoConfig) -> Result<(), ApiError> {
     if !config.enabled || config.client_id.is_empty() || config.client_secret.len() < 32 {
         return Err(ApiError::BadRequest(
-            "统一认证尚未配置，请联系管理员或使用管理员指引登录".into(),
+            "统一认证尚未配置，请联系管理员或通过北京大学 IAAA 认证登录".into(),
         ));
     }
     for value in [&config.issuer, &config.redirect_uri] {

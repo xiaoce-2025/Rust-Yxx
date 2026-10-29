@@ -10,7 +10,7 @@ function environment(search = '', api = async () => ({ok: true, text: async () =
   const nodes = new Map(), calls = [];
   function node(id) {
     if (!nodes.has(id)) nodes.set(id, {
-      hidden: id === 'iaaaView', value: '', disabled: false, sheet: {disabled: false},
+      hidden: id === 'iaaaQrPanel', value: '', disabled: false, sheet: {disabled: false},
       style: {}, classes: new Set(), attributes: {}, listeners: {}, textContent: '',
       classList: {toggle(name, active) {active ? node(id).classes.add(name) : node(id).classes.delete(name);}},
       addEventListener(event, fn) {this.listeners[event] = fn;},
@@ -32,11 +32,12 @@ function environment(search = '', api = async () => ({ok: true, text: async () =
 }
 const event = {preventDefault() {}};
 
-test('IAAA and local account modes, including QR placeholder, switch without network requests', () => {
+test('IAAA is the only local login entry and QR remains a placeholder', () => {
   const {node, calls} = environment();
-  node('useIaaa').listeners.click();
-  assert.equal(node('accountView').hidden, true);
-  assert.equal(node('iaaaView').hidden, false);
+  assert.match(html, /id="iaaaView" class="main auth-layout">/);
+  assert.doesNotMatch(html, /accountView|useAccount|loginForm|registerForm|\/api\/auth\/(login|register)/);
+  const entry = fs.readFileSync(path.join(__dirname, '../templates/auth_entry.html'), 'utf8');
+  assert.match(entry, /通过北京大学IAAA认证登录/);
   node('iaaaQrTab').listeners.click();
   assert.equal(node('iaaaForm').hidden, true);
   assert.equal(node('iaaaQrPanel').hidden, false);
@@ -44,15 +45,6 @@ test('IAAA and local account modes, including QR placeholder, switch without net
   assert.match(html, /敬请期待/);
   node('iaaaAccountTab').listeners.click();
   assert.equal(node('iaaaForm').hidden, false);
-  node('useAccount').listeners.click();
-  assert.equal(node('accountView').hidden, false);
-  assert.equal(node('loginForm').style.display, 'block');
-  node('tabRegister').listeners.click();
-  assert.equal(node('loginForm').style.display, 'none');
-  assert.equal(node('registerForm').style.display, 'block');
-  assert.equal(node('tabRegister').attributes['aria-selected'], 'true');
-  node('tabLogin').listeners.click();
-  assert.equal(node('loginForm').style.display, 'block');
   assert.equal(calls.length, 0);
 });
 

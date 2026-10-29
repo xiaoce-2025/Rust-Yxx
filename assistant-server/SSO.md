@@ -7,7 +7,7 @@
 ```text
 SSO__ENABLED=true
 SSO__ISSUER=https://auth.example.com
-SSO__CLIENT_ID=yanxiaoxi
+SSO__CLIENT_ID=yxx_autonote
 SSO__CLIENT_SECRET=由管理员提供，不得提交到Git
 SSO__REDIRECT_URI=https://assistant.example.com/auth/sso/callback
 ```
@@ -18,4 +18,4 @@ SSO__REDIRECT_URI=https://assistant.example.com/auth/sso/callback
 
 每次统一认证登录仍须通过小助手自己的 `data/whitelist.json`。稳定绑定 issuer + subject，首次可关联同一已验证邮箱的原有用户，保留旧密码、数据和配额。仅接受受信任认证中心签发的已验证邮箱。
 
-`/auth/admin` 是“经过管理员指引的认证与登录功能”，保留旧账户和 IAAA 登录。它与外部认证中心的管理后台不是同一入口。
+`/auth/admin` 是“通过北京大学IAAA认证登录”入口，仅显示 IAAA 登录，不再提供小助手独立账户的登录或注册界面。它与外部认证中心的管理后台不是同一入口。
