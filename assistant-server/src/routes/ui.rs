@@ -1,6 +1,6 @@
 use axum::{
     extract::{FromRequestParts, Request, State},
-    http::{header::CACHE_CONTROL, HeaderValue},
+    http::{header::{CACHE_CONTROL, COOKIE, SET_COOKIE}, HeaderValue},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
@@ -54,8 +54,18 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
     }
     let target = request.uri().path_and_query().map(|uri| uri.as_str()).unwrap_or("/app").to_string();
     let (mut parts, body) = request.into_parts();
+    let browser_token = parts.headers.get(COOKIE).and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').find_map(|part| part.trim().strip_prefix("assistant_token=")))
+        .map(str::to_owned);
     let mut response = if crate::auth::CurrentUser::from_request_parts(&mut parts, &state).await.is_ok() {
-        next.run(Request::from_parts(parts, body)).await
+        let mut response = next.run(Request::from_parts(parts, body)).await;
+        // Replace previously persistent cookies when an authenticated page is opened.
+        if let Some(token) = browser_token {
+            response.headers_mut().append(SET_COOKIE, crate::auth::browser_session_cookie(
+                &token, state.settings.sso.redirect_uri.starts_with("https:"),
+            ));
+        }
+        response
     } else {
         Redirect::to(&format!("/auth?next={}", urlencoding::encode(&target))).into_response()
     };
@@ -161,7 +171,13 @@ mod tests {
                 .header("cookie", format!("assistant_token={token}")).send().await.unwrap();
             assert_eq!(response.status().as_u16(), expected);
             assert_eq!(response.headers()["cache-control"], "no-store");
-            if expected == 200 { assert!(response.text().await.unwrap().contains("<!doctype html>")); }
+            if expected == 200 {
+                let cookie = response.headers()["set-cookie"].to_str().unwrap();
+                assert!(cookie.starts_with(&format!("assistant_token={token};")));
+                assert!(!cookie.contains("Max-Age="));
+                assert!(!cookie.contains("Expires="));
+                assert!(response.text().await.unwrap().contains("<!doctype html>"));
+            }
             else { assert!(response.text().await.unwrap().is_empty()); }
         }
         server.abort();

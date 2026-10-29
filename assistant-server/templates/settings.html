@@ -297,8 +297,10 @@
   </main>
 
   <script>
+    // Discard legacy persistent tokens; manually supplied tokens live in memory only.
+    try { localStorage.removeItem("assistant_token"); } catch (_) {}
     const state = {
-      token: localStorage.getItem("assistant_token") || "",
+      token: "",
       channelSessionId: "",
       channelQrcode: "",
       channelQrcodeLink: ""
@@ -326,7 +328,7 @@
 
     function renderTokenState() {
       if (state.token) {
-        setStatus(tokenStatus, "令牌已保存，可调用受保护接口。", "ok");
+        setStatus(tokenStatus, "令牌仅在当前页面有效，可调用受保护接口。", "ok");
       } else {
         setStatus(tokenStatus, "尚未保存令牌。", "warn");
       }
@@ -365,14 +367,12 @@
 
     document.getElementById("saveTokenBtn").addEventListener("click", () => {
       state.token = tokenInput.value.trim();
-      localStorage.setItem("assistant_token", state.token);
       renderTokenState();
     });
 
     document.getElementById("clearTokenBtn").addEventListener("click", () => {
       state.token = "";
       tokenInput.value = "";
-      localStorage.removeItem("assistant_token");
       renderTokenState();
     });
 

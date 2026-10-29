@@ -335,12 +335,7 @@ async fn callback(
         .await
         .map_err(|_| ApiError::Internal("保存登录会话失败".into()))?;
     let secure = config.redirect_uri.starts_with("https:");
-    let cookie = HeaderValue::from_str(&format!(
-        "assistant_token={session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
-        ttl.max(1) * 3600,
-        if secure { "; Secure" } else { "" }
-    ))
-    .unwrap();
+    let cookie = crate::auth::browser_session_cookie(&session_id.to_string(), secure);
     tracing::info!(user_id=%user.id,"Unified authentication succeeded; application whitelist accepted");
     let mut response = Redirect::to(&transaction.next).into_response();
     response.headers_mut().append(SET_COOKIE, cookie);

@@ -4,7 +4,7 @@ use argon2::{password_hash::SaltString, Argon2, PasswordHash, PasswordHasher, Pa
 use axum::{
     async_trait,
     extract::{FromRef, FromRequestParts},
-    http::{header::AUTHORIZATION, HeaderMap, request::Parts},
+    http::{header::AUTHORIZATION, HeaderMap, HeaderValue, request::Parts},
 };
 use chrono::{Duration, Utc};
 use rand::rngs::OsRng;
@@ -101,4 +101,28 @@ pub fn verify_password(password: &str, password_hash: &str) -> Result<bool, ApiE
 
 pub fn session_expiry(ttl_hours: i64) -> chrono::DateTime<Utc> {
     Utc::now() + Duration::hours(ttl_hours)
+}
+
+// The browser owns the session lifetime; the server expiry remains an upper bound.
+pub fn browser_session_cookie(token: &str, secure: bool) -> HeaderValue {
+    HeaderValue::from_str(&format!(
+        "assistant_token={token}; Path=/; HttpOnly; SameSite=Lax{}",
+        if secure { "; Secure" } else { "" }
+    )).expect("generated session token")
+}
+
+#[cfg(test)]
+mod cookie_tests {
+    use super::*;
+    #[test]
+    fn application_login_cookie_is_not_persistent() {
+        for secure in [false, true] {
+            let cookie = browser_session_cookie(&Uuid::new_v4().to_string(), secure);
+            let value = cookie.to_str().unwrap();
+            assert!(!value.contains("Max-Age="));
+            assert!(!value.contains("Expires="));
+            assert!(value.contains("HttpOnly; SameSite=Lax"));
+            assert_eq!(value.contains("; Secure"), secure);
+        }
+    }
 }

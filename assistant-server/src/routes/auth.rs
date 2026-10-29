@@ -140,7 +140,7 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
         expires_at,
     };
 
-    let cookie = build_auth_cookie(&resp.token, state.settings.security.session_ttl_hours);
+    let cookie = crate::auth::browser_session_cookie(&resp.token, false);
 
     Ok(([ (SET_COOKIE, cookie) ], Json(resp)).into_response())
 }
@@ -188,7 +188,7 @@ async fn login(
         expires_at,
     };
 
-    let cookie = build_auth_cookie(&resp.token, state.settings.security.session_ttl_hours);
+    let cookie = crate::auth::browser_session_cookie(&resp.token, false);
 
     Ok(([ (SET_COOKIE, cookie) ], Json(resp)).into_response())
 }
@@ -242,7 +242,7 @@ async fn iaaa_login(
         token: session_id.to_string(), user_id: user.id,
         username: user.username, email: user.email, expires_at,
     };
-    let cookie = build_auth_cookie(&resp.token, state.settings.security.session_ttl_hours);
+    let cookie = crate::auth::browser_session_cookie(&resp.token, false);
     tracing::info!(user_id=%resp.user_id, "IAAA assistant session created");
     Ok(([(SET_COOKIE, cookie)], Json(resp)).into_response())
 }
@@ -263,14 +263,6 @@ async fn logout(
     Ok(([ (SET_COOKIE, clear_cookie) ], Json(SimpleResponse { success: true })).into_response())
 }
 
-fn build_auth_cookie(token: &str, ttl_hours: i64) -> HeaderValue {
-    let max_age_seconds = (ttl_hours.max(1) * 3600) as i64;
-    let cookie = format!(
-        "assistant_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-        token, max_age_seconds
-    );
-    HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("assistant_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"))
-}
 #[cfg(test)]
 mod iaaa_tests {
     use super::*;

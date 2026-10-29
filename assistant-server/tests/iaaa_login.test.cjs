@@ -37,7 +37,7 @@ test('IAAA is the only local login entry and QR remains a placeholder', () => {
   assert.match(html, /id="iaaaView" class="main auth-layout">/);
   assert.doesNotMatch(html, /accountView|useAccount|loginForm|registerForm|\/api\/auth\/(login|register)/);
   const entry = fs.readFileSync(path.join(__dirname, '../templates/auth_entry.html'), 'utf8');
-  assert.match(entry, /通过北京大学IAAA认证登录/);
+  assert.match(entry, /通过北京大学IAAA(?:统一)?认证登录/);
   node('iaaaQrTab').listeners.click();
   assert.equal(node('iaaaForm').hidden, true);
   assert.equal(node('iaaaQrPanel').hidden, false);
