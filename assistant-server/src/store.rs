@@ -232,6 +232,53 @@ impl FileStore {
         Ok(())
     }
 
+    /// A verified OIDC identity still needs this application's own whitelist on every login.
+    pub async fn resolve_oidc_user(&self, issuer: &str, subject: &str, email: &str, username: &str) -> Result<FileUser, crate::error::ApiError> {
+        use crate::error::ApiError;
+        if !self.is_email_in_whitelist(email).await {
+            return Err(ApiError::Forbidden("统一认证已通过，但该邮箱不在小助手白名单中".into()));
+        }
+        let mut users = self.users.write().await;
+        let path = self.data_dir.join("oidc_identities.json");
+        let mut links: HashMap<String, Uuid> = match tokio::fs::read(&path).await {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| ApiError::Internal("统一身份关联数据无效".into()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(_) => return Err(ApiError::Internal("无法读取统一身份关联数据".into())),
+        };
+        let identity = format!("{}\0{}", issuer.trim_end_matches('/'), subject);
+        let user = if let Some(id) = links.get(&identity) {
+            let user = users.get(id).ok_or_else(|| ApiError::Forbidden("关联账户不存在，请联系管理员".into()))?;
+            if user.email != email { return Err(ApiError::Forbidden("统一账户邮箱已变更，请联系管理员重新关联".into())); }
+            user.clone()
+        } else if let Some(user) = users.values().find(|user| user.email == email) {
+            let prefix = format!("{}\0", issuer.trim_end_matches('/'));
+            if links.iter().any(|(key, id)| key.starts_with(&prefix) && id == &user.id) {
+                return Err(ApiError::Forbidden("此邮箱已关联其他统一认证账户，请联系管理员".into()));
+            }
+            user.clone()
+        } else {
+            let id = Uuid::new_v4();
+            let now = Utc::now();
+            let user = FileUser {
+                id, username: if users.values().any(|u|u.username == username) {format!("{username}-{id}")} else {username.to_string()},
+                email: email.to_string(), password_hash: crate::auth::hash_password(&Uuid::new_v4().to_string())?,
+                is_active: true, created_at: now, updated_at: now, storage_quota: 3, processing_quota: 1,
+                processing_priority: 5, iaaa_encrypted_password: None, iaaa_public_key: None,
+            };
+            let mut updated = users.clone(); updated.insert(id, user.clone());
+            self.save_users_data(&updated).await.map_err(|_| ApiError::Internal("保存应用账户失败".into()))?;
+            *users = updated;
+            user
+        };
+        if !user.is_active { return Err(ApiError::Forbidden("小助手账户已停用".into())); }
+        links.insert(identity, user.id);
+        let bytes = serde_json::to_vec_pretty(&links).map_err(|_|ApiError::Internal("身份关联序列化失败".into()))?;
+        let temp = self.data_dir.join(format!("oidc-identities-{}.tmp",Uuid::new_v4()));
+        tokio::fs::write(&temp,bytes).await.map_err(|_|ApiError::Internal("身份关联写入失败".into()))?;
+        tokio::fs::rename(&temp,&path).await.map_err(|_|ApiError::Internal("保存身份关联失败".into()))?;
+        Ok(user)
+    }
+
     /// Resolve a verified IAAA identity atomically. Only new accounts require the whitelist.
     pub async fn resolve_iaaa_user(&self, mut candidate: FileUser) -> Result<Option<FileUser>, Box<dyn std::error::Error>> {
         let mut users = self.users.write().await;

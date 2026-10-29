@@ -16,6 +16,7 @@ const LOGIN_PREVIEW_URL: &str = "/auth/login-preview.ef807508d656.webp";
 pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/auth", get(auth_page))
+        .route("/auth/admin", get(admin_auth_page))
         .route("/auth/iaaa-login.css", get(|| async {
             ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
                 include_str!("../../templates/iaaa-login.css"))
@@ -45,8 +46,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
 }
 
 async fn require_login(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    if matches!(request.uri().path(), "/auth" | "/auth/iaaa-login.css" | "/auth/login-picture.png" | LOGIN_IMAGE_URL | LOGIN_PREVIEW_URL) {
-        return next.run(request).await;
+    if matches!(request.uri().path(), "/auth" | "/auth/admin" | "/auth/iaaa-login.css" | "/auth/login-picture.png" | LOGIN_IMAGE_URL | LOGIN_PREVIEW_URL) {
+        let html = matches!(request.uri().path(), "/auth" | "/auth/admin");
+        let mut response = next.run(request).await;
+        if html { response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store")); }
+        return response;
     }
     let target = request.uri().path_and_query().map(|uri| uri.as_str()).unwrap_or("/app").to_string();
     let (mut parts, body) = request.into_parts();
@@ -59,7 +63,12 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
     response
 }
 
-async fn auth_page() -> Html<String> {
+async fn auth_page(axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String,String>>) -> Html<String> {
+    let next = crate::routes::sso::local_next(query.get("next").map(String::as_str));
+    Html(include_str!("../../templates/auth_entry.html").replace("NEXT_ENCODED", &urlencoding::encode(&next)))
+}
+
+async fn admin_auth_page() -> Html<String> {
     guarded_page(include_str!("../../templates/auth.html"))
 }
 

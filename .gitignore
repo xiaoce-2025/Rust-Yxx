@@ -40,3 +40,6 @@ __pycache__/
 *.pyc
 # 配置文件
 # assistant-server/config/
+# The private identity provider is maintained outside this repository.
+/auth-service/
+/yxx_auth/

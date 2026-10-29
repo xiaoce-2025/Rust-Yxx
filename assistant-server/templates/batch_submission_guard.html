@@ -16,7 +16,7 @@
   const START = '/api/pkuvideofullclass/batch-submit';
   const HINT = 'assistant.batch-submission.active';
   const rawFetch = window.fetch.bind(window);
-  const authPage = new URL(location.href).pathname === '/auth';
+  const authPage = ['/auth','/auth/admin'].includes(new URL(location.href).pathname);
   let pollingEnabled = !authPage;
   let pollTimer;
   let state = {active:false};
@@ -117,7 +117,7 @@
   }
   function isLightweight(input) {
     const url=new URL(typeof input==='string' || input instanceof URL ? input : input.url,location.href);
-    return url.pathname===STATUS || ['/api/auth/me','/api/auth/login','/api/auth/iaaa'].includes(url.pathname);
+    return url.pathname===STATUS || ['/api/auth/me','/api/auth/login','/api/auth/iaaa','/auth/sso/start','/auth/sso/callback'].includes(url.pathname);
   }
   window.fetch=async function(input,options) {
     if (isApi(input) && !isLightweight(input)) {

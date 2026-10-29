@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub sso_transactions: Arc<tokio::sync::Mutex<HashMap<String, crate::routes::sso::Transaction>>>,
     pub batch_submissions: Arc<crate::services::batch_submission::BatchSubmissionManager>,
     pub video_queue: Arc<crate::services::video_queue::VideoQueue>,
     pub settings: Arc<Settings>,
@@ -73,6 +74,7 @@ impl AppState {
 
 
         let state = Self {
+            sso_transactions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             batch_submissions: Arc::new(crate::services::batch_submission::BatchSubmissionManager::new()),
             video_queue: crate::services::video_queue::VideoQueue::new(settings.pkuvideo.processing_concurrency),
             settings: Arc::new(settings),

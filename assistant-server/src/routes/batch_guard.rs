@@ -213,6 +213,7 @@ mod tests {
         for path in ["/pkuvideo_sequence", "/settings", "/app"] {
             let html = client
                 .get(format!("{base}{path}"))
+                .header("Cookie", &cookie)
                 .send()
                 .await
                 .unwrap()

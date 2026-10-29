@@ -3,6 +3,8 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub sso: SsoConfig,
     pub server: ServerConfig,
     pub wechat: WeChatConfig,
     pub security: SecurityConfig,
@@ -115,6 +117,22 @@ impl Default for PkuVideoConfig {
             m3u8_concurrency: 3,
             m3u8_segment_timeout_seconds: 120,
         }
+    }
+}
+
+#[derive(Clone, Deserialize, Default)]
+pub struct SsoConfig {
+    #[serde(default)] pub enabled: bool,
+    #[serde(default)] pub allow_insecure_http: bool,
+    #[serde(default)] pub issuer: String,
+    #[serde(default)] pub client_id: String,
+    #[serde(default)] pub client_secret: String,
+    #[serde(default)] pub redirect_uri: String,
+}
+impl std::fmt::Debug for SsoConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsoConfig").field("enabled", &self.enabled).field("issuer", &self.issuer)
+            .field("client_id", &self.client_id).field("client_secret", &"[redacted]").finish()
     }
 }
 

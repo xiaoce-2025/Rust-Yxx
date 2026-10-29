@@ -46,3 +46,8 @@ cargo run
 
 - `assistant-server/README.md`
 - `assistant-server/QUICKSTART.md`
+
+
+## 外部统一认证接入
+
+本仓库仅包含严小希小助手，以及连接外部统一认证服务的 OIDC 客户端；不包含认证中心的账户库、管理后台或服务端源码。客户端配置和验证方式见 [接入说明](assistant-server/SSO.md)。管理员指引的原登录入口保留在 `/auth/admin`。
