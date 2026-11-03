@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>用户中心 | 「严小希」小助手</title>
+  <style>
+    :root { --red: #9b0000; --ink: #2c2020; --muted: #655554; --line: #eadcda; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #fcf6f4; color: var(--ink); font: 15px/1.6 Arial, "Microsoft YaHei", sans-serif; }
+    .shell { width: min(1080px, calc(100% - 32px)); margin: auto; }
+    .hero { padding: 38px 0; background: linear-gradient(105deg, #fff6f2, #f7e5df); border-bottom: 1px solid var(--line); }
+    .eyebrow { color: var(--red); font-weight: 700; letter-spacing: .12em; }
+    h1 { margin: 4px 0; font-size: clamp(34px, 5vw, 52px); }
+    h2 { margin: 0 0 12px; font-size: 22px; }
+    p { margin: 0; color: var(--muted); }
+    .sections { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 18px; padding-block: 24px 48px; }
+    .card { padding: clamp(18px, 4vw, 28px); background: #fff; border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 6px 20px #55221b08; }
+    .wide { grid-column: 1 / -1; }
+    dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 16px; margin: 0; }
+    dt, small { color: var(--muted); font-size: 13px; }
+    dd { margin: 4px 0 0; font-weight: 700; overflow-wrap: anywhere; }
+    .priority { color: var(--red); font-size: 34px; font-weight: 700; line-height: 1.2; margin-bottom: 8px; }
+    fieldset { min-width: 0; border: 0; padding: 0; margin: 0 0 16px; }
+    legend { padding: 0; margin-bottom: 8px; font-weight: 700; }
+    .choices, .keys { display: grid; gap: 12px; }
+    .choices { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .keys { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 16px 0; }
+    .choices label { padding: 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+    .choices label:has(:checked) { background: #fff6f2; border-color: var(--red); }
+    .choices input { accent-color: var(--red); }
+    .keys label { display: block; font-weight: 700; }
+    .keys input { display: block; width: 100%; padding: 10px; margin: 6px 0; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+    .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; }
+    .save { padding: 10px 18px; color: #fff; background: var(--red); border: 0; border-radius: 8px; font: inherit; cursor: pointer; }
+    .save:disabled { opacity: .5; cursor: default; }
+    .clear { padding: 0; background: none; border: 0; color: var(--red); font: inherit; text-decoration: underline; cursor: pointer; }
+    #api-status[data-error] { color: var(--red); }
+    @media (max-width: 680px) { .sections, .keys { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div class="shell">
+        <span class="eyebrow">「严小希」小助手</span>
+        <h1>用户中心</h1>
+        <p>查看账户资料、任务优先级和 AI 服务配置。</p>
+      </div>
+    </section>
+    <div class="shell sections">
+      <section class="card">
+        <h2>用户基本信息</h2>
+        <dl>
+          <div><dt>用户名</dt><dd id="account-name">—</dd></div>
+          <div><dt>邮箱</dt><dd id="account-email">—</dd></div>
+          <div><dt>注册日期</dt><dd id="account-created">—</dd></div>
+        </dl>
+        <p id="account-status" role="status"></p>
+      </section>
+      <section class="card">
+        <h2>账户优先级</h2>
+        <p id="account-priority" class="priority">—</p>
+        <p>课堂笔记任务排队时，数值越小越优先。优先级由系统管理。</p>
+      </section>
+      <section class="card wide">
+        <h2>API 配置</h2>
+        <form id="api-form">
+          <fieldset id="api-fields" disabled>
+            <legend>AI 服务来源</legend>
+            <div class="choices">
+              <label><input type="radio" name="ai_mode" value="server" checked> 使用服务器 AI</label>
+              <label><input type="radio" name="ai_mode" value="custom"> 自定义 API Key</label>
+            </div>
+            <div id="custom-settings" hidden>
+              <div class="keys">
+                <div><label>阿里云 DashScope<input type="password" name="aliyun_api_key" autocomplete="new-password"></label><button class="clear" type="button" data-key="aliyun_api_key" hidden>清除密钥</button></div>
+                <div><label>DeepSeek<input type="password" name="deepseek_api_key" autocomplete="new-password"></label><button class="clear" type="button" data-key="deepseek_api_key" hidden>清除密钥</button></div>
+                <div><label>小米 MiMo<input type="password" name="mimo_api_key" autocomplete="new-password"></label><button class="clear" type="button" data-key="mimo_api_key" hidden>清除密钥</button></div>
+              </div>
+              <p>三项均可选填。空白输入框保留已保存的密钥，未配置密钥的服务使用服务器密钥。</p>
+            </div>
+            <div class="actions"><button class="save" type="submit">保存配置</button></div>
+          </fieldset>
+          <p id="api-status" role="status">正在加载配置…</p>
+        </form>
+      </section>
+    </div>
+  </main>
+  <script>
+    window.siteAccount.then(account => {
+      if (!account) {
+        document.getElementById('account-status').textContent = '账户资料加载失败，请刷新页面重试。';
+        return;
+      }
+      document.getElementById('account-name').textContent = account.username;
+      document.getElementById('account-email').textContent = account.email || '未设置';
+      document.getElementById('account-created').textContent = new Date(account.created_at).toLocaleDateString('zh-CN');
+      document.getElementById('account-priority').textContent = account.processing_priority;
+    });
+
+    const form = document.getElementById('api-form');
+    const fields = document.getElementById('api-fields');
+    const status = document.getElementById('api-status');
+    const mode = form.elements.ai_mode;
+    const custom = document.getElementById('custom-settings');
+    const clearButtons = Array.from(form.querySelectorAll('[data-key]'));
+    const pendingClears = new Set();
+
+    function showMode() {
+      custom.hidden = mode.value !== 'custom';
+    }
+
+    async function loadConfig() {
+      const response = await fetch('/api/user/api-config', { cache: 'no-store' });
+      if (!response.ok) throw new Error();
+      const config = await response.json();
+      mode.value = config.ai_mode;
+      showMode();
+      pendingClears.clear();
+      for (const button of clearButtons) {
+        const key = button.dataset.key;
+        const configured = config[key + '_set'];
+        form.elements[key].value = '';
+        form.elements[key].placeholder = configured ? '已保存，输入新值可替换' : '未配置';
+        button.hidden = !configured;
+        button.textContent = '清除密钥';
+      }
+    }
+
+    mode[0].addEventListener('change', showMode);
+    mode[1].addEventListener('change', showMode);
+    for (const button of clearButtons) {
+      button.addEventListener('click', () => {
+        const key = button.dataset.key;
+        if (pendingClears.delete(key)) {
+          button.textContent = '清除密钥';
+          form.elements[key].placeholder = '已保存，输入新值可替换';
+        } else {
+          pendingClears.add(key);
+          button.textContent = '撤销清除';
+          form.elements[key].value = '';
+          form.elements[key].placeholder = '保存后清除';
+        }
+      });
+    }
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const body = { ai_mode: mode.value };
+      if (mode.value === 'custom') {
+        for (const { dataset: { key } } of clearButtons) {
+          const value = form.elements[key].value.trim();
+          if (value || pendingClears.has(key)) body[key] = value;
+        }
+      }
+      fields.disabled = true;
+      status.removeAttribute('data-error');
+      status.textContent = '正在保存…';
+      try {
+        const response = await fetch('/api/user/api-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (!response.ok) throw new Error();
+        try {
+          await loadConfig();
+          status.textContent = '配置已保存。';
+        } catch {
+          status.textContent = '配置已保存，请刷新页面查看最新状态。';
+          return;
+        }
+      } catch {
+        status.setAttribute('data-error', '');
+        status.textContent = '保存失败，请重试。';
+      }
+      fields.disabled = false;
+    });
+
+    loadConfig().then(() => {
+      fields.disabled = false;
+      status.textContent = '';
+    }).catch(() => {
+      status.setAttribute('data-error', '');
+      status.textContent = '配置加载失败，请刷新页面重试。';
+    });
+  </script>
+</body>
+</html>

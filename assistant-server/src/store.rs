@@ -40,8 +40,17 @@ pub struct FileUserSession {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiMode {
+    Server,
+    Custom,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileUserConfig {
+    #[serde(default)]
+    pub ai_mode: Option<AiMode>,
     pub user_id: Uuid,
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
@@ -412,21 +421,23 @@ impl FileStore {
         Ok(())
     }
 
-    async fn save_configs(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("configs.json");
-        let data = self.configs.read().await;
-        let json = serde_json::to_string_pretty(&*data)?;
-        tokio::fs::write(&path, json).await?;
-        Ok(())
-    }
-
     pub async fn get_config(&self, user_id: Uuid) -> Option<FileUserConfig> {
         self.configs.read().await.get(&user_id).cloned()
     }
 
-    pub async fn upsert_config(&self, config: FileUserConfig) -> Result<(), Box<dyn std::error::Error>> {
-        self.configs.write().await.insert(config.user_id, config);
-        self.save_configs().await?;
+    pub async fn update_config(
+        &self,
+        user_id: Uuid,
+        update: impl FnOnce(Option<FileUserConfig>) -> FileUserConfig,
+    ) -> std::io::Result<()> {
+        let mut configs = self.configs.write().await;
+        let mut next = configs.clone();
+        let config = update(next.remove(&user_id));
+        next.insert(user_id, config);
+        let pending = self.data_dir.join("configs.json.tmp");
+        tokio::fs::write(&pending, serde_json::to_vec_pretty(&next)?).await?;
+        tokio::fs::rename(pending, self.data_dir.join("configs.json")).await?;
+        *configs = next;
         Ok(())
     }
 

@@ -7,5 +7,17 @@
       <a href="/pkuvideo">课堂笔记生成</a>
       <a href="/pkuvideo_fw">回放中转与翻译</a>
     </nav>
+    <details class="site-account">
+      <summary><span id="site-username">账户</span><span aria-hidden="true">⌄</span></summary>
+      <div class="site-account-menu"><a href="/user-center">用户中心</a></div>
+    </details>
   </div>
 </header>
+<script>
+  window.siteAccount = fetch('/api/auth/me', { cache: 'no-store' })
+    .then(response => response.ok ? response.json() : null)
+    .catch(() => null);
+  window.siteAccount.then(account => {
+    if (account) document.getElementById('site-username').textContent = account.username;
+  });
+</script>

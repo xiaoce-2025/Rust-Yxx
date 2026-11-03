@@ -56,6 +56,8 @@ struct CurrentUserResponse {
     email: String,
     storage_quota: i32,
     processing_quota: i32,
+    processing_priority: u32,
+    created_at: chrono::DateTime<Utc>,
 }
 
 pub fn routes() -> Router<AppState> {
@@ -75,6 +77,8 @@ async fn me(State(state): State<AppState>, current_user: CurrentUser) -> Result<
         email: current_user.email,
         storage_quota: user.storage_quota,
         processing_quota: user.processing_quota,
+        processing_priority: user.processing_priority,
+        created_at: user.created_at,
     }))
 }
 

@@ -215,6 +215,9 @@ async fn reexecute_step(
     let notes_path = job_dir.join("lecture_notes.tex");
     let pdf_path = job_dir.join("lecture_notes.pdf");
 
+    let config = state.store.get_config(current_user.id).await;
+    let settings = crate::services::video_jobs::merge_with_user_config(&state.settings, &config);
+
     // 根据步骤索引重新执行
     match req.step {
         0 => {
@@ -256,7 +259,7 @@ async fn reexecute_step(
         }
         2 => {
             // 重新执行 语音转文字
-            crate::services::pkuvideo::speech_to_text(&mp3_path, &transcript_path, &state.settings)
+            crate::services::pkuvideo::speech_to_text(&mp3_path, &transcript_path, &settings)
                 .await
                 .map_err(|e| ApiError::Internal(e))?;
             job.steps[2].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
@@ -270,7 +273,7 @@ async fn reexecute_step(
         }
         3 => {
             // 重新执行 讲义提取
-            crate::services::pkuvideo::extract_notes(&transcript_path, &notes_path, &state.settings)
+            crate::services::pkuvideo::extract_notes(&transcript_path, &notes_path, &settings)
                 .await
                 .map_err(|e| ApiError::Internal(e))?;
             job.steps[3].status = crate::services::pkuvideo::PipelineStatus::Succeeded;

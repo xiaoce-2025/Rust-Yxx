@@ -38,3 +38,27 @@
   .site-header-brand span { display: none; }
   .site-header .site-header-nav { font-size: 11px; overflow-x: auto; }
 }
+
+.site-header .site-account { position: relative; margin-left: auto; flex: 0 0 auto; z-index: 20; }
+.site-header .site-account summary {
+  display: flex; align-items: center; gap: 6px; min-height: var(--site-header-height);
+  cursor: pointer; list-style: none; color: #9b0000; font-weight: 700;
+}
+.site-header .site-account::details-content { content-visibility: visible; }
+.site-header .site-account summary::-webkit-details-marker { display: none; }
+.site-header #site-username { max-width: min(22vw, 170px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-header .site-account-menu {
+  display: none; position: absolute; top: 100%; right: 0; min-width: 118px;
+  background: #fff; border: 1px solid #eadcda; border-radius: 10px;
+  box-shadow: 0 8px 24px #55221b19;
+}
+.site-header .site-account-menu a { padding: 0 14px; }
+.site-header .site-account[open] .site-account-menu,
+.site-header .site-account:focus-within .site-account-menu { display: block; }
+@media (hover: hover) {
+  .site-header .site-account:hover .site-account-menu { display: block; }
+}
+@media (max-width: 650px) {
+  .site-header .site-header-inner { flex-wrap: wrap; gap: 0 12px; }
+  .site-header .site-header-nav { order: 1; width: 100%; overflow-x: auto; font-size: 12px; }
+}

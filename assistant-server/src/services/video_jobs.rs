@@ -182,37 +182,50 @@ fn parse_step_error(raw: &str) -> (usize, String) {
 }
 
 /// 合并全局配置和用户自定义配置，用户配置优先
-fn merge_with_user_config(
+pub(crate) fn provider_key(
+    mode: Option<crate::store::AiMode>,
+    environment: &str,
+    personal: Option<String>,
+    global: Option<String>,
+) -> Option<String> {
+    use crate::store::AiMode;
+    let configured = |value: &String| !value.trim().is_empty();
+    let personal = personal.filter(configured);
+    let server = std::env::var(environment).ok().filter(configured);
+    let global = global.filter(configured);
+    match mode {
+        Some(AiMode::Custom) => personal.or(server).or(global),
+        Some(AiMode::Server) => server.or(global),
+        None => server.or(personal).or(global),
+    }
+}
+
+pub(crate) fn merge_with_user_config(
     global_settings: &Settings,
     user_config: &Option<crate::store::FileUserConfig>,
 ) -> Settings {
+    use crate::store::AiMode;
     let mut merged = global_settings.clone();
-
-    if let Some(user_cfg) = user_config {
-        // 阿里云配置覆盖
-        if let Some(model) = &user_cfg.aliyun_model {
-            if !model.is_empty() {
-                merged.paraformer.model = Some(model.clone());
-            }
+    let mode = user_config.as_ref().and_then(|cfg| cfg.ai_mode);
+    let overrides = user_config.as_ref().filter(|_| mode != Some(AiMode::Server));
+    if let Some(cfg) = overrides {
+        if let Some(model) = cfg.aliyun_model.as_ref().filter(|model| !model.trim().is_empty()) {
+            merged.paraformer.model = Some(model.clone());
         }
-        if let Some(api_key) = &user_cfg.aliyun_api_key {
-            if !api_key.is_empty() {
-                merged.paraformer.api_key = Some(api_key.clone());
-            }
-        }
-        // DeepSeek配置覆盖
-        if let Some(model) = &user_cfg.deepseek_model {
-            if !model.is_empty() {
-                merged.deepseek.model = Some(model.clone());
-            }
-        }
-        if let Some(api_key) = &user_cfg.deepseek_api_key {
-            if !api_key.is_empty() {
-                merged.deepseek.api_key = Some(api_key.clone());
-            }
+        if let Some(model) = cfg.deepseek_model.as_ref().filter(|model| !model.trim().is_empty()) {
+            merged.deepseek.model = Some(model.clone());
         }
     }
-
+    merged.paraformer.api_key = provider_key(
+        mode, "DASHSCOPE_API_KEY",
+        overrides.and_then(|cfg| cfg.aliyun_api_key.clone()),
+        merged.paraformer.api_key,
+    );
+    merged.deepseek.api_key = provider_key(
+        mode, "DEEPSEEK_API_KEY",
+        overrides.and_then(|cfg| cfg.deepseek_api_key.clone()),
+        merged.deepseek.api_key,
+    );
     merged
 }
 

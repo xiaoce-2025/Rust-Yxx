@@ -18,15 +18,6 @@ pub struct Credentials {
     tts_key: String,
 }
 
-fn key(environment: &str, user: Option<String>, global: Option<String>) -> Result<String, String> {
-    std::env::var(environment)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or(user.filter(|s| !s.trim().is_empty()))
-        .or(global.filter(|s| !s.trim().is_empty()))
-        .ok_or_else(|| format!("未配置 {environment}，请在服务器或现有 API 设置中配置"))
-}
-
 fn mimo_override(
     user: Option<String>,
     environment: Option<String>,
@@ -48,7 +39,10 @@ impl Credentials {
             .get(&id)
             .cloned()
             .ok_or("原任务不存在")?;
-        let user = state.store.get_config(source.user_id).await;
+        use crate::{services::video_jobs::merge_with_user_config, store::AiMode};
+        let config = state.store.get_config(source.user_id).await;
+        let settings = merge_with_user_config(&state.settings, &config);
+        let user = config.as_ref().filter(|cfg| cfg.ai_mode != Some(AiMode::Server));
         Ok(Self {
             user_id: source.user_id,
             mimo_model: mimo_override(
@@ -57,22 +51,9 @@ impl Credentials {
                 Some(state.settings.video_translation.mimo_model.clone()),
             )
             .ok_or("未配置 MiMo 模型名称")?,
-            model: user
-                .as_ref()
-                .and_then(|u| u.deepseek_model.clone())
-                .filter(|s| !s.trim().is_empty())
-                .or(state.settings.deepseek.model.clone())
-                .unwrap_or_else(|| "DeepSeek-V4-Flash".into()),
-            asr_key: key(
-                "DASHSCOPE_API_KEY",
-                user.as_ref().and_then(|u| u.aliyun_api_key.clone()),
-                state.settings.paraformer.api_key.clone(),
-            )?,
-            llm_key: key(
-                "DEEPSEEK_API_KEY",
-                user.as_ref().and_then(|u| u.deepseek_api_key.clone()),
-                state.settings.deepseek.api_key.clone(),
-            )?,
+            model: settings.deepseek.model.unwrap_or_else(|| "DeepSeek-V4-Flash".into()),
+            asr_key: settings.paraformer.api_key.ok_or("未配置阿里云语音识别 API Key")?,
+            llm_key: settings.deepseek.api_key.ok_or("未配置 DeepSeek API Key")?,
             tts_key: mimo_override(
                 user.as_ref().and_then(|u| u.mimo_api_key.clone()),
                 std::env::var("MIMO_API_KEY").ok(),
@@ -716,7 +697,7 @@ mod tests {
             "mimo_model":"user-model","mimo_api_key":"user-key"
         }))
         .unwrap();
-        state.store.upsert_config(cfg).await.unwrap();
+        state.store.update_config(user, |_| cfg).await.unwrap();
         state.pkuvideo_fw_jobs.write().await.insert(
             id,
             crate::services::pkuvideo_fw::PkuVideoFwJob::new(id, user, String::new()),

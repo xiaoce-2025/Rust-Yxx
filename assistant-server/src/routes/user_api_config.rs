@@ -9,6 +9,7 @@ use crate::{app_state::AppState, auth::CurrentUser, error::ApiError};
 
 #[derive(Debug, Deserialize)]
 struct UpdateApiConfigRequest {
+    ai_mode: Option<crate::store::AiMode>,
     aliyun_model: Option<String>,
     aliyun_api_key: Option<String>,
     deepseek_model: Option<String>,
@@ -19,6 +20,7 @@ struct UpdateApiConfigRequest {
 
 #[derive(Debug, Serialize)]
 struct ApiConfigResponse {
+    ai_mode: crate::store::AiMode,
     aliyun_model: Option<String>,
     aliyun_api_key_set: bool, // 只返回是否设置，不返回实际值
     deepseek_model: Option<String>,
@@ -39,16 +41,33 @@ async fn get_api_config(
 ) -> Result<Json<ApiConfigResponse>, ApiError> {
     let config = state.store.get_config(current_user.id).await;
 
+    use crate::store::AiMode;
+    let ai_mode = config.as_ref().map_or(AiMode::Server, |cfg| {
+        cfg.ai_mode.unwrap_or_else(|| {
+            let overrides = [
+                &cfg.aliyun_api_key, &cfg.deepseek_api_key, &cfg.mimo_api_key,
+                &cfg.aliyun_model, &cfg.deepseek_model, &cfg.mimo_model,
+            ];
+            if overrides.iter().any(|value| value.as_ref().is_some_and(|s| !s.trim().is_empty())) {
+                AiMode::Custom
+            } else {
+                AiMode::Server
+            }
+        })
+    });
+
     match config {
         Some(cfg) => Ok(Json(ApiConfigResponse {
+            ai_mode,
             aliyun_model: cfg.aliyun_model,
-            aliyun_api_key_set: cfg.aliyun_api_key.is_some(),
+            aliyun_api_key_set: cfg.aliyun_api_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
             deepseek_model: cfg.deepseek_model,
-            deepseek_api_key_set: cfg.deepseek_api_key.is_some(),
+            deepseek_api_key_set: cfg.deepseek_api_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
             mimo_model: cfg.mimo_model,
             mimo_api_key_set: cfg.mimo_api_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
         })),
         None => Ok(Json(ApiConfigResponse {
+            ai_mode,
             aliyun_model: None,
             aliyun_api_key_set: false,
             deepseek_model: None,
@@ -64,49 +83,49 @@ async fn update_api_config(
     current_user: CurrentUser,
     Json(req): Json<UpdateApiConfigRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // 获取现有配置或创建新的
-    let mut config = state.store.get_config(current_user.id).await.unwrap_or_else(|| {
-        crate::store::FileUserConfig {
-            user_id: current_user.id,
-            openai_api_key: None,
-            anthropic_api_key: None,
-            default_model: String::new(),
-            theme: String::new(),
-            settings: serde_json::Value::Object(serde_json::Map::new()),
-            aliyun_model: None,
-            aliyun_api_key: None,
-            deepseek_model: None,
-            deepseek_api_key: None,
-            mimo_model: None,
-            mimo_api_key: None,
+    state.store.update_config(current_user.id, |existing| {
+        let mut config = existing.unwrap_or_else(|| {
+            crate::store::FileUserConfig {
+                user_id: current_user.id,
+                ai_mode: None,
+                openai_api_key: None,
+                anthropic_api_key: None,
+                default_model: String::new(),
+                theme: String::new(),
+                settings: serde_json::Value::Object(serde_json::Map::new()),
+                aliyun_model: None,
+                aliyun_api_key: None,
+                deepseek_model: None,
+                deepseek_api_key: None,
+                mimo_model: None,
+                mimo_api_key: None,
+            }
+        });
+
+        // 更新配置
+        if let Some(mode) = req.ai_mode {
+            config.ai_mode = Some(mode);
         }
-    });
-
-    // 更新配置
-    if req.aliyun_model.is_some() {
-        config.aliyun_model = req.aliyun_model;
-    }
-    if req.aliyun_api_key.is_some() {
-        config.aliyun_api_key = req.aliyun_api_key;
-    }
-    if req.deepseek_model.is_some() {
-        config.deepseek_model = req.deepseek_model;
-    }
-    if req.deepseek_api_key.is_some() {
-        config.deepseek_api_key = req.deepseek_api_key;
-    }
-    if let Some(model) = req.mimo_model {
-        config.mimo_model = nonempty(model);
-    }
-    if let Some(key) = req.mimo_api_key {
-        config.mimo_api_key = nonempty(key);
-    }
-
-    // 保存配置
-    state
-        .store
-        .upsert_config(config)
-        .await
+        if req.aliyun_model.is_some() {
+            config.aliyun_model = req.aliyun_model;
+        }
+        if let Some(key) = req.aliyun_api_key {
+            config.aliyun_api_key = nonempty(key);
+        }
+        if req.deepseek_model.is_some() {
+            config.deepseek_model = req.deepseek_model;
+        }
+        if let Some(key) = req.deepseek_api_key {
+            config.deepseek_api_key = nonempty(key);
+        }
+        if let Some(model) = req.mimo_model {
+            config.mimo_model = nonempty(model);
+        }
+        if let Some(key) = req.mimo_api_key {
+            config.mimo_api_key = nonempty(key);
+        }
+        config
+    }).await
         .map_err(|e| ApiError::Internal(format!("保存配置失败: {}", e)))?;
 
     tracing::info!("用户 {} 更新了API配置", current_user.id);
@@ -148,6 +167,13 @@ mod tests {
         assert!(!response.to_string().contains("test-user-secret"));
         let other = CurrentUser { id:Uuid::new_v4(),..user.clone() };
         assert!(!get_api_config(State(state.clone()),other).await.unwrap().0.mimo_api_key_set);
+
+        assert_eq!(response["ai_mode"], "custom");
+        let server = serde_json::from_value(json!({"ai_mode":"server"})).unwrap();
+        let _ = update_api_config(State(state.clone()), user.clone(), Json(server)).await.unwrap();
+        let server_config = get_api_config(State(state.clone()), user.clone()).await.unwrap().0;
+        assert_eq!(server_config.ai_mode, crate::store::AiMode::Server);
+        assert!(server_config.mimo_api_key_set);
 
         let partial = serde_json::from_value(json!({"deepseek_model":"old-client-model"})).unwrap();
         let _ = update_api_config(State(state.clone()),user.clone(),Json(partial)).await.unwrap();

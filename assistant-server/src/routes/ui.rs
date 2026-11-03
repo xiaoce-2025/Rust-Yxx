@@ -47,6 +47,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/pkuvideo_fw", get(pkuvideo_fw_page))
         .route("/pkuvideo_sequence", get(pkuvideo_sequence_page))
         .route("/settings", get(settings_page))
+        .route("/user-center", get(user_center_page))
         .route_layer(middleware::from_fn_with_state(state, require_login))
 }
 
@@ -111,6 +112,10 @@ async fn pkuvideo_sequence_page() -> Html<String> {
     site_page(include_str!("../../templates/pkuvideo_sequence.html"), "/pkuvideo_sequence")
 }
 
+async fn user_center_page() -> Html<String> {
+    site_page(include_str!("../../templates/user-center.html"), "/user-center")
+}
+
 async fn settings_page() -> Html<String> {
     guarded_page(include_str!("../../templates/settings.html"))
 }
@@ -157,7 +162,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
         assert_eq!(client.get(format!("{base}/app")).send().await.unwrap().status(), 404);
-        for path in ["/", "/chat", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence"] {
+        for path in ["/", "/chat", "/user-center", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence"] {
             let response = client.get(format!("{base}{path}")).send().await.unwrap();
             assert_eq!(response.status(), 303);
             assert_eq!(response.headers()["location"], format!("/auth?next={}", urlencoding::encode(path)));
@@ -190,7 +195,7 @@ mod tests {
                 session_id: token, user_id: id, created_at: now,
                 expires_at: now + Duration::hours(if expired {-1} else {1}), user_agent: None, ip_address: None,
             }).await.unwrap();
-            let response = client.get(format!("{base}/settings"))
+            let response = client.get(format!("{base}/user-center"))
                 .header("cookie", format!("assistant_token={token}")).send().await.unwrap();
             assert_eq!(response.status().as_u16(), expected);
             assert_eq!(response.headers()["cache-control"], "no-store");
@@ -199,7 +204,9 @@ mod tests {
                 assert!(cookie.starts_with(&format!("assistant_token={token};")));
                 assert!(!cookie.contains("Max-Age="));
                 assert!(!cookie.contains("Expires="));
-                assert!(response.text().await.unwrap().contains("<!doctype html>"));
+                let html = response.text().await.unwrap();
+                assert!(html.contains("<h1>用户中心</h1>"));
+                assert!(html.contains("href=\"/user-center\" aria-current=\"page\""));
             }
             else { assert!(response.text().await.unwrap().is_empty()); }
         }

@@ -520,9 +520,7 @@ pub async fn extract_mp3(video_path: &Path, mp3_path: &Path) -> Result<(), Strin
 pub async fn speech_to_text(mp3_path: &Path, transcript_path: &Path, settings: &crate::config::Settings) -> Result<(), String> {
     eprintln!("开始语音转文字处理");
     
-    let api_key = std::env::var("DASHSCOPE_API_KEY")
-        .ok()
-        .or_else(|| settings.paraformer.api_key.clone())
+    let api_key = settings.paraformer.api_key.clone()
         .ok_or("未设置 DASHSCOPE_API_KEY 环境变量且配置文件中未设置 api_key，请联系管理员配置阿里云语音识别API密钥")?;
 
     let base_url = settings.paraformer.base_url.as_deref()
@@ -542,7 +540,6 @@ pub async fn speech_to_text(mp3_path: &Path, transcript_path: &Path, settings: &
 
     let max_retries = settings.paraformer.max_retries.unwrap_or(120);
 
-    eprintln!("使用API密钥: ******{}", &api_key[api_key.len().saturating_sub(6)..]);
     eprintln!("使用Base URL: {}", base_url);
     eprintln!("使用模型: {}", model);
     eprintln!("使用上传URL: {}", upload_url);
@@ -918,9 +915,7 @@ pub async fn extract_notes(transcript_path: &Path, notes_path: &Path, settings: 
         .map_err(|e| format!("读取系统提示词文件失败: {e}"))?;
 
     // 获取 DeepSeek API 配置
-    let api_key = std::env::var("DEEPSEEK_API_KEY")
-        .ok()
-        .or_else(|| settings.deepseek.api_key.clone())
+    let api_key = settings.deepseek.api_key.clone()
         .ok_or("未设置 DEEPSEEK_API_KEY 环境变量且配置文件中未设置 api_key，请联系管理员配置 DeepSeek API 密钥")?;
 
     let base_url = settings.deepseek.base_url.as_deref()
