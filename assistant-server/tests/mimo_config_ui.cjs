@@ -4,46 +4,69 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 (async () => {
-  const html = fs.readFileSync(path.join(__dirname, '../templates/pkuvideo_sequence.html'), 'utf8');
+  const template = name => fs.readFileSync(path.join(__dirname, '../templates', name), 'utf8');
+  const sequence = template('pkuvideo_sequence.html');
+  new vm.Script(sequence.match(/<script>([\s\S]*?)<\/script>/)[1]);
+  assert.doesNotMatch(sequence, /toggleConfigBtn|\/api\/user\/api-config/);
+  const html = template('user-center.html');
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
-  new Function(script);
-  assert.equal((html.match(/id="mimoModel"/g) || []).length, 1);
-  assert.match(html, /type="password" id="mimoApiKey"/);
-  const elements = new Map();
-  const element = id => {
-    if (!elements.has(id)) elements.set(id, { value: '', placeholder: '', style: {}, events: {}, addEventListener(event, callback) { this.events[event] = callback; } });
-    return elements.get(id);
+  const control = () => ({ value: '', events: {}, addEventListener(event, fn) { this.events[event] = fn; } });
+  const providers = ['aliyun', 'deepseek', 'mimo'];
+  const models = providers.map(provider => ({ ...control(), name: provider + '_model' }));
+  const buttons = providers.map(provider => ({ ...control(), dataset: { key: provider + '_api_key' } }));
+  const mode = Object.assign([control(), control()], { value: '' });
+  const form = {
+    ...control(),
+    elements: { ai_mode: mode },
+    querySelectorAll: selector => selector === '[data-key]' ? buttons : models,
   };
+  for (const model of models) {
+    assert.ok(html.includes('type="text" name="' + model.name + '"'));
+    form.elements[model.name] = model;
+  }
+  for (const { dataset: { key } } of buttons) {
+    assert.ok(html.includes('type="password" name="' + key + '"'));
+    form.elements[key] = control();
+  }
+  const status = { removeAttribute() {}, setAttribute() {} };
+  const elements = { 'api-form': form, 'api-fields': {}, 'api-status': status, 'custom-settings': {} };
+  const config = { ai_mode: 'custom', mimo_model: 'saved-tts', mimo_api_key_set: true };
   const requests = [];
   const context = vm.createContext({
-    document: { getElementById: element }, confirm: () => true, setTimeout: () => 1,
-    api: async (url, method = 'GET', body) => {
-      requests.push({ url, method, body });
-      return { mimo_model: 'saved-tts', mimo_api_key_set: true };
+    window: { siteAccount: { then() {} } },
+    document: { getElementById: id => elements[id] },
+    fetch: async (url, options) => {
+      assert.equal(url, '/api/user/api-config');
+      if (options.method === 'POST') {
+        const body = JSON.parse(options.body);
+        requests.push(body);
+        Object.assign(config, body);
+        if ('mimo_api_key' in body) config.mimo_api_key_set = Boolean(body.mimo_api_key);
+      }
+      return { ok: true, json: async () => config };
     },
   });
-  const section = script.slice(script.indexOf('async function loadApiConfig()'), script.indexOf('document.getElementById("keyConfirmBtn")'));
-  vm.runInContext(section, context);
-  await vm.runInContext('loadApiConfig()', context);
-  assert.equal(element('mimoModel').value, 'saved-tts');
-  assert.match(element('mimoApiKey').placeholder, /已设置/);
-  assert.equal(element('mimoApiKey').value, '');
-
-  element('mimoModel').value = ' custom-tts ';
-  element('mimoApiKey').value = ' user-key ';
-  await element('saveConfigBtn').events.click();
-  assert.equal(requests.at(-1).url, '/api/user/api-config');
-  assert.equal(requests.at(-1).body.mimo_model, 'custom-tts');
-  assert.equal(requests.at(-1).body.mimo_api_key, 'user-key');
-  assert.equal(element('mimoApiKey').value, '');
-  element('mimoModel').value = '';
-  await element('saveConfigBtn').events.click();
-  assert.equal(requests.at(-1).body.mimo_api_key, null, 'Empty password must preserve the existing key');
-  assert.equal(requests.at(-1).body.mimo_model, '', 'Empty model must restore the server default');
-  await element('clearConfigBtn').events.click();
-  assert.equal(requests.at(-1).body.mimo_model, '');
-  assert.equal(requests.at(-1).body.mimo_api_key, '');
-  assert.equal(element('mimoModel').value, '');
-  assert.equal(element('mimoApiKey').placeholder, '输入后不可查看');
-  console.log('MiMo API configuration UI: load, model/key save, preserve and clear passed');
+  await vm.runInContext(script, context);
+  const key = form.elements.mimo_api_key;
+  assert.equal(form.elements.mimo_model.value, 'saved-tts');
+  assert.match(key.placeholder, /已保存/);
+  assert.equal(key.value, '');
+  models.forEach(model => { model.value = ' custom-' + model.name + ' '; });
+  key.value = ' user-key ';
+  const submit = () => form.events.submit({ preventDefault() {} });
+  await submit();
+  for (const model of models) assert.equal(requests.at(-1)[model.name], 'custom-' + model.name);
+  assert.equal(requests.at(-1).mimo_api_key, 'user-key');
+  assert.equal(key.value, '');
+  form.elements.mimo_model.value = '';
+  await submit();
+  assert.equal(requests.at(-1).mimo_api_key, undefined);
+  assert.equal(requests.at(-1).mimo_model, '');
+  buttons[2].events.click();
+  await submit();
+  assert.equal(requests.at(-1).mimo_api_key, '');
+  assert.equal(key.placeholder, '未配置');
+  mode.value = 'server';
+  await submit();
+  assert.deepEqual(requests.at(-1), { ai_mode: 'server' });
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -7,36 +7,35 @@
   <style>
     :root { --red: #9b0000; --ink: #2c2020; --muted: #655554; --line: #eadcda; }
     * { box-sizing: border-box; }
-    body { margin: 0; background: #fcf6f4; color: var(--ink); font: 15px/1.6 Arial, "Microsoft YaHei", sans-serif; }
+    body { margin: 0; background: #fff; color: var(--ink); font: 15px/1.6 Arial, "Microsoft YaHei", sans-serif; }
     .shell { width: min(1080px, calc(100% - 32px)); margin: auto; }
-    .hero { padding: 38px 0; background: linear-gradient(105deg, #fff6f2, #f7e5df); border-bottom: 1px solid var(--line); }
+    .hero { padding: 24px 0; background: linear-gradient(105deg, #fff6f2, #f7e5df); border-bottom: 1px solid var(--line); }
     .eyebrow { color: var(--red); font-weight: 700; letter-spacing: .12em; }
     h1 { margin: 4px 0; font-size: clamp(34px, 5vw, 52px); }
     h2 { margin: 0 0 12px; font-size: 22px; }
     p { margin: 0; color: var(--muted); }
-    .sections { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 18px; padding-block: 24px 48px; }
-    .card { padding: clamp(18px, 4vw, 28px); background: #fff; border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 6px 20px #55221b08; }
-    .wide { grid-column: 1 / -1; }
+    .sections { padding-bottom: 40px; }
+    .sections > section { padding-block: 24px; border-bottom: 1px solid var(--line); }
     dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 16px; margin: 0; }
     dt, small { color: var(--muted); font-size: 13px; }
     dd { margin: 4px 0 0; font-weight: 700; overflow-wrap: anywhere; }
     .priority { color: var(--red); font-size: 34px; font-weight: 700; line-height: 1.2; margin-bottom: 8px; }
     fieldset { min-width: 0; border: 0; padding: 0; margin: 0 0 16px; }
     legend { padding: 0; margin-bottom: 8px; font-weight: 700; }
-    .choices, .keys { display: grid; gap: 12px; }
-    .choices { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .keys { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 16px 0; }
-    .choices label { padding: 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
-    .choices label:has(:checked) { background: #fff6f2; border-color: var(--red); }
+    .choices { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+    .choices label { cursor: pointer; }
     .choices input { accent-color: var(--red); }
-    .keys label { display: block; font-weight: 700; }
-    .keys input { display: block; width: 100%; padding: 10px; margin: 6px 0; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+    .providers { margin: 16px 0; }
+    .provider { display: grid; grid-template-columns: minmax(115px, .65fr) repeat(2, minmax(0, 1fr)); gap: 12px 20px; padding: 12px 0; border-top: 1px solid var(--line); }
+    .provider h3 { margin: 0; font-size: 15px; }
+    .provider label { display: block; color: var(--muted); font-size: 13px; }
+    .provider input { display: block; width: 100%; padding: 8px; margin: 4px 0; border: 1px solid var(--line); border-radius: 4px; font: inherit; }
     .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; }
     .save { padding: 10px 18px; color: #fff; background: var(--red); border: 0; border-radius: 8px; font: inherit; cursor: pointer; }
     .save:disabled { opacity: .5; cursor: default; }
     .clear { padding: 0; background: none; border: 0; color: var(--red); font: inherit; text-decoration: underline; cursor: pointer; }
     #api-status[data-error] { color: var(--red); }
-    @media (max-width: 680px) { .sections, .keys { grid-template-columns: 1fr; } }
+    @media (max-width: 580px) { .provider { grid-template-columns: 1fr; gap: 6px; } }
   </style>
 </head>
 <body>
@@ -49,7 +48,7 @@
       </div>
     </section>
     <div class="shell sections">
-      <section class="card">
+      <section>
         <h2>用户基本信息</h2>
         <dl>
           <div><dt>用户名</dt><dd id="account-name">—</dd></div>
@@ -58,12 +57,12 @@
         </dl>
         <p id="account-status" role="status"></p>
       </section>
-      <section class="card">
+      <section>
         <h2>账户优先级</h2>
         <p id="account-priority" class="priority">—</p>
         <p>课堂笔记任务排队时，数值越小越优先。优先级由系统管理。</p>
       </section>
-      <section class="card wide">
+      <section>
         <h2>API 配置</h2>
         <form id="api-form">
           <fieldset id="api-fields" disabled>
@@ -73,12 +72,33 @@
               <label><input type="radio" name="ai_mode" value="custom"> 自定义 API Key</label>
             </div>
             <div id="custom-settings" hidden>
-              <div class="keys">
-                <div><label>阿里云 DashScope<input type="password" name="aliyun_api_key" autocomplete="new-password"></label><button class="clear" type="button" data-key="aliyun_api_key" hidden>清除密钥</button></div>
-                <div><label>DeepSeek<input type="password" name="deepseek_api_key" autocomplete="new-password"></label><button class="clear" type="button" data-key="deepseek_api_key" hidden>清除密钥</button></div>
-                <div><label>小米 MiMo<input type="password" name="mimo_api_key" autocomplete="new-password"></label><button class="clear" type="button" data-key="mimo_api_key" hidden>清除密钥</button></div>
+              <div class="providers">
+                <div class="provider">
+                  <h3>阿里云 DashScope</h3>
+                  <label>模型名称<input type="text" name="aliyun_model" placeholder="使用服务器默认模型"></label>
+                  <div>
+                    <label>API Key<input type="password" name="aliyun_api_key" autocomplete="new-password"></label>
+                    <button class="clear" type="button" data-key="aliyun_api_key" hidden>清除密钥</button>
+                  </div>
+                </div>
+                <div class="provider">
+                  <h3>DeepSeek</h3>
+                  <label>模型名称<input type="text" name="deepseek_model" placeholder="使用服务器默认模型"></label>
+                  <div>
+                    <label>API Key<input type="password" name="deepseek_api_key" autocomplete="new-password"></label>
+                    <button class="clear" type="button" data-key="deepseek_api_key" hidden>清除密钥</button>
+                  </div>
+                </div>
+                <div class="provider">
+                  <h3>小米 MiMo</h3>
+                  <label>模型名称<input type="text" name="mimo_model" placeholder="使用服务器默认模型"></label>
+                  <div>
+                    <label>API Key<input type="password" name="mimo_api_key" autocomplete="new-password"></label>
+                    <button class="clear" type="button" data-key="mimo_api_key" hidden>清除密钥</button>
+                  </div>
+                </div>
               </div>
-              <p>三项均可选填。空白输入框保留已保存的密钥，未配置密钥的服务使用服务器密钥。</p>
+              <p>模型名称留空时使用服务器默认模型。密钥留空时保留已保存的值，未配置密钥时使用服务器密钥。</p>
             </div>
             <div class="actions"><button class="save" type="submit">保存配置</button></div>
           </fieldset>
@@ -105,6 +125,7 @@
     const mode = form.elements.ai_mode;
     const custom = document.getElementById('custom-settings');
     const clearButtons = Array.from(form.querySelectorAll('[data-key]'));
+    const modelInputs = form.querySelectorAll('input[name$="_model"]');
     const pendingClears = new Set();
 
     function showMode() {
@@ -117,6 +138,7 @@
       const config = await response.json();
       mode.value = config.ai_mode;
       showMode();
+      for (const input of modelInputs) input.value = config[input.name] ?? '';
       pendingClears.clear();
       for (const button of clearButtons) {
         const key = button.dataset.key;
@@ -149,6 +171,7 @@
       event.preventDefault();
       const body = { ai_mode: mode.value };
       if (mode.value === 'custom') {
+        for (const input of modelInputs) body[input.name] = input.value.trim();
         for (const { dataset: { key } } of clearButtons) {
           const value = form.elements[key].value.trim();
           if (value || pendingClears.has(key)) body[key] = value;

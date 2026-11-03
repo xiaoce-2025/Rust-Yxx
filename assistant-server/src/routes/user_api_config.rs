@@ -106,14 +106,14 @@ async fn update_api_config(
         if let Some(mode) = req.ai_mode {
             config.ai_mode = Some(mode);
         }
-        if req.aliyun_model.is_some() {
-            config.aliyun_model = req.aliyun_model;
+        if let Some(model) = req.aliyun_model {
+            config.aliyun_model = nonempty(model);
         }
         if let Some(key) = req.aliyun_api_key {
             config.aliyun_api_key = nonempty(key);
         }
-        if req.deepseek_model.is_some() {
-            config.deepseek_model = req.deepseek_model;
+        if let Some(model) = req.deepseek_model {
+            config.deepseek_model = nonempty(model);
         }
         if let Some(key) = req.deepseek_api_key {
             config.deepseek_api_key = nonempty(key);
