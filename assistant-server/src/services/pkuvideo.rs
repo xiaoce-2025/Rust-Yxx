@@ -125,14 +125,18 @@ pub async fn run_pipeline(
     speech_to_text(&mp3_path, &transcript_path, settings)
         .await
         .map_err(|e| format!("step=2;{e}"))?;
-    extract_notes(&transcript_path, &notes_path, settings)
-        .await
-        .map_err(|e| format!("step=3;{e}"))?;
+    for attempt in 1..=3 {
+        extract_notes(&transcript_path, &notes_path, settings)
+            .await
+            .map_err(|e| format!("step=3;{e}"))?;
 
-    // PDF 编译失败不影响任务完成，只要 tex 文件生成成功即可
-    let pdf_result = compile_pdf(&notes_path, &pdf_path).await;
-    if let Err(ref e) = pdf_result {
-        eprintln!("PDF 编译失败，但任务继续执行: {}", e);
+        match compile_pdf_inner(&notes_path, &pdf_path).await {
+            Ok(()) => break,
+            Err(PdfCompileError::FinalPassFailed(status)) if attempt < 3 => {
+                tracing::warn!(attempt, %status, "XeLaTeX 第三遍编译失败，重新生成讲义");
+            }
+            Err(error) => return Err(format!("step=4;{}", error.message())),
+        }
     }
 
     // 将路径转换为相对路径（相对于 base_dir）
@@ -143,20 +147,11 @@ pub async fn run_pipeline(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| notes_path.to_string_lossy().to_string());
     
-    // PDF 路径只有在编译成功时才返回
-    let pdf_rel = if pdf_result.is_ok() && pdf_path.exists() {
-        pdf_path.strip_prefix(&base_dir)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| pdf_path.to_string_lossy().to_string())
-    } else {
-        "".to_string()
-    };
+    let pdf_rel = pdf_path.strip_prefix(&base_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| pdf_path.to_string_lossy().to_string());
 
-    Ok((
-        Some(transcript_rel),
-        Some(notes_rel),
-        if pdf_rel.is_empty() { None } else { Some(pdf_rel) },
-    ))
+    Ok((Some(transcript_rel), Some(notes_rel), Some(pdf_rel)))
 }
 
 pub async fn download_video(url: &str, video_path: &Path, username: &str, password: &str, login_cache: &LoginCache, manual_key: Option<&str>, concurrency: usize, segment_timeout_secs: u64, progress: Option<Arc<AtomicU8>>) -> Result<(), String> {
@@ -1026,20 +1021,40 @@ fn extract_pure_latex(content: &str) -> String {
     content.to_string()
 }
 
+enum PdfCompileError {
+    FinalPassFailed(std::process::ExitStatus),
+    Other(String),
+}
+
+impl PdfCompileError {
+    fn message(self) -> String {
+        match self {
+            Self::FinalPassFailed(status) => format!("XeLaTeX 第三遍编译失败: {status}"),
+            Self::Other(message) => message,
+        }
+    }
+}
+
+impl From<String> for PdfCompileError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
 /// 将 LaTeX 章节文件编译为 PDF
 pub async fn compile_pdf(notes_path: &Path, pdf_path: &Path) -> Result<(), String> {
-    eprintln!("开始编译 PDF");
-    
-    // 获取任务目录
-    let job_dir = notes_path.parent().ok_or("无法获取任务目录")?;
-    
-    // 转换为绝对路径以确保跨平台兼容性
-    let job_dir_abs = job_dir.canonicalize().map_err(|e| format!("无法获取任务目录绝对路径: {e}"))?;
-    eprintln!("任务目录(绝对路径): {:?}", job_dir_abs);
-    
+    compile_pdf_inner(notes_path, pdf_path).await.map_err(PdfCompileError::message)
+}
+
+async fn compile_pdf_inner(notes_path: &Path, pdf_path: &Path) -> Result<(), PdfCompileError> {
+    let compile_dir = tempdir::TempDir::new("pkuvideo_compile")
+        .map_err(|e| format!("创建临时编译目录失败: {e}"))?;
+    let job_dir_abs = compile_dir.path().canonicalize()
+        .map_err(|e| format!("无法获取编译目录绝对路径: {e}"))?;
+
     // 检查笔记文件是否存在
     if !notes_path.exists() {
-        return Err(format!("笔记文件不存在: {:?}", notes_path));
+        return Err(format!("笔记文件不存在: {:?}", notes_path).into());
     }
     
     // 创建完整的 LaTeX 文档
@@ -1055,7 +1070,7 @@ pub async fn compile_pdf(notes_path: &Path, pdf_path: &Path) -> Result<(), Strin
     
     // 验证文件是否写入成功
     if !full_tex_path.exists() {
-        return Err("完整文档写入失败，文件不存在".to_string());
+        return Err("完整文档写入失败，文件不存在".to_string().into());
     }
     
     // 复制模板文件到任务目录
@@ -1068,17 +1083,8 @@ pub async fn compile_pdf(notes_path: &Path, pdf_path: &Path) -> Result<(), Strin
             .map_err(|e| format!("复制模板文件失败: {e}"))?;
         eprintln!("已复制模板文件");
     } else {
-        return Err(format!("模板文件不存在: {:?}", template_cls_abs));
+        return Err(format!("模板文件不存在: {:?}", template_cls_abs).into());
     }
-    
-    // 检查 xelatex 是否可用
-    let xelatex_check = Command::new("xelatex").arg("--version").output().await;
-    if xelatex_check.is_err() {
-        return Err("xelatex 命令不可用，请确保已安装 TeX Live 或 MiKTeX".to_string());
-    }
-    
-    // 使用 xelatex 编译
-    eprintln!("开始执行 xelatex 编译...");
     
     // 将路径转换为使用正斜杠，确保跨平台兼容性（Windows 和 Linux）
     // 首先移除 Windows 扩展路径前缀 \\?\
@@ -1097,76 +1103,36 @@ pub async fn compile_pdf(notes_path: &Path, pdf_path: &Path) -> Result<(), Strin
     eprintln!("编译路径: {}", full_tex_path_str);
     eprintln!("输出目录: {}", job_dir_str);
     
-    let result = Command::new("xelatex")
-        .arg("-interaction=nonstopmode")
-        .arg("-output-directory")
-        .arg(&job_dir_str)
-        .arg(&full_tex_path_str)
-        .current_dir(&job_dir_abs)
-        .output()
-        .await;
-    
-    match result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            
-            if !output.status.success() {
-                eprintln!("xelatex 编译警告: status={}", output.status);
-                eprintln!("stdout: {}", stdout);
-                eprintln!("stderr: {}", stderr);
-            } else {
-                eprintln!("xelatex 编译成功");
+    for pass in 1..=3 {
+        let output = Command::new("xelatex")
+            .arg("-interaction=nonstopmode")
+            .arg("-output-directory")
+            .arg(&job_dir_str)
+            .arg(&full_tex_path_str)
+            .current_dir(&job_dir_abs)
+            .output()
+            .await
+            .map_err(|e| format!("执行 XeLaTeX 失败: {e}"))?;
+
+        if !output.status.success() {
+            tracing::warn!(
+                pass,
+                status = %output.status,
+                stdout = %String::from_utf8_lossy(&output.stdout),
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "XeLaTeX 编译返回非零退出码"
+            );
+            if pass == 3 {
+                return Err(PdfCompileError::FinalPassFailed(output.status));
             }
-            
-            // 第二次编译以解决交叉引用
-            let result2 = Command::new("xelatex")
-                .arg("-interaction=nonstopmode")
-                .arg("-output-directory")
-                .arg(&job_dir_str)
-                .arg(&full_tex_path_str)
-                .current_dir(&job_dir_abs)
-                .output()
-                .await;
-            
-            if let Ok(output2) = result2 {
-                if output2.status.success() {
-                    eprintln!("第二次编译成功");
-                } else {
-                    eprintln!("第二次编译状态: {:?}", output2.status);
-                }
-            }
-            
-            // 检查 PDF 是否生成（这是判断是否成功的关键）
-            let generated_pdf = job_dir_abs.join("full_document.pdf");
-            eprintln!("检查 PDF 文件: {:?}", generated_pdf);
-            if generated_pdf.exists() {
-                // 复制到目标位置
-                fs::copy(&generated_pdf, pdf_path)
-                    .await
-                    .map_err(|e| format!("复制 PDF 文件失败: {e}"))?;
-                eprintln!("PDF 编译完成: {:?}", pdf_path);
-                Ok(())
-            } else {
-                // 检查是否有 log 文件可以帮助诊断
-                let log_path = job_dir_abs.join("full_document.log");
-                eprintln!("检查日志文件: {:?}", log_path);
-                if log_path.exists() {
-                    if let Ok(log_content) = fs::read_to_string(&log_path).await {
-                        // 获取最后几行日志
-                        let last_lines: Vec<&str> = log_content.lines().rev().take(30).collect();
-                        let last_lines_str: Vec<String> = last_lines.into_iter().rev().map(|s| s.to_string()).collect();
-                        return Err(format!("PDF 文件未生成，编译日志最后30行:\n{}", last_lines_str.join("\n")));
-                    }
-                }
-                Err(format!("PDF 文件未生成\nstdout: {}\nstderr: {}", stdout, stderr))
-            }
-        }
-        Err(e) => {
-            eprintln!("xelatex 命令执行错误: {}", e);
-            Err(format!("xelatex 命令执行错误: {}", e))
         }
     }
+
+    let generated_pdf = job_dir_abs.join("full_document.pdf");
+    fs::copy(&generated_pdf, pdf_path)
+        .await
+        .map_err(|e| format!("复制编译生成的 PDF 失败: {e}"))?;
+    Ok(())
 }
 
 /// 根据章节内容创建完整的 LaTeX 文档
