@@ -84,7 +84,7 @@ pub fn local_next(value: Option<&str>) -> String {
                 && !v.contains('\\')
                 && !v.chars().any(char::is_control)
         })
-        .unwrap_or("/app")
+        .unwrap_or("/")
         .to_string()
 }
 fn validate(config: &SsoConfig) -> Result<(), ApiError> {
@@ -359,7 +359,7 @@ mod tests {
             "/\\evil.example",
             "/\nmalicious",
         ] {
-            assert_eq!(local_next(Some(value)), "/app");
+            assert_eq!(local_next(Some(value)), "/");
         }
         assert_eq!(
             local_next(Some("/settings?tab=profile")),

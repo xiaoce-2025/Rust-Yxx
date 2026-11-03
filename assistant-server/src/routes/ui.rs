@@ -35,10 +35,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
                 (CACHE_CONTROL, "public, max-age=31536000, immutable")],
                 include_bytes!("../../assest/login_preview.ef807508d656.webp").as_slice())
         }))
-        .route("/", get(app_page))
-        .route("/app", get(app_page))
+        .route("/", get(home_page))
+        .route("/chat", get(app_page))
         .route("/pkuvideo", get(pkuvideo_page))
         .route("/pkuvideofullclass", get(pkuvideofullclass_page))
+        .route("/pkuvideo_fullclass", get(pkuvideofullclass_page))
         .route("/pkuvideo_fw", get(pkuvideo_fw_page))
         .route("/pkuvideo_sequence", get(pkuvideo_sequence_page))
         .route("/settings", get(settings_page))
@@ -52,7 +53,7 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
         if html { response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store")); }
         return response;
     }
-    let target = request.uri().path_and_query().map(|uri| uri.as_str()).unwrap_or("/app").to_string();
+    let target = request.uri().path_and_query().map(|uri| uri.as_str()).unwrap_or("/").to_string();
     let (mut parts, body) = request.into_parts();
     let browser_token = parts.headers.get(COOKIE).and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').find_map(|part| part.trim().strip_prefix("assistant_token=")))
@@ -86,8 +87,12 @@ async fn app_page() -> Html<String> {
     guarded_page(include_str!("../../templates/app.html"))
 }
 
+async fn home_page() -> Html<String> {
+    site_page(include_str!("../../templates/home.html"), "/")
+}
+
 async fn pkuvideo_page() -> Html<String> {
-    guarded_page(include_str!("../../templates/pkuvideo.html"))
+    site_page(include_str!("../../templates/pkuvideo.html"), "/pkuvideo")
 }
 
 async fn pkuvideofullclass_page() -> Html<String> {
@@ -95,11 +100,11 @@ async fn pkuvideofullclass_page() -> Html<String> {
 }
 
 async fn pkuvideo_fw_page() -> Html<String> {
-    guarded_page(include_str!("../../templates/pkuvideo_fw.html"))
+    site_page(include_str!("../../templates/pkuvideo_fw.html"), "/pkuvideo_fw")
 }
 
 async fn pkuvideo_sequence_page() -> Html<String> {
-    guarded_page(include_str!("../../templates/pkuvideo_sequence.html"))
+    site_page(include_str!("../../templates/pkuvideo_sequence.html"), "/pkuvideo_sequence")
 }
 
 async fn settings_page() -> Html<String> {
@@ -107,7 +112,20 @@ async fn settings_page() -> Html<String> {
 }
 
 fn guarded_page(source: &'static str) -> Html<String> {
-    Html(source.replacen("<head>", &format!("<head>{}", include_str!("../../templates/batch_submission_guard.html")), 1))
+    site_page(source, "")
+}
+
+fn site_page(source: &'static str, active_path: &str) -> Html<String> {
+    let css = include_str!("../../templates/site-header.css");
+    let guard = include_str!("../../templates/batch_submission_guard.html");
+    let header = include_str!("../../templates/site-header.html").replacen(
+        &format!("href=\"{active_path}\""),
+        &format!("href=\"{active_path}\" aria-current=\"page\""),
+        1,
+    );
+    Html(source
+        .replacen("<head>", &format!("<head>{guard}<style>{css}</style>"), 1)
+        .replacen("<body>", &format!("<body>{header}"), 1))
 }
 
 #[cfg(test)]
@@ -134,7 +152,8 @@ mod tests {
         let app = routes(state.clone()).with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
-        for path in ["/", "/app", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fw", "/pkuvideo_sequence"] {
+        assert_eq!(client.get(format!("{base}/app")).send().await.unwrap().status(), 404);
+        for path in ["/", "/chat", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence"] {
             let response = client.get(format!("{base}{path}")).send().await.unwrap();
             assert_eq!(response.status(), 303);
             assert_eq!(response.headers()["location"], format!("/auth?next={}", urlencoding::encode(path)));

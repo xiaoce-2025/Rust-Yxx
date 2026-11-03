@@ -24,7 +24,8 @@
         radial-gradient(60rem 26rem at 110% 110%, rgba(12,122,87,.2), transparent 60%),
         #edf3ed;
       min-height: 100vh;
-      padding: 20px;
+      --site-page-inset: 20px;
+      padding: 0 var(--site-page-inset) var(--site-page-inset);
     }
     .wrap {
       max-width: 960px;
@@ -350,7 +351,7 @@
     </div>
 
     <div class="toolbar">
-      <button id="goAppBtn" class="ghost">返回聊天主页</button>
+      <button id="goAppBtn" class="ghost">返回首页</button>
       <button id="refreshBtn" class="ghost">刷新课程列表</button>
       <button id="toggleConfigBtn" class="ghost">API配置</button>
     </div>
@@ -847,7 +848,23 @@
       } finally { setProcessing(false); document.getElementById('manualAddSubmit').disabled = false; }
     });
 
-    async function handleWatchManualReplay(lessonId) {
+    function courseReplayUrl(lesson) {
+      try {
+        const url = new URL(lesson.play_url);
+        return url.origin === 'https://course.pku.edu.cn' ? url.href : null;
+      } catch {
+        return null;
+      }
+    }
+
+    async function handleWatchReplay(lessonId) {
+      const lesson = currentLessons.find(item => item.id === lessonId);
+      if (!lesson) return;
+      if (!lesson.manual_replay) {
+        const replayUrl = courseReplayUrl(lesson);
+        if (replayUrl) window.open(replayUrl, '_blank', 'noopener');
+        return;
+      }
       const courseId = selectedCourse;
       if (!(await ensureAppLogin())) return;
       location.href = '/pkuvideo_fw?' + new URLSearchParams({course_id:courseId,lesson_id:lessonId});
@@ -924,12 +941,11 @@
                 </div>
               </div>
               <div class="lesson-actions">
-                ${lesson.manual_replay ? '<button class="ghost small" onclick="handleWatchManualReplay(\'' + lesson.id + '\')">观看回放</button>' : ''}
+                <button class="ghost small" onclick="handleWatchReplay('${lesson.id}')" ${lesson.manual_replay || courseReplayUrl(lesson) ? '' : 'disabled title="暂无回放地址"'}>观看回放</button>
                 ${isProcessingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">处理中...</span>' : ''}
                 ${isDownloadingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">生成中...</span>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && !lesson.tex_filename ? '<button class="ghost small" onclick="handleProcessLesson(\'' + lesson.id + '\')">提交处理</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleReprocessLesson(\'' + lesson.id + '\')">重新处理</button>' : ''}
-                ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadTex(\'' + lesson.id + '\')">下载tex</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadPdf(\'' + lesson.id + '\')">下载PDF</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.manual_replay ? '<button class="ghost small" onclick="handleDeleteManualLesson(\'' + lesson.id + '\')">删除课节</button>' : ''}
               </div>
@@ -1116,50 +1132,6 @@
       }
     }
 
-    async function handleDownloadTex(lessonId) {
-      try {
-        statusEl.textContent = "正在下载tex文件...";
-        statusEl.className = "status loading";
-
-        const response = await fetch(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/download-tex`, {
-          method: 'GET',
-          credentials: 'include'
-        });
-
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.message || '下载失败');
-        }
-
-        const blob = await response.blob();
-        const contentDisposition = response.headers.get('Content-Disposition');
-        let filename = 'lecture_notes.tex';
-
-        if (contentDisposition) {
-          const match = contentDisposition.match(/filename="?([^"]+)"?/);
-          if (match) {
-            filename = match[1];
-          }
-        }
-
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-
-        statusEl.textContent = "tex文件下载完成";
-        statusEl.className = "status success";
-      } catch (error) {
-        console.error('下载tex失败:', error);
-        statusEl.textContent = "下载tex失败: " + error.message;
-        statusEl.className = "status error";
-      }
-    }
-
     async function handleReprocessLesson(lessonId) {
       if (!confirm("确定要重新处理该课节吗？旧的tex文件将被删除。")) return;
 
@@ -1305,7 +1277,7 @@
     }
 
     document.getElementById("goAppBtn").addEventListener("click", () => {
-      location.href = "/app";
+      location.href = "/";
     });
 
     // ===== API配置相关 =====

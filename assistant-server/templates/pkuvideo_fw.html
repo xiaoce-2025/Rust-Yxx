@@ -24,7 +24,8 @@
         radial-gradient(60rem 26rem at 110% 110%, rgba(12,122,87,.2), transparent 60%),
         #edf3ed;
       min-height: 100vh;
-      padding: 20px;
+      --site-page-inset: 20px;
+      padding: 0 var(--site-page-inset) var(--site-page-inset);
     }
     .wrap {
       max-width: 960px;
@@ -182,7 +183,7 @@
     <div class="sub">输入课程回放的下载链接和你的门户账密，下载视频后可直接在线预览。每个用户同时只能处理一个视频。（IAAA账密用于教学网登陆鉴权，你的账密会被直接发送至北大IAAA验证服务器，我们不会储存您的账密）</div>
 
     <div class="toolbar">
-      <button id="goAppBtn" class="ghost">返回聊天主页</button>
+      <button id="goAppBtn" class="ghost">返回首页</button>
       <button id="submitBtn">提交下载任务</button>
     </div>
 
@@ -711,7 +712,7 @@
     }
 
     document.getElementById("goAppBtn").addEventListener("click", () => {
-      location.href = "/app";
+      location.href = "/";
     });
     document.getElementById("submitBtn").addEventListener("click", checkM3u8AndSubmit);
 

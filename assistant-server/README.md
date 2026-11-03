@@ -34,7 +34,7 @@ cargo run
 前端页面入口:
 
 - `GET /`（完整前端：登录/注册、对话、设置）
-- `GET /app`
+- `GET /chat`
 - `GET /auth`（独立登录/注册页）
 - `GET /pkuvideo`（视频处理工作台）
 - `GET /settings`（独立设置页）

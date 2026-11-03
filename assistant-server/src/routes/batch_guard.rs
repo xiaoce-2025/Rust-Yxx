@@ -210,7 +210,7 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
-        for path in ["/pkuvideo_sequence", "/settings", "/app"] {
+        for path in ["/pkuvideo_sequence", "/settings", "/chat"] {
             let html = client
                 .get(format!("{base}{path}"))
                 .header("Cookie", &cookie)
