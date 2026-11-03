@@ -36,6 +36,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
                 include_bytes!("../../assest/login_preview.ef807508d656.webp").as_slice())
         }))
         .route("/", get(home_page))
+        .route("/home-hero-transparent.png", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "image/png")],
+                include_bytes!("../../assest/home_hero_transparent.png").as_slice())
+        }))
         .route("/chat", get(app_page))
         .route("/pkuvideo", get(pkuvideo_page))
         .route("/pkuvideofullclass", get(pkuvideofullclass_page))
