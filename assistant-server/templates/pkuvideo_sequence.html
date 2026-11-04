@@ -714,13 +714,31 @@
       } finally { setProcessing(false); document.getElementById('manualAddSubmit').disabled = false; }
     });
 
+    function canWatchReplay(lesson) {
+      return lesson.manual_replay || lesson.play_url ||
+        (lesson.video_url?.includes('.m3u8') && lesson['enc.key']);
+    }
+
     async function handleWatchReplay(lessonId) {
       const courseId = selectedCourse;
       const lesson = currentLessons.find(item => item.id === lessonId);
-      if (!lesson) return;
-      if (!lesson.manual_replay && !lesson.play_url) return;
+      if (!lesson || !canWatchReplay(lesson)) return;
       if (lesson.manual_replay && !(await ensureAppLogin())) return;
-      location.href = '/pkuvideo_fw?' + new URLSearchParams({course_id:courseId,lesson_id:lessonId});
+      if (isProcessing) return;
+      setProcessing(true);
+      statusEl.textContent = '正在准备回放并提交下载…';
+      statusEl.className = 'status loading';
+      try {
+        await api('/api/pkuvideofullclass/courses/replay-download', 'POST', {
+          course_id: courseId,
+          lesson_id: lessonId
+        });
+        location.href = '/pkuvideo_fw';
+      } catch (error) {
+        statusEl.textContent = '准备回放失败：' + error.message;
+        statusEl.className = 'status error';
+        setProcessing(false);
+      }
     }
 
     async function handleCourseSelect(e) {
@@ -794,7 +812,7 @@
                 </div>
               </div>
               <div class="lesson-actions">
-                <button class="ghost small" onclick="handleWatchReplay('${lesson.id}')" ${lesson.manual_replay || lesson.play_url ? '' : 'disabled title="暂无回放地址"'}>观看回放</button>
+                <button class="ghost small" onclick="handleWatchReplay('${lesson.id}')" ${canWatchReplay(lesson) ? '' : 'disabled title="暂无回放地址"'}>观看回放</button>
                 ${isProcessingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">处理中...</span>' : ''}
                 ${isDownloadingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">生成中...</span>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && !lesson.tex_filename ? '<button class="ghost small" onclick="handleProcessLesson(\'' + lesson.id + '\')">提交处理</button>' : ''}

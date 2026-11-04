@@ -88,7 +88,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/pkuvideo_fw/submit", post(submit))
         .route("/api/pkuvideo_fw/manual-replay", post(submit_lesson_replay))
-        .route("/api/pkuvideo_fw/lesson-replay", post(submit_lesson_replay))
+        .route("/api/pkuvideofullclass/courses/replay-download", post(submit_lesson_replay))
         .route("/api/pkuvideo_fw/check-m3u8", post(check_m3u8))
         .route("/api/pkuvideo_fw/jobs/:id", get(job_detail))
         .route("/api/pkuvideo_fw/jobs", get(job_list))
@@ -209,14 +209,6 @@ async fn submit_lesson_replay(
         .find(|l| l.id == request.lesson_id)
         .ok_or(ApiError::NotFound)?;
     let lesson = lesson.clone();
-    if lesson.manual_replay.is_none() {
-        if lesson.play_url.is_empty() {
-            return Err(ApiError::BadRequest("播放链接为空，请先刷新课节列表".into()));
-        }
-        if user.iaaa_encrypted_password.is_none() {
-            return Err(ApiError::BadRequest("未绑定IAAA账号，请先绑定".into()));
-        }
-    }
     let old_jobs: Vec<_> = state
         .pkuvideo_fw_jobs
         .read()
@@ -232,6 +224,41 @@ async fn submit_lesson_replay(
         return Err(ApiError::Conflict(
             "已有视频正在下载，请等待完成后再观看其他回放".into(),
         ));
+    }
+    let media = if let Some(mut replay) = lesson.manual_replay.clone() {
+        if replay.date.is_empty() {
+            replay.date = lesson.date.clone();
+        }
+        let client = state.app_replay_client(current.id).await.map_err(ApiError::Internal)?;
+        let mut client = client.lock().await;
+        let login = client.login_bound(&user, &serde_json::json!({})).await
+            .map_err(ApiError::BadRequest)?;
+        if login["ok"] != true {
+            return Err(ApiError::BadRequest(login["error"]
+                .as_str()
+                .unwrap_or("好学认证失败，请返回课节页完成验证")
+                .into()));
+        }
+        client.prepare_media(&replay).await.map_err(ApiError::BadRequest)?
+    } else {
+        use crate::services::lesson_submission::{prepare_teaching_media, Preparation};
+        if let Some(key) = lesson.enc_key.as_deref().filter(|_| lesson.video_url.contains(".m3u8")) {
+            crate::services::prepared_media::prepare_teaching(
+                &lesson.video_url, "", "", &state.login_cache, Some(key),
+            ).await.map_err(ApiError::BadRequest)?
+        } else {
+            match prepare_teaching_media(&state, &user, &username, &lesson, lesson.enc_key.as_deref())
+                .await.map_err(ApiError::BadRequest)?
+            {
+                Preparation::Media(media) => media,
+                Preparation::NeedsKey { .. } => {
+                    return Err(ApiError::BadRequest("无法自动获取回放密钥 enc.key".into()));
+                }
+            }
+        }
+    };
+    if !media.url.contains(".m3u8") || media.enc_key.is_none() {
+        return Err(ApiError::BadRequest("回放下载需要 m3u8 地址和 enc.key".into()));
     }
     // Both download sources use the same single slot. Clear only this user's
     // terminal jobs after validating the lesson, before reserving the new slot.
@@ -259,38 +286,13 @@ async fn submit_lesson_replay(
                 .await
                 .map_err(|_| "创建回放目录失败")?;
             let path = dir.join("video.mp4");
-            if let Some(mut replay) = lesson.manual_replay.clone() {
-                if replay.date.is_empty() {
-                    replay.date = lesson.date.clone();
-                }
-                let client = state.app_replay_client(current.id).await?;
-                let mut client = client.lock().await;
-                let login = client.login_bound(&user, &serde_json::json!({})).await?;
-                if login["ok"] != true {
-                    return Err(login["error"]
-                        .as_str()
-                        .unwrap_or("好学认证失败，请返回课节页完成验证")
-                        .into());
-                }
-                client.download_with_progress(&replay, &path, progress).await?;
-            } else {
-                use crate::services::lesson_submission::{prepare_teaching_media, Preparation};
-                let media = match prepare_teaching_media(
-                    &state, &user, &username, &lesson, lesson.enc_key.as_deref(),
-                ).await? {
-                    Preparation::Media(media) => media,
-                    Preparation::NeedsKey { .. } => {
-                        return Err("无法自动获取视频密钥，请通过视频下载页手动提交".into());
-                    }
-                };
-                crate::services::pkuvideo::download_prepared(
-                    &media,
-                    &path,
-                    state.settings.pkuvideo.m3u8_concurrency,
-                    state.settings.pkuvideo.m3u8_segment_timeout_seconds,
-                    progress,
-                ).await?;
-            }
+            crate::services::pkuvideo::download_prepared(
+                &media,
+                &path,
+                state.settings.pkuvideo.m3u8_concurrency,
+                state.settings.pkuvideo.m3u8_segment_timeout_seconds,
+                progress,
+            ).await?;
             Ok(path)
         }
         .await;

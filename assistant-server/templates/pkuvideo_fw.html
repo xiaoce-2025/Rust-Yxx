@@ -725,7 +725,7 @@
       statusEl.textContent = '正在准备课程回放，请稍候…';
       history.replaceState(null, '', '/pkuvideo_fw');
       try {
-        const result = await api('/api/pkuvideo_fw/lesson-replay','POST',{course_id:courseId,lesson_id:lessonId});
+        const result = await api('/api/pkuvideo_fw/manual-replay','POST',{course_id:courseId,lesson_id:lessonId});
         activeJobId = result.job_id;
         statusEl.textContent = '正在下载回放，完成后可观看。';
         startPolling();
