@@ -116,7 +116,7 @@ pub async fn submit_lesson(
 }
 
 // Neither path changes lesson identity or manual_replay. The fallback is a transport choice only.
-enum Preparation {
+pub(crate) enum Preparation {
     Media(super::prepared_media::PreparedMedia),
     NeedsKey { url: String, key_uri: String },
 }
@@ -142,7 +142,7 @@ where
         }
     }
 }
-async fn prepare_teaching_media(
+pub(crate) async fn prepare_teaching_media(
     state: &AppState,
     user: &crate::store::FileUser,
     username: &str,

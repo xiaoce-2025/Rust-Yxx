@@ -714,25 +714,12 @@
       } finally { setProcessing(false); document.getElementById('manualAddSubmit').disabled = false; }
     });
 
-    function courseReplayUrl(lesson) {
-      try {
-        const url = new URL(lesson.play_url);
-        return url.origin === 'https://course.pku.edu.cn' ? url.href : null;
-      } catch {
-        return null;
-      }
-    }
-
     async function handleWatchReplay(lessonId) {
+      const courseId = selectedCourse;
       const lesson = currentLessons.find(item => item.id === lessonId);
       if (!lesson) return;
-      if (!lesson.manual_replay) {
-        const replayUrl = courseReplayUrl(lesson);
-        if (replayUrl) window.open(replayUrl, '_blank', 'noopener');
-        return;
-      }
-      const courseId = selectedCourse;
-      if (!(await ensureAppLogin())) return;
+      if (!lesson.manual_replay && !lesson.play_url) return;
+      if (lesson.manual_replay && !(await ensureAppLogin())) return;
       location.href = '/pkuvideo_fw?' + new URLSearchParams({course_id:courseId,lesson_id:lessonId});
     }
 
@@ -807,7 +794,7 @@
                 </div>
               </div>
               <div class="lesson-actions">
-                <button class="ghost small" onclick="handleWatchReplay('${lesson.id}')" ${lesson.manual_replay || courseReplayUrl(lesson) ? '' : 'disabled title="暂无回放地址"'}>观看回放</button>
+                <button class="ghost small" onclick="handleWatchReplay('${lesson.id}')" ${lesson.manual_replay || lesson.play_url ? '' : 'disabled title="暂无回放地址"'}>观看回放</button>
                 ${isProcessingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">处理中...</span>' : ''}
                 ${isDownloadingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">生成中...</span>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && !lesson.tex_filename ? '<button class="ghost small" onclick="handleProcessLesson(\'' + lesson.id + '\')">提交处理</button>' : ''}

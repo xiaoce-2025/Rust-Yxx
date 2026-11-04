@@ -716,25 +716,25 @@
     });
     document.getElementById("submitBtn").addEventListener("click", checkM3u8AndSubmit);
 
-    async function openManualReplay() {
+    async function openLessonReplay() {
       const query = new URLSearchParams(location.search);
       const courseId = query.get('course_id'), lessonId = query.get('lesson_id');
       if (!courseId || !lessonId) return checkExistingJob();
       inputSection.style.display = 'none';
       submitBtn.style.display = 'none';
-      statusEl.textContent = '正在准备好学回放，清理旧视频并获取最新地址，请稍候…';
+      statusEl.textContent = '正在准备课程回放，请稍候…';
       history.replaceState(null, '', '/pkuvideo_fw');
       try {
-        const result = await api('/api/pkuvideo_fw/manual-replay','POST',{course_id:courseId,lesson_id:lessonId});
+        const result = await api('/api/pkuvideo_fw/lesson-replay','POST',{course_id:courseId,lesson_id:lessonId});
         activeJobId = result.job_id;
-        statusEl.textContent = '正在通过好学 App 拉取回放，下载完成后可观看。';
+        statusEl.textContent = '正在下载回放，完成后可观看。';
         startPolling();
       } catch (error) {
         await checkExistingJob();
         statusEl.textContent = '准备回放失败：' + error.message;
       }
     }
-    checkLogin().then(() => openManualReplay());
+    checkLogin().then(() => openLessonReplay());
   </script>
 </body>
 </html>

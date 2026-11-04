@@ -87,7 +87,8 @@ impl JobDetailResponse {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/pkuvideo_fw/submit", post(submit))
-        .route("/api/pkuvideo_fw/manual-replay", post(submit_manual_replay))
+        .route("/api/pkuvideo_fw/manual-replay", post(submit_lesson_replay))
+        .route("/api/pkuvideo_fw/lesson-replay", post(submit_lesson_replay))
         .route("/api/pkuvideo_fw/check-m3u8", post(check_m3u8))
         .route("/api/pkuvideo_fw/jobs/:id", get(job_detail))
         .route("/api/pkuvideo_fw/jobs", get(job_list))
@@ -183,15 +184,15 @@ async fn submit(
 }
 
 #[derive(Deserialize)]
-struct ManualReplayRequest {
+struct LessonReplayRequest {
     course_id: String,
     lesson_id: String,
 }
 
-async fn submit_manual_replay(
+async fn submit_lesson_replay(
     State(state): State<AppState>,
     current: CurrentUser,
-    Json(request): Json<ManualReplayRequest>,
+    Json(request): Json<LessonReplayRequest>,
 ) -> Result<Json<SubmitResponse>, ApiError> {
     let slot = state.fw_slot(current.id).await;
     let _guard = slot.lock().await;
@@ -200,19 +201,21 @@ async fn submit_manual_replay(
         .get_user(current.id)
         .await
         .ok_or(ApiError::Unauthorized)?;
-    let username = user.email.split('@').next().unwrap_or_default();
-    let lessons = crate::services::lesson_storage::load_lessons(username, &request.course_id)
+    let username = user.email.split('@').next().unwrap_or_default().to_owned();
+    let lessons = crate::services::lesson_storage::load_lessons(&username, &request.course_id)
         .map_err(ApiError::BadRequest)?;
     let lesson = lessons
         .iter()
         .find(|l| l.id == request.lesson_id)
         .ok_or(ApiError::NotFound)?;
-    let mut replay = lesson
-        .manual_replay
-        .clone()
-        .ok_or_else(|| ApiError::BadRequest("只有手动添加课节可以通过好学 App 观看".into()))?;
-    if replay.date.is_empty() {
-        replay.date = lesson.date.clone();
+    let lesson = lesson.clone();
+    if lesson.manual_replay.is_none() {
+        if lesson.play_url.is_empty() {
+            return Err(ApiError::BadRequest("播放链接为空，请先刷新课节列表".into()));
+        }
+        if user.iaaa_encrypted_password.is_none() {
+            return Err(ApiError::BadRequest("未绑定IAAA账号，请先绑定".into()));
+        }
     }
     let old_jobs: Vec<_> = state
         .pkuvideo_fw_jobs
@@ -251,23 +254,43 @@ async fn submit_manual_replay(
             job.updated_at = Utc::now();
         }
         let result: Result<PathBuf, String> = async {
-            let client = state.app_replay_client(current.id).await?;
-            let mut client = client.lock().await;
-            let login = client.login_bound(&user, &serde_json::json!({})).await?;
-            if login["ok"] != true {
-                return Err(login["error"]
-                    .as_str()
-                    .unwrap_or("好学认证失败，请返回课节页完成验证")
-                    .into());
-            }
             let dir = PathBuf::from("./data/pkuvideo_fw_jobs").join(id.to_string());
             tokio::fs::create_dir_all(&dir)
                 .await
                 .map_err(|_| "创建回放目录失败")?;
             let path = dir.join("video.mp4");
-            client
-                .download_with_progress(&replay, &path, progress)
-                .await?;
+            if let Some(mut replay) = lesson.manual_replay.clone() {
+                if replay.date.is_empty() {
+                    replay.date = lesson.date.clone();
+                }
+                let client = state.app_replay_client(current.id).await?;
+                let mut client = client.lock().await;
+                let login = client.login_bound(&user, &serde_json::json!({})).await?;
+                if login["ok"] != true {
+                    return Err(login["error"]
+                        .as_str()
+                        .unwrap_or("好学认证失败，请返回课节页完成验证")
+                        .into());
+                }
+                client.download_with_progress(&replay, &path, progress).await?;
+            } else {
+                use crate::services::lesson_submission::{prepare_teaching_media, Preparation};
+                let media = match prepare_teaching_media(
+                    &state, &user, &username, &lesson, lesson.enc_key.as_deref(),
+                ).await? {
+                    Preparation::Media(media) => media,
+                    Preparation::NeedsKey { .. } => {
+                        return Err("无法自动获取视频密钥，请通过视频下载页手动提交".into());
+                    }
+                };
+                crate::services::pkuvideo::download_prepared(
+                    &media,
+                    &path,
+                    state.settings.pkuvideo.m3u8_concurrency,
+                    state.settings.pkuvideo.m3u8_segment_timeout_seconds,
+                    progress,
+                ).await?;
+            }
             Ok(path)
         }
         .await;
@@ -283,7 +306,7 @@ async fn submit_manual_replay(
                     }
                 }
                 Err(error) => {
-                    tracing::error!(target:"app_replay_download",job_id=%id,%error,"manual replay viewing failed");
+                    tracing::error!(target:"app_replay_download",job_id=%id,%error,"lesson replay download failed");
                     job.status = PipelineStatus::Failed;
                     job.error = Some(error);
                 }
