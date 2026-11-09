@@ -1,4 +1,5 @@
 //! Server-side encrypted shared binding credentials and persistent App sessions.
+use crate::store::FileStore;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rsa::{
     pkcs8::{DecodePrivateKey, EncodePrivateKey},
@@ -50,10 +51,16 @@ fn key(dir: &Path) -> Result<RsaPrivateKey, String> {
     Ok(key)
 }
 
-pub(super) fn save<T: Serialize>(user: Uuid, kind: &str, value: &T) -> Result<(), String> {
-    save_in(&root(), user, kind, value)
+pub(super) async fn save<T: Serialize>(store: &FileStore, user: Uuid, kind: &str, value: &T) -> Result<(), String> {
+    save_in(store, &root(), user, kind, value).await
 }
-fn save_in<T: Serialize>(dir: &Path, user: Uuid, kind: &str, value: &T) -> Result<(), String> {
+
+async fn save_in<T: Serialize>(store: &FileStore, dir: &Path, user: Uuid, kind: &str, value: &T) -> Result<(), String> {
+    let payload = encrypt(dir, value)?;
+    store.save_sidecar(&dir.join(format!("{user}-{kind}.json")), &payload).await
+}
+
+fn encrypt<T: Serialize>(dir: &Path, value: &T) -> Result<String, String> {
     let _lock = VAULT_LOCK.lock().map_err(|_| "App 凭据锁异常")?;
     let key = key(dir)?;
     let public = key.to_public_key();
@@ -68,25 +75,20 @@ fn save_in<T: Serialize>(dir: &Path, user: Uuid, kind: &str, value: &T) -> Resul
                 .map_err(|_| "加密 App 凭据失败")
         })
         .collect::<Result<_, _>>()?;
-    let path = dir.join(format!("{user}-{kind}.json"));
-    super::lesson_storage::atomic_write(
-        &path,
-        &serde_json::to_vec(&blocks).map_err(|_| "编码 App 凭据失败")?,
-    )
+    serde_json::to_string(&blocks).map_err(|_| "编码 App 凭据失败".into())
 }
-pub(super) fn load<T: DeserializeOwned>(user: Uuid, kind: &str) -> Result<Option<T>, String> {
-    load_in(&root(), user, kind)
+
+pub(super) async fn load<T: DeserializeOwned>(store: &FileStore, user: Uuid, kind: &str) -> Result<Option<T>, String> {
+    load_in(store, &root(), user, kind).await
 }
-fn load_in<T: DeserializeOwned>(dir: &Path, user: Uuid, kind: &str) -> Result<Option<T>, String> {
-    let _lock = VAULT_LOCK.lock().map_err(|_| "App 凭据锁异常")?;
+
+async fn load_in<T: DeserializeOwned>(store: &FileStore, dir: &Path, user: Uuid, kind: &str) -> Result<Option<T>, String> {
     let path = dir.join(format!("{user}-{kind}.json"));
-    if !path.exists() {
+    let Some(blocks) = store.load_sidecar::<Option<Vec<String>>>(&path).await?.flatten() else {
         return Ok(None);
-    }
+    };
+    let _lock = VAULT_LOCK.lock().map_err(|_| "App 凭据锁异常")?;
     let key = key(dir)?;
-    let blocks: Vec<String> =
-        serde_json::from_slice(&fs::read(path).map_err(|_| "读取 App 凭据失败")?)
-            .map_err(|_| "App 凭据文件损坏")?;
     let mut bytes = Vec::new();
     for block in blocks {
         bytes.extend(
@@ -101,32 +103,35 @@ fn load_in<T: DeserializeOwned>(dir: &Path, user: Uuid, kind: &str) -> Result<Op
         .map(Some)
         .map_err(|_| "App 凭据数据无效".into())
 }
-pub(super) fn remove(user: Uuid, kind: &str) -> Result<(), String> {
-    let _lock = VAULT_LOCK.lock().map_err(|_| "App 凭据锁异常")?;
+pub(super) async fn remove(store: &FileStore, user: Uuid, kind: &str) -> Result<(), String> {
     let path = root().join(format!("{user}-{kind}.json"));
-    if path.exists() {
-        fs::remove_file(path).map_err(|_| "清除 App 凭据失败")?;
+    // Record the deletion before removing any legacy file so a retry cannot reimport it.
+    store.save_sidecar(&path, "null").await?;
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("清除 App 凭据失败".into()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn encrypted_credentials_and_session_survive_reload_without_plaintext() {
+    #[tokio::test]
+    async fn encrypted_credentials_and_session_survive_reload_without_plaintext() {
         let dir = tempdir::TempDir::new_in("target", "app-vault").unwrap();
+        let store = FileStore::new(dir.path().into()).await.unwrap();
         let id = Uuid::new_v4();
         let value = serde_json::json!({"password":"private-password","user_agent":"same-agent","_token":"a".repeat(600)});
-        save_in(dir.path(), id, "session", &value).unwrap();
-        let raw = fs::read_to_string(dir.path().join(format!("{id}-session.json"))).unwrap();
+        save_in(&store, dir.path(), id, "session", &value).await.unwrap();
+        let raw = store.stored_sidecar(&dir.path().join(format!("{id}-session.json"))).await.unwrap().unwrap();
         assert!(!raw.contains("private-password"));
         assert_eq!(
-            load_in::<serde_json::Value>(dir.path(), id, "session").unwrap(),
+            load_in::<serde_json::Value>(&store, dir.path(), id, "session").await.unwrap(),
             Some(value)
         );
         assert!(
-            load_in::<serde_json::Value>(dir.path(), Uuid::new_v4(), "session")
+            load_in::<serde_json::Value>(&store, dir.path(), Uuid::new_v4(), "session").await
                 .unwrap()
                 .is_none()
         );

@@ -10,24 +10,18 @@
 
 ## 快速启动
 
-1. 准备 PostgreSQL 和 Redis。
-2. 复制配置：
+在 `assistant-server` 目录运行：
 
 ```bash
-cp .env.example .env
-cp config/development.toml config/local.toml
-```
-
-3. 执行迁移并启动：
-
-```bash
-cargo build
-# 迁移
-sqlx database create
-sqlx migrate run
-# 运行
 cargo run
 ```
+
+### 数据迁移与备份
+
+- 服务自动创建 `data/assistant.sqlite3`。每个数据目录运行一个服务实例。
+- 升级时先停止旧服务，再用相同的工作目录启动新版。首次启动会在一个事务中导入旧版账号、会话、配置、对话、微信记录、OIDC 关联和视频任务 JSON。旧数据损坏时，启动会报错并回滚导入。
+- 课程目录、课节索引和手动查询记录在首次读取时导入。翻译任务断点在启动恢复时导入，加密的 App 凭据和会话在首次读取时导入。导入后，以数据库记录为准。原有 JSON 会保留，因此升级后请继续备份整个目录。
+- 讲义、TeX、PDF、视频、字幕和处理中间文件继续使用原目录。备份时停止服务，一起复制 `data/` 和 `course_data/`。恢复时将两者放回原工作目录。白名单和 App 凭据加密私钥也随 `data/` 备份。
 
 ## 关键 API
 

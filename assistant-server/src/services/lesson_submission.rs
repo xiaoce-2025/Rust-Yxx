@@ -23,7 +23,7 @@ pub async fn submit_lesson(
         .ok_or(ApiError::Unauthorized)?;
     let username = user.email.split('@').next().unwrap_or_default().to_string();
     let mut lessons =
-        lesson_storage::load_lessons(&username, &course_id).map_err(ApiError::Internal)?;
+        lesson_storage::load_lessons(&state.store, &username, &course_id).await.map_err(ApiError::Internal)?;
     let index = lessons
         .iter()
         .position(|l| l.id == video_id)
@@ -74,7 +74,7 @@ pub async fn submit_lesson(
             Preparation::Media(media) => media,
             Preparation::NeedsKey { url, key_uri } => {
                 lessons[index].video_url = url.clone();
-                lesson_storage::save_lessons(&username, &course_id, &lessons)
+                lesson_storage::save_lessons(&state.store, &username, &course_id, &lessons).await
                     .map_err(ApiError::Internal)?;
                 return Ok(Json(
                     serde_json::json!({"success":true,"needs_key":true,"key_uri":key_uri,"video_url":url}),
@@ -84,7 +84,7 @@ pub async fn submit_lesson(
     };
     lessons[index].video_url = media.url.clone();
     lessons[index].enc_key = media.enc_key.clone();
-    lesson_storage::save_lessons(&username, &course_id, &lessons).map_err(ApiError::Internal)?;
+    lesson_storage::save_lessons(&state.store, &username, &course_id, &lessons).await.map_err(ApiError::Internal)?;
     let job_id = Uuid::new_v4();
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     let mut job = PkuVideoJob::new(
@@ -198,7 +198,7 @@ async fn prepare_app_course_media(
     course_id: &str,
     lesson: &lesson_storage::LessonInfo,
 ) -> Result<super::prepared_media::PreparedMedia, String> {
-    let course = super::course_storage::load_courses(username)?
+    let course = super::course_storage::load_courses(&state.store, username).await?
         .into_iter()
         .find(|course| course.key == course_id)
         .ok_or("本地缺少课程信息，无法匹配好学 App 课程，请刷新课程列表")?;

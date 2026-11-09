@@ -44,7 +44,7 @@ async fn app_auth(
         return Err(ApiError::BadRequest("未知认证操作".into()));
     }
     if action == "reset" {
-        app_replay::clear_session(current.id).map_err(ApiError::Internal)?;
+        app_replay::clear_session(&state.store, current.id).await.map_err(ApiError::Internal)?;
         state.app_replay_clients.lock().await.remove(&current.id);
         return Ok(Json(json!({"ok":true,"data":{"logged_in":false}})));
     }
@@ -86,7 +86,7 @@ async fn options(
         .await
         .ok_or(ApiError::Unauthorized)?;
     let username = user.email.split('@').next().unwrap_or_default();
-    let course = course_storage::load_courses(username)
+    let course = course_storage::load_courses(&state.store, username).await
         .map_err(ApiError::Internal)?
         .into_iter()
         .find(|c| c.key == course_id)
@@ -125,7 +125,7 @@ async fn add(
         .await
         .ok_or(ApiError::Unauthorized)?;
     let username = user.email.split('@').next().unwrap_or_default().to_string();
-    let course = course_storage::load_courses(&username)
+    let course = course_storage::load_courses(&state.store, &username).await
         .map_err(ApiError::Internal)?
         .into_iter()
         .find(|c| c.key == course_id)
@@ -143,7 +143,7 @@ async fn add(
         return Err(ApiError::BadRequest("请等待当前课节处理完成".into()));
     }
     let mut attempts =
-        lesson_storage::load_manual_attempts(&username, &course_id).map_err(ApiError::Internal)?;
+        lesson_storage::load_manual_attempts(&state.store, &username, &course_id).await.map_err(ApiError::Internal)?;
     let pending: Vec<String> = dates
         .iter()
         .filter(|date| lesson_storage::should_query_date(&attempts, date, request.retry_failed))
@@ -184,7 +184,7 @@ async fn add(
         }
     }
     // Save before the API request: crashes and failures must not cause silent repetition.
-    lesson_storage::save_manual_attempts(&username, &course_id, &attempts)
+    lesson_storage::save_manual_attempts(&state.store, &username, &course_id, &attempts).await
         .map_err(ApiError::Internal)?;
     let scan = client
         .request(
@@ -203,13 +203,13 @@ async fn add(
                 a.status = "failed".into();
                 a.message = message.clone();
             }
-            lesson_storage::save_manual_attempts(&username, &course_id, &attempts)
+            lesson_storage::save_manual_attempts(&state.store, &username, &course_id, &attempts).await
                 .map_err(ApiError::Internal)?;
             return Err(ApiError::BadRequest(message));
         }
     };
     let mut lessons =
-        lesson_storage::load_lessons(&username, &course_id).map_err(ApiError::Internal)?;
+        lesson_storage::load_lessons(&state.store, &username, &course_id).await.map_err(ApiError::Internal)?;
     let old_lessons = lessons.clone();
     let mut added = 0;
     let mut failed = 0;
@@ -283,9 +283,9 @@ async fn add(
         };
         attempt.updated_at = chrono::Utc::now().to_rfc3339();
     }
-    lesson_storage::save_ordered_lessons(&username, &course_id, &old_lessons, &mut lessons)
+    lesson_storage::save_ordered_lessons(&state.store, &username, &course_id, &old_lessons, &mut lessons).await
         .map_err(ApiError::Internal)?;
-    lesson_storage::save_manual_attempts(&username, &course_id, &attempts)
+    lesson_storage::save_manual_attempts(&state.store, &username, &course_id, &attempts).await
         .map_err(ApiError::Internal)?;
     Ok(Json(
         json!({"success":true,"added":added,"failed":failed,"skipped":skipped,
@@ -319,14 +319,14 @@ async fn delete_lesson(
         .await
         .ok_or(ApiError::Unauthorized)?;
     let username = user.email.split('@').next().unwrap_or_default();
-    if !course_storage::load_courses(username)
+    if !course_storage::load_courses(&state.store, username).await
         .map_err(ApiError::Internal)?
         .iter()
         .any(|c| c.key == course_id)
     {
         return Err(ApiError::NotFound);
     }
-    lesson_storage::delete_manual_lesson(username, &course_id, &lesson_id, &request.confirmation)
+    lesson_storage::delete_manual_lesson(&state.store, username, &course_id, &lesson_id, &request.confirmation).await
         .map_err(ApiError::BadRequest)?;
     Ok(Json(
         json!({"success":true,"message":"手动课节已删除，笔记文件已按实际顺序重新编号"}),

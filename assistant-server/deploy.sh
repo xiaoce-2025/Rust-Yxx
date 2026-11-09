@@ -15,9 +15,4 @@ fi
 mkdir -p data/uploads data/plugins data/logs
 export RUST_LOG="info,assistant_server=debug"
 
-if [[ "${1:-}" == "migrate" ]]; then
-  sqlx database create
-  sqlx migrate run
-fi
-
 exec "$BINARY"

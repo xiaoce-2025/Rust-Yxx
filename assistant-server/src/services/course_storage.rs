@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
+use crate::store::FileStore;
 
 use super::course_parser::CourseInfo;
 
@@ -20,74 +21,32 @@ fn get_user_courses_path(username: &str) -> PathBuf {
     get_user_dir(username).join("courses.json")
 }
 
-pub fn init_storage() -> Result<(), String> {
-    fs::create_dir_all(COURSE_DATA_DIR).map_err(|e| format!("创建课程数据目录失败: {}", e))?;
-    Ok(())
-}
-
-pub fn save_courses(username: &str, courses: &[CourseInfo]) -> Result<(), String> {
-    let user_dir = get_user_dir(username);
-    fs::create_dir_all(&user_dir).map_err(|e| format!("创建用户目录失败: {}", e))?;
-
+pub async fn save_courses(store: &FileStore, username: &str, courses: &[CourseInfo]) -> Result<(), String> {
+    super::lesson_order::single_filename(username)?;
     let user_courses = UserCourses {
         username: username.to_string(),
         courses: courses.to_vec(),
         last_updated: chrono::Utc::now().to_rfc3339(),
     };
-
-    let file_path = get_user_courses_path(username);
-    let json_data = serde_json::to_string_pretty(&user_courses)
-        .map_err(|e| format!("序列化课程数据失败: {}", e))?;
-
-    fs::write(&file_path, json_data)
-        .map_err(|e| format!("保存课程数据失败: {}", e))?;
-
-    tracing::info!("课程数据已保存到: {}", file_path.display());
-    Ok(())
+    let payload = serde_json::to_string(&user_courses).map_err(|error| error.to_string())?;
+    store.save_sidecar(&get_user_courses_path(username), &payload).await
 }
 
-pub fn load_courses(username: &str) -> Result<Vec<CourseInfo>, String> {
-    let file_path = get_user_courses_path(username);
-
-    if !file_path.exists() {
-        tracing::info!("用户 {} 的课程数据文件不存在", username);
-        return Ok(Vec::new());
-    }
-
-    let json_data = fs::read_to_string(&file_path)
-        .map_err(|e| format!("读取课程数据失败: {}", e))?;
-
-    let user_courses: UserCourses = serde_json::from_str(&json_data)
-        .map_err(|e| format!("反序列化课程数据失败: {}", e))?;
-
-    tracing::info!("从本地加载了 {} 门课程", user_courses.courses.len());
-    Ok(user_courses.courses)
+pub async fn load_catalog(store: &FileStore, username: &str) -> Result<Option<UserCourses>, String> {
+    super::lesson_order::single_filename(username)?;
+    store.load_sidecar(&get_user_courses_path(username)).await
 }
 
-pub fn get_last_updated(username: &str) -> Option<String> {
-    let file_path = get_user_courses_path(username);
-
-    if !file_path.exists() {
-        return None;
-    }
-
-    match fs::read_to_string(&file_path) {
-        Ok(json_data) => {
-            match serde_json::from_str::<UserCourses>(&json_data) {
-                Ok(user_courses) => Some(user_courses.last_updated),
-                Err(_) => None,
-            }
-        }
-        Err(_) => None,
-    }
+pub async fn load_courses(store: &FileStore, username: &str) -> Result<Vec<CourseInfo>, String> {
+    Ok(load_catalog(store, username).await?.map(|catalog| catalog.courses).unwrap_or_default())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_save_and_load_courses() {
+    #[tokio::test]
+    async fn test_save_and_load_courses() {
         let username = "test_user";
         let courses = vec![
             CourseInfo {
@@ -102,16 +61,15 @@ mod tests {
             },
         ];
 
-        init_storage().unwrap();
-        save_courses(username, &courses).unwrap();
+        let dir = tempdir::TempDir::new_in("target", "course-store").unwrap();
+        let store = FileStore::new(dir.path().into()).await.unwrap();
+        save_courses(&store, username, &courses).await.unwrap();
 
-        let loaded = load_courses(username).unwrap();
+        let loaded = load_courses(&store, username).await.unwrap();
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].key, "_12345_1");
         assert_eq!(loaded[1].name, "线性代数");
 
-        // 清理测试文件
-        let _ = fs::remove_dir_all(get_user_dir(username));
     }
 }

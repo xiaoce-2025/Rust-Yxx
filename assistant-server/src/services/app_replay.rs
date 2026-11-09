@@ -1,3 +1,4 @@
+use crate::store::FileStore;
 pub use super::app_replay_client::AppReplayClient;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -19,19 +20,20 @@ pub fn encrypt_binding_password(key: &str, password: &str) -> Result<String, Str
     super::app_replay_auth::encrypt_password(key, password)
 }
 
-pub fn save_binding(user: uuid::Uuid, account: &str, password: &str) -> Result<(), String> {
+pub async fn save_binding(store: &FileStore, user: uuid::Uuid, account: &str, password: &str) -> Result<(), String> {
     super::app_replay_vault::save(
+        store,
         user,
         "binding",
         &serde_json::json!({"account":account,"password":password}),
-    )
+    ).await
 }
-pub fn clear_binding(user: uuid::Uuid) -> Result<(), String> {
-    super::app_replay_vault::remove(user, "binding")?;
-    super::app_replay_vault::remove(user, "session")
+pub async fn clear_binding(store: &FileStore, user: uuid::Uuid) -> Result<(), String> {
+    super::app_replay_vault::remove(store, user, "binding").await?;
+    super::app_replay_vault::remove(store, user, "session").await
 }
-pub fn clear_session(user: uuid::Uuid) -> Result<(), String> {
-    super::app_replay_vault::remove(user, "session")
+pub async fn clear_session(store: &FileStore, user: uuid::Uuid) -> Result<(), String> {
+    super::app_replay_vault::remove(store, user, "session").await
 }
 
 pub fn validate_periods(start: u8, end: u8) -> Result<(), String> {

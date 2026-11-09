@@ -16,7 +16,7 @@ use app_state::AppState;
 use tracing::info;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let settings = config::Settings::load()?;
 
     tracing_subscriber::fmt()
@@ -29,6 +29,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let data_dir = PathBuf::from("./data");
+    std::fs::create_dir_all(&data_dir)?;
+    // The task queues and note recovery are coordinated within one server process.
+    let instance_lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(data_dir.join("assistant.lock"))?;
+    instance_lock.try_lock().map_err(|error| {
+        std::io::Error::other(format!("无法锁定服务数据目录 {}: {error}", data_dir.display()))
+    })?;
+
     let store = Arc::new(store::FileStore::new(data_dir).await?);
 
     let app_state = AppState::new(settings, store);

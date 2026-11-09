@@ -2,7 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use serde::de::DeserializeOwned;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -131,80 +133,202 @@ pub struct RegistrationWhitelist {
     pub allowed_emails: Vec<String>,
 }
 
+type StoreError = Box<dyn std::error::Error + Send + Sync>;
+
 pub struct FileStore {
     data_dir: PathBuf,
-    users: Arc<RwLock<HashMap<Uuid, FileUser>>>,
-    sessions: Arc<RwLock<HashMap<Uuid, FileUserSession>>>,
-    configs: Arc<RwLock<HashMap<Uuid, FileUserConfig>>>,
-    conversations: Arc<RwLock<HashMap<Uuid, FileConversation>>>,
-    messages: Arc<RwLock<Vec<FileConversationMessage>>>,
-    wechat_bindings: Arc<RwLock<Vec<FileUserWeChatBinding>>>,
-    wechat_channels: Arc<RwLock<HashMap<Uuid, FileUserWeChatChannel>>>,
-    oauth_states: Arc<RwLock<Vec<FileWeChatOAuthState>>>,
-    pkuvideo_jobs: Arc<RwLock<HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob>>>,
-    pkuvideo_fw_jobs: Arc<RwLock<HashMap<Uuid, crate::services::pkuvideo_fw::PkuVideoFwJob>>>,
-    whitelist: Arc<RwLock<RegistrationWhitelist>>,
+    db: SqlitePool,
+    users: RwLock<HashMap<Uuid, FileUser>>,
+    sessions: RwLock<HashMap<Uuid, FileUserSession>>,
+    configs: RwLock<HashMap<Uuid, FileUserConfig>>,
+    conversations: RwLock<HashMap<Uuid, FileConversation>>,
+    messages: RwLock<Vec<FileConversationMessage>>,
+    wechat_bindings: RwLock<Vec<FileUserWeChatBinding>>,
+    wechat_channels: RwLock<HashMap<Uuid, FileUserWeChatChannel>>,
+    oauth_states: RwLock<Vec<FileWeChatOAuthState>>,
+    pkuvideo_jobs: RwLock<HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob>>,
+    pkuvideo_fw_jobs: RwLock<HashMap<Uuid, crate::services::pkuvideo_fw::PkuVideoFwJob>>,
+    oidc_identities: RwLock<HashMap<String, Uuid>>,
+    whitelist: RwLock<RegistrationWhitelist>,
+}
+
+async fn import_collection<T: DeserializeOwned + Default + Serialize>(
+    tx: &mut Transaction<'_, Sqlite>,
+    data_dir: &std::path::Path,
+    name: &str,
+) -> Result<T, StoreError> {
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT payload FROM collections WHERE name = ?")
+            .bind(name)
+            .fetch_optional(&mut **tx)
+            .await?;
+    if let Some(payload) = stored {
+        return Ok(serde_json::from_str(&payload)?);
+    }
+
+    let path = data_dir.join(format!("{name}.json"));
+    let value = match tokio::fs::read_to_string(&path).await {
+        Ok(payload) if name == "wechat_channels" => {
+            // Older versions serialized channels as an array.
+            let channels: Vec<FileUserWeChatChannel> = serde_json::from_str(&payload)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            let map: HashMap<_, _> = channels.into_iter().map(|ch| (ch.user_id, ch)).collect();
+            serde_json::from_value(serde_json::to_value(map)?)?
+        }
+        Ok(payload) => serde_json::from_str(&payload)
+            .map_err(|error| format!("{}: {error}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => T::default(),
+        Err(error) => return Err(error.into()),
+    };
+    write_collection(&mut **tx, name, &serde_json::to_string(&value)?).await?;
+    Ok(value)
+}
+
+async fn write_collection(
+    connection: &mut sqlx::SqliteConnection,
+    name: &str,
+    payload: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO collections (name, payload) VALUES (?, ?)
+         ON CONFLICT(name) DO UPDATE SET payload = excluded.payload",
+    )
+    .bind(name)
+    .bind(payload)
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 impl FileStore {
-    pub async fn new(data_dir: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(data_dir: PathBuf) -> Result<Self, StoreError> {
         tokio::fs::create_dir_all(&data_dir).await?;
-
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(data_dir.join("assistant.sqlite3"))
+                    .create_if_missing(true),
+            )
+            .await?;
+        let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS collections (
+                name TEXT PRIMARY KEY NOT NULL,
+                payload TEXT NOT NULL CHECK (json_valid(payload))
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
         let store = Self {
+            users: RwLock::new(import_collection(&mut tx, &data_dir, "users").await?),
+            sessions: RwLock::new(import_collection(&mut tx, &data_dir, "sessions").await?),
+            configs: RwLock::new(import_collection(&mut tx, &data_dir, "configs").await?),
+            conversations: RwLock::new(import_collection(&mut tx, &data_dir, "conversations").await?),
+            messages: RwLock::new(import_collection(&mut tx, &data_dir, "messages").await?),
+            wechat_bindings: RwLock::new(import_collection(&mut tx, &data_dir, "wechat_bindings").await?),
+            wechat_channels: RwLock::new(import_collection(&mut tx, &data_dir, "wechat_channels").await?),
+            oauth_states: RwLock::new(import_collection(&mut tx, &data_dir, "oauth_states").await?),
+            pkuvideo_jobs: RwLock::new(import_collection(&mut tx, &data_dir, "pkuvideo_jobs").await?),
+            pkuvideo_fw_jobs: RwLock::new(import_collection(&mut tx, &data_dir, "pkuvideo_fw_jobs").await?),
+            oidc_identities: RwLock::new(import_collection(&mut tx, &data_dir, "oidc_identities").await?),
+            whitelist: RwLock::new(RegistrationWhitelist { allowed_emails: Vec::new() }),
             data_dir,
-            users: Arc::new(RwLock::new(HashMap::new())),
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            configs: Arc::new(RwLock::new(HashMap::new())),
-            conversations: Arc::new(RwLock::new(HashMap::new())),
-            messages: Arc::new(RwLock::new(Vec::new())),
-            wechat_bindings: Arc::new(RwLock::new(Vec::new())),
-            wechat_channels: Arc::new(RwLock::new(HashMap::new())),
-            oauth_states: Arc::new(RwLock::new(Vec::new())),
-            pkuvideo_jobs: Arc::new(RwLock::new(HashMap::new())),
-            pkuvideo_fw_jobs: Arc::new(RwLock::new(HashMap::new())),
-            whitelist: Arc::new(RwLock::new(RegistrationWhitelist { allowed_emails: Vec::new() })),
+            db: db.clone(),
         };
-
-        store.load_all().await?;
+        tx.commit().await?;
+        store.load_whitelist().await?;
         Ok(store)
     }
 
-    async fn load_all(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.load_users().await.ok();
-        self.load_sessions().await.ok();
-        self.load_configs().await.ok();
-        self.load_conversations().await.ok();
-        self.load_messages().await.ok();
-        self.load_wechat_bindings().await.ok();
-        self.load_wechat_channels().await.ok();
-        self.load_oauth_states().await.ok();
-        self.load_pkuvideo_jobs().await.ok();
-        self.load_pkuvideo_fw_jobs().await.ok();
-        self.load_whitelist().await.ok();
+    async fn save_collection<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StoreError> {
+        let payload = serde_json::to_string(value)?;
+        let mut connection = self.db.acquire().await?;
+        write_collection(&mut connection, name, &payload).await?;
         Ok(())
     }
 
-    // ===== Users =====
-    async fn load_users(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("users.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let users: HashMap<Uuid, FileUser> = serde_json::from_str(&data)?;
-            *self.users.write().await = users;
+    fn sidecar_key(path: &std::path::Path) -> String {
+        let parts: Vec<_> = path.components().map(|part| part.as_os_str().to_string_lossy()).collect();
+        format!("sidecar/{}", parts.join("/"))
+    }
+
+    pub async fn stored_sidecar(&self, path: &std::path::Path) -> Result<Option<String>, String> {
+        sqlx::query_scalar("SELECT payload FROM collections WHERE name = ?")
+            .bind(Self::sidecar_key(path))
+            .fetch_optional(&self.db)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn save_sidecar(&self, path: &std::path::Path, payload: &str) -> Result<(), String> {
+        let mut connection = self.db.acquire().await.map_err(|error| error.to_string())?;
+        write_collection(&mut connection, &Self::sidecar_key(path), payload)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn sidecar_paths_under(&self, directory: &std::path::Path) -> Result<Vec<String>, String> {
+        let prefix = format!("{}/", Self::sidecar_key(directory));
+        sqlx::query_scalar("SELECT substr(name, length(?) + 1) FROM collections WHERE substr(name, 1, length(?)) = ?")
+            .bind(&prefix)
+            .bind(&prefix)
+            .bind(&prefix)
+            .fetch_all(&self.db)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn delete_sidecar(&self, path: &std::path::Path) -> Result<(), String> {
+        sqlx::query("DELETE FROM collections WHERE name = ?")
+            .bind(Self::sidecar_key(path))
+            .execute(&self.db)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub async fn load_sidecar<T: DeserializeOwned>(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Option<T>, String> {
+        if let Some(payload) = self.stored_sidecar(path).await? {
+            return serde_json::from_str(&payload).map_err(|error| error.to_string());
         }
-        Ok(())
+
+        let payload = match tokio::fs::read_to_string(path).await {
+            Ok(payload) => payload,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
+        serde_json::from_str::<T>(&payload)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        // A concurrent refresh may already have replaced the legacy version.
+        let payload: String = sqlx::query_scalar(
+            "INSERT INTO collections (name, payload) VALUES (?, ?)
+             ON CONFLICT(name) DO UPDATE SET payload = collections.payload
+             RETURNING payload",
+        )
+        .bind(Self::sidecar_key(path))
+        .bind(payload)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|error| error.to_string())?;
+        serde_json::from_str(&payload).map_err(|error| error.to_string())
     }
 
-    async fn save_users_data(&self, users: &HashMap<Uuid, FileUser>) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("users.json");
-        let json = serde_json::to_string_pretty(users)?;
-        tokio::fs::write(&path, json).await?;
+    async fn update_collection<T: Serialize + Clone>(
+        &self,
+        name: &str,
+        collection: &RwLock<T>,
+        update: impl FnOnce(&mut T),
+    ) -> Result<(), StoreError> {
+        let mut current = collection.write().await;
+        let mut next = current.clone();
+        update(&mut next);
+        self.save_collection(name, &next).await?;
+        *current = next;
         Ok(())
-    }
-
-    async fn save_users(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let users = self.users.read().await;
-        self.save_users_data(&users).await
     }
 
     pub async fn get_user(&self, user_id: Uuid) -> Option<FileUser> {
@@ -229,14 +353,14 @@ impl FileStore {
             .cloned()
     }
 
-    pub async fn insert_user(&self, user: FileUser) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn insert_user(&self, user: FileUser) -> Result<(), StoreError> {
         let mut users = self.users.write().await;
         if users.values().any(|u| u.email == user.email) {
             return Err("邮箱已存在".into());
         }
         let mut updated = users.clone();
         updated.insert(user.id, user);
-        self.save_users_data(&updated).await?;
+        self.save_collection("users", &updated).await?;
         *users = updated;
         Ok(())
     }
@@ -248,12 +372,8 @@ impl FileStore {
             return Err(ApiError::Forbidden("统一认证已通过，但该邮箱不在小助手白名单中".into()));
         }
         let mut users = self.users.write().await;
-        let path = self.data_dir.join("oidc_identities.json");
-        let mut links: HashMap<String, Uuid> = match tokio::fs::read(&path).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| ApiError::Internal("统一身份关联数据无效".into()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(_) => return Err(ApiError::Internal("无法读取统一身份关联数据".into())),
-        };
+        let mut links = self.oidc_identities.write().await;
+        let mut new_user = false;
         let identity = format!("{}\0{}", issuer.trim_end_matches('/'), subject);
         let user = if let Some(id) = links.get(&identity) {
             let user = users.get(id).ok_or_else(|| ApiError::Forbidden("关联账户不存在，请联系管理员".into()))?;
@@ -274,22 +394,41 @@ impl FileStore {
                 is_active: true, created_at: now, updated_at: now, storage_quota: 3, processing_quota: 1,
                 processing_priority: 5, iaaa_encrypted_password: None, iaaa_public_key: None,
             };
-            let mut updated = users.clone(); updated.insert(id, user.clone());
-            self.save_users_data(&updated).await.map_err(|_| ApiError::Internal("保存应用账户失败".into()))?;
-            *users = updated;
+            new_user = true;
             user
         };
-        if !user.is_active { return Err(ApiError::Forbidden("小助手账户已停用".into())); }
-        links.insert(identity, user.id);
-        let bytes = serde_json::to_vec_pretty(&links).map_err(|_|ApiError::Internal("身份关联序列化失败".into()))?;
-        let temp = self.data_dir.join(format!("oidc-identities-{}.tmp",Uuid::new_v4()));
-        tokio::fs::write(&temp,bytes).await.map_err(|_|ApiError::Internal("身份关联写入失败".into()))?;
-        tokio::fs::rename(&temp,&path).await.map_err(|_|ApiError::Internal("保存身份关联失败".into()))?;
+        if !user.is_active {
+            return Err(ApiError::Forbidden("小助手账户已停用".into()));
+        }
+        if links.contains_key(&identity) {
+            return Ok(user);
+        }
+        let mut updated_links = links.clone();
+        updated_links.insert(identity, user.id);
+        let mut updated_users = users.clone();
+        if new_user {
+            updated_users.insert(user.id, user.clone());
+        }
+        let persist = async {
+            let mut tx = self.db.begin().await?;
+            if new_user {
+                write_collection(&mut tx, "users", &serde_json::to_string(&updated_users)?).await?;
+            }
+            write_collection(&mut tx, "oidc_identities", &serde_json::to_string(&updated_links)?).await?;
+            tx.commit().await?;
+            Ok::<_, StoreError>(())
+        };
+        persist.await.map_err(|error| {
+            tracing::error!(%error, "保存统一认证账户失败");
+            ApiError::Internal("保存统一认证账户失败".into())
+        })?;
+        *users = updated_users;
+        *links = updated_links;
         Ok(user)
     }
 
     /// Resolve a verified IAAA identity atomically. Only new accounts require the whitelist.
-    pub async fn resolve_iaaa_user(&self, mut candidate: FileUser) -> Result<Option<FileUser>, Box<dyn std::error::Error>> {
+    pub async fn resolve_iaaa_user(&self, mut candidate: FileUser) -> Result<Option<FileUser>, StoreError> {
         let mut users = self.users.write().await;
         if let Some(user) = users.values().find(|u| u.email == candidate.email) {
             tracing::info!(user_id=%user.id, is_active=user.is_active, "IAAA identity resolved to existing account");
@@ -304,123 +443,80 @@ impl FileStore {
         }
         let mut updated = users.clone();
         updated.insert(candidate.id, candidate.clone());
-        self.save_users_data(&updated).await?;
+        self.save_collection("users", &updated).await?;
         *users = updated;
         tracing::info!(user_id=%candidate.id, "IAAA whitelist check passed; new account registered");
         Ok(Some(candidate))
     }
 
-    pub async fn decrease_processing_quota(&self, user_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
-        let users = {
-            let mut users = self.users.write().await;
+    pub async fn decrease_processing_quota(&self, user_id: Uuid) -> Result<(), StoreError> {
+        self.update_collection("users", &self.users, |users| {
             if let Some(user) = users.get_mut(&user_id) {
                 if user.processing_quota > 0 {
                     user.processing_quota -= 1;
                     user.updated_at = chrono::Utc::now();
                 }
             }
-            users.clone()
-        };
-        self.save_users_data(&users).await
+        }).await
     }
 
-    pub async fn increase_storage_quota(&self, user_id: Uuid, amount: i32) -> Result<(), Box<dyn std::error::Error>> {
-        let users = {
-            let mut users = self.users.write().await;
+    pub async fn increase_storage_quota(&self, user_id: Uuid, amount: i32) -> Result<(), StoreError> {
+        self.update_collection("users", &self.users, |users| {
             if let Some(user) = users.get_mut(&user_id) {
                 user.storage_quota += amount;
                 user.updated_at = chrono::Utc::now();
             }
-            users.clone()
-        };
-        self.save_users_data(&users).await
+        }).await
     }
 
-    pub async fn decrease_storage_quota(&self, user_id: Uuid, amount: i32) -> Result<(), Box<dyn std::error::Error>> {
-        let users = {
-            let mut users = self.users.write().await;
+    pub async fn decrease_storage_quota(&self, user_id: Uuid, amount: i32) -> Result<(), StoreError> {
+        self.update_collection("users", &self.users, |users| {
             if let Some(user) = users.get_mut(&user_id) {
                 user.storage_quota = std::cmp::max(0, user.storage_quota - amount);
                 user.updated_at = chrono::Utc::now();
             }
-            users.clone()
-        };
-        self.save_users_data(&users).await
+        }).await
     }
 
-    pub async fn update_iaaa_binding(&self, user_id: Uuid, encrypted_password: String, public_key: String) -> Result<(), Box<dyn std::error::Error>> {
-        let users = {
-            let mut users = self.users.write().await;
+    pub async fn update_iaaa_binding(&self, user_id: Uuid, encrypted_password: String, public_key: String) -> Result<(), StoreError> {
+        self.update_collection("users", &self.users, |users| {
             if let Some(user) = users.get_mut(&user_id) {
                 user.iaaa_encrypted_password = Some(encrypted_password);
                 user.iaaa_public_key = Some(public_key);
                 user.updated_at = chrono::Utc::now();
             }
-            users.clone()
-        };
-        self.save_users_data(&users).await
+        }).await
     }
 
-    pub async fn remove_iaaa_binding(&self, user_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
-        let users = {
-            let mut users = self.users.write().await;
+    pub async fn remove_iaaa_binding(&self, user_id: Uuid) -> Result<(), StoreError> {
+        self.update_collection("users", &self.users, |users| {
             if let Some(user) = users.get_mut(&user_id) {
                 user.iaaa_encrypted_password = None;
                 user.iaaa_public_key = None;
                 user.updated_at = chrono::Utc::now();
             }
-            users.clone()
-        };
-        self.save_users_data(&users).await
+        }).await
     }
 
     // ===== Sessions =====
-    async fn load_sessions(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("sessions.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let sessions: HashMap<Uuid, FileUserSession> = serde_json::from_str(&data)?;
-            *self.sessions.write().await = sessions;
-        }
-        Ok(())
-    }
-
-    async fn save_sessions(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("sessions.json");
-        let data = self.sessions.read().await;
-        let json = serde_json::to_string_pretty(&*data)?;
-        tokio::fs::write(&path, json).await?;
-        Ok(())
-    }
-
     pub async fn get_session(&self, session_id: Uuid) -> Option<FileUserSession> {
         let sessions = self.sessions.read().await;
         sessions.get(&session_id).cloned()
     }
 
-    pub async fn insert_session(&self, session: FileUserSession) -> Result<(), Box<dyn std::error::Error>> {
-        self.sessions.write().await.insert(session.session_id, session);
-        self.save_sessions().await?;
-        Ok(())
+    pub async fn insert_session(&self, session: FileUserSession) -> Result<(), StoreError> {
+        self.update_collection("sessions", &self.sessions, |records| {
+            records.insert(session.session_id, session);
+        }).await
     }
 
-    pub async fn delete_session(&self, session_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
-        self.sessions.write().await.remove(&session_id);
-        self.save_sessions().await?;
-        Ok(())
+    pub async fn delete_session(&self, session_id: Uuid) -> Result<(), StoreError> {
+        self.update_collection("sessions", &self.sessions, |records| {
+            records.remove(&session_id);
+        }).await
     }
 
     // ===== Configs =====
-    async fn load_configs(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("configs.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let configs: HashMap<Uuid, FileUserConfig> = serde_json::from_str(&data)?;
-            *self.configs.write().await = configs;
-        }
-        Ok(())
-    }
-
     pub async fn get_config(&self, user_id: Uuid) -> Option<FileUserConfig> {
         self.configs.read().await.get(&user_id).cloned()
     }
@@ -430,36 +526,15 @@ impl FileStore {
         user_id: Uuid,
         update: impl FnOnce(Option<FileUserConfig>) -> FileUserConfig,
     ) -> std::io::Result<()> {
-        let mut configs = self.configs.write().await;
-        let mut next = configs.clone();
-        let config = update(next.remove(&user_id));
-        next.insert(user_id, config);
-        let pending = self.data_dir.join("configs.json.tmp");
-        tokio::fs::write(&pending, serde_json::to_vec_pretty(&next)?).await?;
-        tokio::fs::rename(pending, self.data_dir.join("configs.json")).await?;
-        *configs = next;
-        Ok(())
+        self.update_collection("configs", &self.configs, |configs| {
+            let config = update(configs.remove(&user_id));
+            configs.insert(user_id, config);
+        })
+        .await
+        .map_err(std::io::Error::other)
     }
 
     // ===== Conversations =====
-    async fn load_conversations(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("conversations.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let convs: HashMap<Uuid, FileConversation> = serde_json::from_str(&data)?;
-            *self.conversations.write().await = convs;
-        }
-        Ok(())
-    }
-
-    async fn save_conversations(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("conversations.json");
-        let data = self.conversations.read().await;
-        let json = serde_json::to_string_pretty(&*data)?;
-        tokio::fs::write(&path, json).await?;
-        Ok(())
-    }
-
     pub async fn get_conversations(&self, user_id: Uuid) -> Vec<FileConversation> {
         let mut convs: Vec<_> = self
             .conversations
@@ -477,37 +552,19 @@ impl FileStore {
         self.conversations.read().await.get(&conv_id).cloned()
     }
 
-    pub async fn insert_conversation(&self, conv: FileConversation) -> Result<(), Box<dyn std::error::Error>> {
-        self.conversations.write().await.insert(conv.id, conv);
-        self.save_conversations().await?;
-        Ok(())
+    pub async fn insert_conversation(&self, conv: FileConversation) -> Result<(), StoreError> {
+        self.update_collection("conversations", &self.conversations, |records| {
+            records.insert(conv.id, conv);
+        }).await
     }
 
-    pub async fn update_conversation(&self, conv: FileConversation) -> Result<(), Box<dyn std::error::Error>> {
-        self.conversations.write().await.insert(conv.id, conv);
-        self.save_conversations().await?;
-        Ok(())
+    pub async fn update_conversation(&self, conv: FileConversation) -> Result<(), StoreError> {
+        self.update_collection("conversations", &self.conversations, |records| {
+            records.insert(conv.id, conv);
+        }).await
     }
 
     // ===== Messages =====
-    async fn load_messages(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("messages.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let msgs: Vec<FileConversationMessage> = serde_json::from_str(&data)?;
-            *self.messages.write().await = msgs;
-        }
-        Ok(())
-    }
-
-    async fn save_messages(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("messages.json");
-        let data = self.messages.read().await;
-        let json = serde_json::to_string_pretty(&*data)?;
-        tokio::fs::write(&path, json).await?;
-        Ok(())
-    }
-
     pub async fn get_messages(&self, conv_id: Uuid) -> Vec<FileConversationMessage> {
         let mut msgs: Vec<_> = self
             .messages
@@ -521,31 +578,13 @@ impl FileStore {
         msgs
     }
 
-    pub async fn insert_message(&self, msg: FileConversationMessage) -> Result<(), Box<dyn std::error::Error>> {
-        self.messages.write().await.push(msg);
-        self.save_messages().await?;
-        Ok(())
+    pub async fn insert_message(&self, msg: FileConversationMessage) -> Result<(), StoreError> {
+        self.update_collection("messages", &self.messages, |records| {
+            records.push(msg);
+        }).await
     }
 
     // ===== WeChat Bindings =====
-    async fn load_wechat_bindings(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("wechat_bindings.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let bindings: Vec<FileUserWeChatBinding> = serde_json::from_str(&data)?;
-            *self.wechat_bindings.write().await = bindings;
-        }
-        Ok(())
-    }
-
-    async fn save_wechat_bindings(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("wechat_bindings.json");
-        let data = self.wechat_bindings.read().await;
-        let json = serde_json::to_string_pretty(&*data)?;
-        tokio::fs::write(&path, json).await?;
-        Ok(())
-    }
-
     pub async fn get_wechat_binding(&self, user_id: Uuid) -> Option<FileUserWeChatBinding> {
         let bindings = self.wechat_bindings.read().await;
         bindings
@@ -555,57 +594,31 @@ impl FileStore {
             .cloned()
     }
 
-    pub async fn upsert_wechat_binding(&self, binding: FileUserWeChatBinding) -> Result<(), Box<dyn std::error::Error>> {
-        let mut bindings = self.wechat_bindings.write().await;
-        if let Some(pos) = bindings.iter_mut().position(|b| b.user_id == binding.user_id && b.openid == binding.openid) {
-            bindings[pos] = binding;
-        } else {
-            bindings.push(binding);
-        }
-        drop(bindings);
-        self.save_wechat_bindings().await?;
-        Ok(())
+    pub async fn upsert_wechat_binding(&self, binding: FileUserWeChatBinding) -> Result<(), StoreError> {
+        self.update_collection("wechat_bindings", &self.wechat_bindings, |records| {
+            if let Some(existing) = records.iter_mut().find(|b| b.user_id == binding.user_id && b.openid == binding.openid) {
+                *existing = binding;
+            } else {
+                records.push(binding);
+            }
+        }).await
     }
 
-    pub async fn delete_wechat_binding(&self, user_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
-        let mut bindings = self.wechat_bindings.write().await;
-        bindings.retain(|b| b.user_id != user_id);
-        drop(bindings);
-        self.save_wechat_bindings().await?;
-        Ok(())
+    pub async fn delete_wechat_binding(&self, user_id: Uuid) -> Result<(), StoreError> {
+        self.update_collection("wechat_bindings", &self.wechat_bindings, |records| {
+            records.retain(|b| b.user_id != user_id);
+        }).await
     }
 
     // ===== WeChat Channels =====
-    async fn load_wechat_channels(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("wechat_channels.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let channels: Vec<FileUserWeChatChannel> = serde_json::from_str(&data)?;
-            let mut map = HashMap::new();
-            for ch in channels {
-                map.insert(ch.user_id, ch);
-            }
-            *self.wechat_channels.write().await = map;
-        }
-        Ok(())
-    }
-
-    async fn save_wechat_channels(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("wechat_channels.json");
-        let channels: Vec<_> = self.wechat_channels.read().await.values().cloned().collect();
-        let json = serde_json::to_string_pretty(&channels)?;
-        tokio::fs::write(&path, json).await?;
-        Ok(())
-    }
-
     pub async fn get_wechat_channel(&self, user_id: Uuid) -> Option<FileUserWeChatChannel> {
         self.wechat_channels.read().await.get(&user_id).cloned()
     }
 
-    pub async fn upsert_wechat_channel(&self, channel: FileUserWeChatChannel) -> Result<(), Box<dyn std::error::Error>> {
-        self.wechat_channels.write().await.insert(channel.user_id, channel);
-        self.save_wechat_channels().await?;
-        Ok(())
+    pub async fn upsert_wechat_channel(&self, channel: FileUserWeChatChannel) -> Result<(), StoreError> {
+        self.update_collection("wechat_channels", &self.wechat_channels, |records| {
+            records.insert(channel.user_id, channel);
+        }).await
     }
 
     pub async fn get_all_wechat_channels(&self) -> Vec<FileUserWeChatChannel> {
@@ -613,24 +626,6 @@ impl FileStore {
     }
 
     // ===== OAuth States =====
-    async fn load_oauth_states(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("oauth_states.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let states: Vec<FileWeChatOAuthState> = serde_json::from_str(&data)?;
-            *self.oauth_states.write().await = states;
-        }
-        Ok(())
-    }
-
-    async fn save_oauth_states(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("oauth_states.json");
-        let data = self.oauth_states.read().await;
-        let json = serde_json::to_string_pretty(&*data)?;
-        tokio::fs::write(&path, json).await?;
-        Ok(())
-    }
-
     pub async fn get_oauth_state(&self, state: &str) -> Option<(Uuid, DateTime<Utc>)> {
         self.oauth_states
             .read()
@@ -640,22 +635,20 @@ impl FileStore {
             .map(|s| (s.user_id, s.expires_at))
     }
 
-    pub async fn insert_oauth_state(&self, state: FileWeChatOAuthState) -> Result<(), Box<dyn std::error::Error>> {
-        self.oauth_states.write().await.push(state);
-        self.save_oauth_states().await?;
-        Ok(())
+    pub async fn insert_oauth_state(&self, state: FileWeChatOAuthState) -> Result<(), StoreError> {
+        self.update_collection("oauth_states", &self.oauth_states, |records| {
+            records.push(state);
+        }).await
     }
 
-    pub async fn delete_oauth_state(&self, state: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut states = self.oauth_states.write().await;
-        states.retain(|s| s.state != state);
-        drop(states);
-        self.save_oauth_states().await?;
-        Ok(())
+    pub async fn delete_oauth_state(&self, state: &str) -> Result<(), StoreError> {
+        self.update_collection("oauth_states", &self.oauth_states, |records| {
+            records.retain(|s| s.state != state);
+        }).await
     }
 
     // ===== Registration Whitelist =====
-    async fn load_whitelist(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn load_whitelist(&self) -> Result<(), StoreError> {
         let path = self.data_dir.join("whitelist.json");
         if path.exists() {
             let data = tokio::fs::read_to_string(&path).await?;
@@ -672,7 +665,7 @@ impl FileStore {
         Ok(())
     }
 
-    pub async fn reload_whitelist(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn reload_whitelist(&self) -> Result<(), StoreError> {
         self.load_whitelist().await
     }
 
@@ -682,24 +675,6 @@ impl FileStore {
     }
 
     // ===== PKU Video Jobs =====
-    async fn load_pkuvideo_jobs(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("pkuvideo_jobs.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let jobs: HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob> = serde_json::from_str(&data)?;
-            *self.pkuvideo_jobs.write().await = jobs;
-        }
-        Ok(())
-    }
-
-    async fn save_pkuvideo_jobs(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("pkuvideo_jobs.json");
-        let data = self.pkuvideo_jobs.read().await;
-        let json = serde_json::to_string_pretty(&*data)?;
-        tokio::fs::write(&path, json).await?;
-        Ok(())
-    }
-
     pub async fn get_pkuvideo_job(&self, job_id: Uuid) -> Option<crate::services::pkuvideo::PkuVideoJob> {
         self.pkuvideo_jobs.read().await.get(&job_id).cloned()
     }
@@ -712,22 +687,22 @@ impl FileStore {
             .collect()
     }
 
-    pub async fn insert_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), Box<dyn std::error::Error>> {
-        self.pkuvideo_jobs.write().await.insert(job.id, job);
-        self.save_pkuvideo_jobs().await?;
-        Ok(())
+    pub async fn insert_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), StoreError> {
+        self.update_collection("pkuvideo_jobs", &self.pkuvideo_jobs, |records| {
+            records.insert(job.id, job);
+        }).await
     }
 
-    pub async fn update_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), Box<dyn std::error::Error>> {
-        self.pkuvideo_jobs.write().await.insert(job.id, job);
-        self.save_pkuvideo_jobs().await?;
-        Ok(())
+    pub async fn update_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), StoreError> {
+        self.update_collection("pkuvideo_jobs", &self.pkuvideo_jobs, |records| {
+            records.insert(job.id, job);
+        }).await
     }
 
-    pub async fn delete_pkuvideo_job(&self, job_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
-        self.pkuvideo_jobs.write().await.remove(&job_id);
-        self.save_pkuvideo_jobs().await?;
-        Ok(())
+    pub async fn delete_pkuvideo_job(&self, job_id: Uuid) -> Result<(), StoreError> {
+        self.update_collection("pkuvideo_jobs", &self.pkuvideo_jobs, |records| {
+            records.remove(&job_id);
+        }).await
     }
 
     pub async fn get_all_pkuvideo_jobs(&self) -> HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob> {
@@ -735,43 +710,63 @@ impl FileStore {
     }
 
     // ===== PKU Video FW Jobs =====
-    async fn load_pkuvideo_fw_jobs(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("pkuvideo_fw_jobs.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let jobs: HashMap<Uuid, crate::services::pkuvideo_fw::PkuVideoFwJob> = serde_json::from_str(&data)?;
-            *self.pkuvideo_fw_jobs.write().await = jobs;
-        }
-        Ok(())
+    pub async fn insert_pkuvideo_fw_job(&self, job: crate::services::pkuvideo_fw::PkuVideoFwJob) -> Result<(), StoreError> {
+        self.update_collection("pkuvideo_fw_jobs", &self.pkuvideo_fw_jobs, |records| {
+            records.insert(job.id, job);
+        }).await
     }
 
-    async fn save_pkuvideo_fw_jobs(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.data_dir.join("pkuvideo_fw_jobs.json");
-        let data = self.pkuvideo_fw_jobs.read().await;
-        let json = serde_json::to_string_pretty(&*data)?;
-        tokio::fs::write(&path, json).await?;
-        Ok(())
+    pub async fn update_pkuvideo_fw_job(&self, job: crate::services::pkuvideo_fw::PkuVideoFwJob) -> Result<(), StoreError> {
+        self.update_collection("pkuvideo_fw_jobs", &self.pkuvideo_fw_jobs, |records| {
+            records.insert(job.id, job);
+        }).await
     }
 
-    pub async fn insert_pkuvideo_fw_job(&self, job: crate::services::pkuvideo_fw::PkuVideoFwJob) -> Result<(), Box<dyn std::error::Error>> {
-        self.pkuvideo_fw_jobs.write().await.insert(job.id, job);
-        self.save_pkuvideo_fw_jobs().await?;
-        Ok(())
-    }
-
-    pub async fn update_pkuvideo_fw_job(&self, job: crate::services::pkuvideo_fw::PkuVideoFwJob) -> Result<(), Box<dyn std::error::Error>> {
-        self.pkuvideo_fw_jobs.write().await.insert(job.id, job);
-        self.save_pkuvideo_fw_jobs().await?;
-        Ok(())
-    }
-
-    pub async fn delete_pkuvideo_fw_job(&self, job_id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
-        self.pkuvideo_fw_jobs.write().await.remove(&job_id);
-        self.save_pkuvideo_fw_jobs().await?;
-        Ok(())
+    pub async fn delete_pkuvideo_fw_job(&self, job_id: Uuid) -> Result<(), StoreError> {
+        self.update_collection("pkuvideo_fw_jobs", &self.pkuvideo_fw_jobs, |records| {
+            records.remove(&job_id);
+        }).await
     }
 
     pub async fn get_all_pkuvideo_fw_jobs(&self) -> HashMap<Uuid, crate::services::pkuvideo_fw::PkuVideoFwJob> {
         self.pkuvideo_fw_jobs.read().await.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn legacy_import_rolls_back_and_is_only_applied_once() {
+        let dir = tempdir::TempDir::new_in("target", "legacy-store").unwrap();
+        let sessions = dir.path().join("sessions.json");
+        let configs = dir.path().join("configs.json");
+        let id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let now = Utc::now();
+        let session = FileUserSession {
+            session_id: id,
+            user_id,
+            expires_at: now + chrono::Duration::hours(1),
+            created_at: now,
+            user_agent: None,
+            ip_address: None,
+        };
+        tokio::fs::write(&sessions, "{}").await.unwrap();
+        tokio::fs::write(&configs, "{broken").await.unwrap();
+        assert!(FileStore::new(dir.path().into()).await.is_err());
+
+        let legacy = serde_json::to_string(&HashMap::from([(id, session)])).unwrap();
+        tokio::fs::write(&sessions, &legacy).await.unwrap();
+        tokio::fs::write(&configs, "{}").await.unwrap();
+        let store = FileStore::new(dir.path().into()).await.unwrap();
+        assert_eq!(store.get_session(id).await.unwrap().user_id, user_id);
+        store.delete_session(id).await.unwrap();
+        drop(store);
+
+        let reopened = FileStore::new(dir.path().into()).await.unwrap();
+        assert!(reopened.get_session(id).await.is_none());
+        assert_eq!(tokio::fs::read_to_string(&sessions).await.unwrap(), legacy);
     }
 }

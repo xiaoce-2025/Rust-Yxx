@@ -202,7 +202,7 @@ async fn submit_lesson_replay(
         .await
         .ok_or(ApiError::Unauthorized)?;
     let username = user.email.split('@').next().unwrap_or_default().to_owned();
-    let lessons = crate::services::lesson_storage::load_lessons(&username, &request.course_id)
+    let lessons = crate::services::lesson_storage::load_lessons(&state.store, &username, &request.course_id).await
         .map_err(ApiError::BadRequest)?;
     let lesson = lessons
         .iter()
@@ -416,14 +416,14 @@ pub(crate) async fn remove_job(state: &AppState, id: Uuid) -> Result<(), ApiErro
         .await
         .map_err(ApiError::Internal)?;
     remove_job_files(std::path::Path::new("./data/pkuvideo_fw_jobs"), id).await?;
-    crate::services::video_translation::finish_remove(state, id)
-        .await
-        .map_err(ApiError::Internal)?;
     state
         .store
         .delete_pkuvideo_fw_job(id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    crate::services::video_translation::finish_remove(state, id)
+        .await
+        .map_err(ApiError::Internal)?;
     state.pkuvideo_fw_jobs.write().await.remove(&id);
     Ok(())
 }

@@ -188,9 +188,9 @@ async fn bind(
             let _login_guard = login_lock.lock().await;
             state.login_cache.invalidate(username).await;
 
-            crate::services::app_replay::clear_binding(current_user.id).map_err(ApiError::Internal)?;
+            crate::services::app_replay::clear_binding(&state.store, current_user.id).await.map_err(ApiError::Internal)?;
             if let Some(password) = req.password.as_ref() {
-                crate::services::app_replay::save_binding(current_user.id, &req.username, password).map_err(ApiError::Internal)?;
+                crate::services::app_replay::save_binding(&state.store, current_user.id, &req.username, password).await.map_err(ApiError::Internal)?;
             }
             state.app_replay_clients.lock().await.remove(&current_user.id);
 
@@ -225,7 +225,7 @@ async fn unbind(
     let login_lock = state.login_cache.login_lock(username).await;
     let _login_guard = login_lock.lock().await;
     state.login_cache.invalidate(username).await;
-    crate::services::app_replay::clear_binding(current_user.id).map_err(ApiError::Internal)?;
+    crate::services::app_replay::clear_binding(&state.store, current_user.id).await.map_err(ApiError::Internal)?;
     state.app_replay_clients.lock().await.remove(&current_user.id);
     state
         .store
@@ -255,14 +255,16 @@ async fn get_courses(
 
     let is_bound = user.iaaa_encrypted_password.is_some();
 
-    let courses = course_storage::load_courses(username)
+    let catalog = course_storage::load_catalog(&state.store, username).await
         .map_err(|e| {
             tracing::error!("加载课程信息失败: {}", e);
             ApiError::Internal(format!("加载课程信息失败: {}", e))
         })?;
 
-    let last_updated = course_storage::get_last_updated(username);
 
+    let (courses, last_updated) = catalog
+        .map(|catalog| (catalog.courses, Some(catalog.last_updated)))
+        .unwrap_or_default();
     tracing::info!("用户 {} 加载了 {} 门课程", username, courses.len());
 
     Ok(Json(serde_json::json!({
@@ -291,14 +293,15 @@ async fn get_course_videos(
         ApiError::BadRequest("无效的邮箱格式".to_string())
     })?;
 
-    let lessons = lesson_storage::load_lessons(username, &course_id)
+    let lessons = lesson_storage::load_lessons(&state.store, username, &course_id).await
         .map_err(|e| {
             tracing::error!("加载课节信息失败: {}", e);
             ApiError::Internal(format!("加载课节信息失败: {}", e))
         })?;
 
-    let (total, processed) = lesson_storage::get_lesson_count(username, &course_id);
-    let manual_attempts = lesson_storage::load_manual_attempts(username, &course_id).map_err(ApiError::Internal)?;
+    let total = lessons.len();
+    let processed = lessons.iter().filter(|lesson| lesson.is_processed).count();
+    let manual_attempts = lesson_storage::load_manual_attempts(&state.store, username, &course_id).await.map_err(ApiError::Internal)?;
 
     // 检查当前是否有正在处理的课节
     let processing_tasks: Vec<_> = state.pkuvideo_jobs.read().await.values()
@@ -354,17 +357,9 @@ async fn refresh_lessons(
 
     tracing::info!("用户 {} 开始刷新课程 {} 的课节列表...", username, course_id);
 
-    // 先加载已有的课节数据
-    let existing_lessons = match lesson_storage::load_lessons(username, &course_id) {
-        Ok(lessons) => {
-            tracing::info!("已加载 {} 个现有课节", lessons.len());
-            lessons
-        }
-        Err(_) => {
-            tracing::info!("未找到现有课节数据");
-            Vec::new()
-        }
-    };
+    let existing_lessons = lesson_storage::load_lessons(&state.store, username, &course_id)
+        .await
+        .map_err(ApiError::Internal)?;
 
     let mut login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
         .map_err(|e| {
@@ -407,7 +402,7 @@ async fn refresh_lessons(
 
     lesson_storage::init_course_dir(username, &course_id)
         .map_err(|e| ApiError::Internal(format!("创建课节目录失败: {}", e)))?;
-    lesson_storage::save_ordered_lessons(username, &course_id, &existing_lessons, &mut all_lessons)
+    lesson_storage::save_ordered_lessons(&state.store, username, &course_id, &existing_lessons, &mut all_lessons).await
         .map_err(|e| {
             tracing::error!("保存课节信息失败: {}", e);
             ApiError::Internal(format!("保存课节信息失败: {}", e))
@@ -520,7 +515,7 @@ async fn refresh_courses(
         },
     ).await.map_err(ApiError::Internal)?;
 
-    course_storage::save_courses(username, &courses)
+    course_storage::save_courses(&state.store, username, &courses).await
         .map_err(|e| {
             tracing::error!("保存课程信息失败: {}", e);
             ApiError::Internal(format!("保存课程信息失败: {}", e))
@@ -546,7 +541,7 @@ async fn batch_submit(
     }
     let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
     let username = user.email.split('@').next().unwrap_or_default();
-    let lessons = lesson_storage::load_lessons(username, &req.course_id).map_err(ApiError::Internal)?;
+    let lessons = lesson_storage::load_lessons(&state.store, username, &req.course_id).await.map_err(ApiError::Internal)?;
     let requested: HashSet<_> = req.video_ids.into_iter().collect();
     if requested.iter().any(|id|!lessons.iter().any(|lesson|&lesson.id==id)) {
         return Err(ApiError::BadRequest("批量提交包含不存在的课节".into()));
@@ -598,7 +593,7 @@ async fn get_process_status(
     }
     drop(jobs);
     let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
-    let lessons = lesson_storage::load_lessons(user.email.split('@').next().unwrap_or_default(), &course_id).map_err(ApiError::Internal)?;
+    let lessons = lesson_storage::load_lessons(&state.store, user.email.split('@').next().unwrap_or_default(), &course_id).await.map_err(ApiError::Internal)?;
     let lesson = lessons.iter().find(|l|l.id == video_id).ok_or_else(||ApiError::BadRequest("课节不存在".into()))?;
     Ok(Json(serde_json::json!({"status":if lesson.is_processed {"completed"} else {"idle"}})))
 }
@@ -621,7 +616,7 @@ async fn download_lesson_pdf(
     })?;
 
     // 加载课节信息
-    let lessons = lesson_storage::load_lessons(username, &course_id)
+    let lessons = lesson_storage::load_lessons(&state.store, username, &course_id).await
         .map_err(|e| {
             tracing::error!("加载课节信息失败: {}", e);
             ApiError::Internal(format!("加载课节信息失败: {}", e))
@@ -777,7 +772,7 @@ async fn download_course_pdf(
     })?;
 
     // 加载课节信息
-    let lessons = lesson_storage::load_lessons(username, &course_id)
+    let lessons = lesson_storage::load_lessons(&state.store, username, &course_id).await
         .map_err(|e| {
             tracing::error!("加载课节信息失败: {}", e);
             ApiError::Internal(format!("加载课节信息失败: {}", e))
@@ -796,7 +791,7 @@ async fn download_course_pdf(
     }
 
     // 获取课程信息
-    let courses = course_storage::load_courses(username)
+    let courses = course_storage::load_courses(&state.store, username).await
         .map_err(|e| {
             tracing::error!("加载课程信息失败: {}", e);
             ApiError::Internal(format!("加载课程信息失败: {}", e))
@@ -1020,7 +1015,7 @@ async fn download_lesson_tex(
     })?;
 
     // 加载课节信息
-    let lessons = lesson_storage::load_lessons(username, &course_id)
+    let lessons = lesson_storage::load_lessons(&state.store, username, &course_id).await
         .map_err(|e| {
             tracing::error!("加载课节信息失败: {}", e);
             ApiError::Internal(format!("加载课节信息失败: {}", e))
@@ -1081,7 +1076,7 @@ async fn reprocess_lesson(
     })?;
 
     // 加载课节信息
-    let mut lessons = lesson_storage::load_lessons(username, &course_id)
+    let mut lessons = lesson_storage::load_lessons(&state.store, username, &course_id).await
         .map_err(|e| {
             tracing::error!("加载课节信息失败: {}", e);
             ApiError::Internal(format!("加载课节信息失败: {}", e))
@@ -1098,7 +1093,7 @@ async fn reprocess_lesson(
     lessons[lesson_index].is_processed = false;
 
     // 保存更新后的课节信息
-    lesson_storage::save_ordered_lessons(username, &course_id, &old_lessons, &mut lessons)
+    lesson_storage::save_ordered_lessons(&state.store, username, &course_id, &old_lessons, &mut lessons).await
         .map_err(|e| {
             tracing::error!("保存课节信息失败: {}", e);
             ApiError::Internal(format!("保存课节信息失败: {}", e))

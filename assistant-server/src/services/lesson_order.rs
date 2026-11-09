@@ -1,14 +1,15 @@
 //! Ordered note filenames, with collision-free moves and crash recovery.
 use super::lesson_storage::LessonInfo;
+use crate::store::FileStore;
+use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Component, Path},
-    sync::Mutex,
 };
 
-pub(super) static STORAGE_LOCK: Mutex<()> = Mutex::new(());
+pub(super) static STORAGE_LOCK: Mutex<()> = Mutex::const_new(());
 const TRANSACTION: &str = ".lesson-order";
 
 #[derive(Serialize, Deserialize)]
@@ -61,7 +62,7 @@ fn cleanup(dir: &Path, journal: &Journal) -> Result<(), String> {
 }
 
 // Called under STORAGE_LOCK, including when loading after a server restart.
-pub(super) fn recover(dir: &Path) -> Result<(), String> {
+pub(super) async fn recover(store: &FileStore, dir: &Path) -> Result<(), String> {
     let transaction = dir.join(TRANSACTION);
     if !transaction.exists() {
         return Ok(());
@@ -82,9 +83,18 @@ pub(super) fn recover(dir: &Path) -> Result<(), String> {
             single_filename(target)?;
         }
     }
+    let index_path = dir.join("index.json");
+    let current = match store.stored_sidecar(&index_path).await? {
+        Some(index) => Some(index),
+        None => match fs::read_to_string(&index_path) {
+            Ok(index) => Some(index),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        },
+    };
     if journal.committed
         || (journal.previous_index.as_deref() != Some(journal.index.as_str())
-            && fs::read(dir.join("index.json")).ok().as_deref() == Some(journal.index.as_bytes()))
+            && current.as_deref() == Some(journal.index.as_str()))
     {
         return cleanup(dir, &journal);
     }
@@ -117,16 +127,17 @@ pub(super) fn recover(dir: &Path) -> Result<(), String> {
     fs::remove_dir_all(transaction).map_err(|e| e.to_string())
 }
 
-pub(super) fn reconcile(
+pub(super) async fn reconcile(
+    store: &FileStore,
     dir: &Path,
     course_id: &str,
     old: &[LessonInfo],
     new: &mut Vec<LessonInfo>,
 ) -> Result<(), String> {
-    let _guard = STORAGE_LOCK.lock().map_err(|_| "课节存储锁异常")?;
+    let _guard = STORAGE_LOCK.lock().await;
     single_filename(course_id)?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    recover(dir)?;
+    recover(store, dir).await?;
     let mut ordered = new.clone();
     super::lesson_parser::sort_lessons(&mut ordered);
     let mut identities = HashSet::new();
@@ -206,14 +217,18 @@ pub(super) fn reconcile(
     if ordered.len() > old.len() {
         moves.reverse();
     }
+    let index_path = dir.join("index.json");
     if moves.is_empty() {
-        super::lesson_storage::atomic_write(&dir.join("index.json"), index.as_bytes())?;
+        store.save_sidecar(&index_path, &index).await?;
         *new = ordered;
         return Ok(());
     }
+    // Import the old index before any note moves so recovery can compare
+    // the exact database payload on either side of the commit.
+    let _: Option<Vec<LessonInfo>> = store.load_sidecar(&index_path).await?;
+    let previous_index = store.stored_sidecar(&index_path).await?;
     let transaction = dir.join(TRANSACTION);
     fs::create_dir(&transaction).map_err(|e| e.to_string())?;
-    let previous_index = fs::read_to_string(dir.join("index.json")).ok();
     let mut journal = Journal {
         publishing: false,
         restoring: false,
@@ -223,7 +238,7 @@ pub(super) fn reconcile(
         index,
         moves,
     };
-    let result = (|| -> Result<(), String> {
+    let result = async {
         super::lesson_storage::atomic_write(
             &transaction.join("journal.json"),
             &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
@@ -249,16 +264,16 @@ pub(super) fn reconcile(
                     .map_err(|e| format!("重命名课节笔记失败: {e}"))?;
             }
         }
-        super::lesson_storage::atomic_write(&dir.join("index.json"), journal.index.as_bytes())?;
+        store.save_sidecar(&index_path, &journal.index).await?;
         journal.committed = true;
         super::lesson_storage::atomic_write(
             &transaction.join("journal.json"),
             &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
         )?;
-        Ok(())
-    })();
+        Ok::<_, String>(())
+    }.await;
     if let Err(error) = result {
-        return match recover(dir) {
+        return match recover(store, dir).await {
             Ok(()) => Err(error),
             Err(recovery) => Err(format!("{error}；{recovery}，请保留恢复记录")),
         };
@@ -307,7 +322,7 @@ mod tests {
         .unwrap();
         (temp, lessons)
     }
-    fn verify(dir: &Path, lessons: &[LessonInfo]) {
+    async fn verify(store: &FileStore, dir: &Path, lessons: &[LessonInfo]) {
         for (i, l) in lessons.iter().enumerate() {
             if let Some(name) = &l.tex_filename {
                 assert_eq!(name, &filename("c", i + 1));
@@ -316,38 +331,42 @@ mod tests {
             }
         }
         let saved: Vec<LessonInfo> =
-            serde_json::from_slice(&fs::read(dir.join("index.json")).unwrap()).unwrap();
+            store.load_sidecar(&dir.join("index.json")).await.unwrap().unwrap();
         assert_eq!(
             serde_json::to_value(saved).unwrap(),
             serde_json::to_value(lessons).unwrap()
         );
     }
-    #[test]
-    fn inserted_lessons_shift_existing_notes_backwards_without_overwriting() {
+    #[tokio::test]
+    async fn inserted_lessons_shift_existing_notes_backwards_without_overwriting() {
+        let db = tempdir::TempDir::new_in("target", "lesson-order-db").unwrap();
+        let store = FileStore::new(db.path().into()).await.unwrap();
         let (temp, old) = setup(3);
         let mut new = old.clone();
         let mut inserted = lesson("new", 1, false);
         inserted.date = "2025-12-31".into();
         new.push(inserted);
-        reconcile(temp.path(), "c", &old, &mut new).unwrap();
+        reconcile(&store, temp.path(), "c", &old, &mut new).await.unwrap();
         assert_eq!(
             new.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
             ["new", "id1", "id2", "id3"]
         );
-        verify(temp.path(), &new);
+        verify(&store, temp.path(), &new).await;
         assert!(!temp.path().join(filename("c", 1)).exists());
         // Repeating an identical refresh must not move or duplicate any file.
         let old = new.clone();
-        reconcile(temp.path(), "c", &old, &mut new).unwrap();
-        verify(temp.path(), &new);
+        reconcile(&store, temp.path(), "c", &old, &mut new).await.unwrap();
+        verify(&store, temp.path(), &new).await;
         assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 4);
     }
-    #[test]
-    fn removed_lessons_shift_notes_forwards_and_preserve_removed_content() {
+    #[tokio::test]
+    async fn removed_lessons_shift_notes_forwards_and_preserve_removed_content() {
+        let db = tempdir::TempDir::new_in("target", "lesson-order-db").unwrap();
+        let store = FileStore::new(db.path().into()).await.unwrap();
         let (temp, old) = setup(4);
         let mut new = vec![old[1].clone(), old[3].clone()];
-        reconcile(temp.path(), "c", &old, &mut new).unwrap();
-        verify(temp.path(), &new);
+        reconcile(&store, temp.path(), "c", &old, &mut new).await.unwrap();
+        verify(&store, temp.path(), &new).await;
         assert_eq!(new[0].id, "id2");
         assert_eq!(new[1].id, "id4");
         assert!(!temp.path().join(filename("c", 3)).exists());
@@ -367,13 +386,15 @@ mod tests {
             "id3"
         );
     }
-    #[test]
-    fn same_count_reordering_and_legacy_names_are_collision_free() {
+    #[tokio::test]
+    async fn same_count_reordering_and_legacy_names_are_collision_free() {
+        let db = tempdir::TempDir::new_in("target", "lesson-order-db").unwrap();
+        let store = FileStore::new(db.path().into()).await.unwrap();
         let (temp, old) = setup(3);
         let mut new = old.clone();
         new[2].date = "2025-12-31".into();
-        reconcile(temp.path(), "c", &old, &mut new).unwrap();
-        verify(temp.path(), &new);
+        reconcile(&store, temp.path(), "c", &old, &mut new).await.unwrap();
+        verify(&store, temp.path(), &new).await;
         assert_eq!(
             new.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
             ["id3", "id1", "id2"]
@@ -384,17 +405,19 @@ mod tests {
         fs::rename(temp.path().join(old_name), temp.path().join(legacy_name)).unwrap();
         legacy[1].tex_filename = Some(legacy_name.into());
         let mut repaired = legacy.clone();
-        reconcile(temp.path(), "c", &legacy, &mut repaired).unwrap();
-        verify(temp.path(), &repaired);
+        reconcile(&store, temp.path(), "c", &legacy, &mut repaired).await.unwrap();
+        verify(&store, temp.path(), &repaired).await;
     }
-    #[test]
-    fn unknown_destination_is_not_overwritten() {
+    #[tokio::test]
+    async fn unknown_destination_is_not_overwritten() {
+        let db = tempdir::TempDir::new_in("target", "lesson-order-db").unwrap();
+        let store = FileStore::new(db.path().into()).await.unwrap();
         let (temp, old) = setup(1);
         fs::write(temp.path().join(filename("c", 2)), "unrelated").unwrap();
         let mut new = vec![lesson("new", 1, false), old[0].clone()];
         new[0].date = "2025-12-31".into();
         let before = fs::read(temp.path().join("index.json")).unwrap();
-        assert!(reconcile(temp.path(), "c", &old, &mut new).is_err());
+        assert!(reconcile(&store, temp.path(), "c", &old, &mut new).await.is_err());
         assert_eq!(fs::read(temp.path().join("index.json")).unwrap(), before);
         assert_eq!(
             fs::read_to_string(temp.path().join(filename("c", 1))).unwrap(),
@@ -447,28 +470,32 @@ mod tests {
         }
         (temp, old)
     }
-    #[test]
-    fn interrupted_publishing_and_interrupted_rollback_restore_original_files() {
-        let _guard = STORAGE_LOCK.lock().unwrap();
+    #[tokio::test]
+    async fn interrupted_publishing_and_interrupted_rollback_restore_original_files() {
+        let db = tempdir::TempDir::new_in("target", "lesson-order-db").unwrap();
+        let store = FileStore::new(db.path().into()).await.unwrap();
+        let _guard = STORAGE_LOCK.lock().await;
         for restoring in [false, true] {
             let (temp, old) = interrupted_fixture(restoring);
-            recover(temp.path()).unwrap();
-            verify(temp.path(), &old);
+            recover(&store, temp.path()).await.unwrap();
+            verify(&store, temp.path(), &old).await;
             assert!(!temp.path().join(TRANSACTION).exists());
         }
     }
-    #[test]
-    fn committed_index_finishes_cleanup_instead_of_rolling_back() {
-        let _guard = STORAGE_LOCK.lock().unwrap();
+    #[tokio::test]
+    async fn committed_index_finishes_cleanup_instead_of_rolling_back() {
+        let db = tempdir::TempDir::new_in("target", "lesson-order-db").unwrap();
+        let store = FileStore::new(db.path().into()).await.unwrap();
+        let _guard = STORAGE_LOCK.lock().await;
         let (temp, _old) = interrupted_fixture(false);
         let tx = temp.path().join(TRANSACTION);
         let journal: Journal =
             serde_json::from_slice(&fs::read(tx.join("journal.json")).unwrap()).unwrap();
         fs::rename(tx.join("1.tex"), temp.path().join(filename("c", 3))).unwrap();
-        fs::write(temp.path().join("index.json"), &journal.index).unwrap();
-        recover(temp.path()).unwrap();
+        store.save_sidecar(&temp.path().join("index.json"), &journal.index).await.unwrap();
+        recover(&store, temp.path()).await.unwrap();
         let new: Vec<LessonInfo> = serde_json::from_str(&journal.index).unwrap();
-        verify(temp.path(), &new);
+        verify(&store, temp.path(), &new).await;
         assert!(!tx.exists());
     }
 }

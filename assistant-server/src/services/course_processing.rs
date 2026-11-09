@@ -29,12 +29,13 @@ pub async fn complete_lesson(
     let mutation = state.lesson_mutation(user_id).await;
     let _guard = mutation.lock().await;
     lesson_storage::install_lesson_notes(
+        &state.store,
         username,
         course_id,
         lesson_id,
         &PathBuf::from("./data/pkuvideo_jobs").join(notes),
-    )?;
-    let lessons = lesson_storage::load_lessons(username, course_id)?;
+    ).await?;
+    let lessons = lesson_storage::load_lessons(&state.store, username, course_id).await?;
     let filename = lessons
         .iter()
         .find(|lesson| lesson.id == lesson_id)

@@ -1,3 +1,5 @@
+use crate::store::FileStore;
+use std::sync::Arc;
 use super::{app_replay::ManualReplay, app_replay_auth::AppAuth};
 use md5::{Digest, Md5};
 use reqwest::{Client, Url};
@@ -13,7 +15,7 @@ pub struct AppReplayClient {
     api_client: Client,
     user_agent: String,
     user: Option<Value>,
-    user_id: Option<uuid::Uuid>,
+    persistence: Option<(Arc<FileStore>, uuid::Uuid)>,
     invalid_session: std::sync::atomic::AtomicBool,
     bound_user: Option<crate::store::FileUser>,
 }
@@ -22,13 +24,13 @@ impl AppReplayClient {
     pub async fn start() -> Result<Self, String> {
         Self::with_user_agent(super::user_agents::choose_app("./user_agents.txt.gz")?)
     }
-    pub async fn for_user(user_id: uuid::Uuid) -> Result<Self, String> {
-        let saved = super::app_replay_vault::load::<Value>(user_id, "session")?;
+    pub async fn for_user(store: Arc<FileStore>, user_id: uuid::Uuid) -> Result<Self, String> {
+        let saved = super::app_replay_vault::load::<Value>(&store, user_id, "session").await?;
         let saved_ua=saved.as_ref().and_then(|session|session["user_agent"].as_str());
         let reusable=match saved_ua {Some(ua)=>super::user_agents::valid_header(ua),None=>false};
         let ua=if reusable {saved_ua.unwrap().to_string()} else {super::user_agents::choose_app("./user_agents.txt.gz")?};
         let mut client = Self::with_user_agent(ua)?;
-        client.user_id = Some(user_id);
+        client.persistence = Some((store, user_id));
         if let Some(saved) = saved.filter(|_|reusable) {
             if saved["user"]["_token"]
                 .as_str()
@@ -40,16 +42,24 @@ impl AppReplayClient {
         }
         Ok(client)
     }
-    fn persist_session(&self) -> Result<(), String> {
-        if let Some(user_id) = self.user_id {
+    async fn persist_session(&self) -> Result<(), String> {
+        if let Some((store, user_id)) = &self.persistence {
             super::app_replay_vault::save(
-                user_id,
+                store,
+                *user_id,
                 "session",
                 &json!({"user":self.user,"user_agent":self.user_agent}),
-            )?;
+            ).await?;
         }
         Ok(())
     }
+    async fn remove_session(&self) -> Result<(), String> {
+        if let Some((store, id)) = &self.persistence {
+            super::app_replay_vault::remove(store, *id, "session").await?;
+        }
+        Ok(())
+    }
+
     pub async fn login_bound(
         &mut self,
         user: &crate::store::FileUser,
@@ -63,7 +73,10 @@ impl AppReplayClient {
         {
             return Ok(json!({"ok":true,"data":{"logged_in":true}}));
         }
-        let credential = super::app_replay_vault::load::<Value>(user.id, "binding")?;
+        let credential = match &self.persistence {
+            Some((store, _)) => super::app_replay_vault::load::<Value>(store, user.id, "binding").await?,
+            None => None,
+        };
         let mut request = json!({"action":"login","account":user.email.split('@').next().unwrap_or_default(),
             "encrypted_password":user.iaaa_encrypted_password,"stored_public_key":user.iaaa_public_key});
         if let Some(credential) = credential {
@@ -91,7 +104,7 @@ impl AppReplayClient {
             api_client,
             user_agent,
             user: None,
-            user_id: None,
+            persistence: None,
             invalid_session: std::sync::atomic::AtomicBool::new(false),
             bound_user: None,
         })
@@ -108,7 +121,7 @@ impl AppReplayClient {
                     self.user = Some(user);
                     self.invalid_session
                         .store(false, std::sync::atomic::Ordering::Relaxed);
-                    self.persist_session().map(|_| json!({"logged_in":true}))
+                    self.persist_session().await.map(|_| json!({"logged_in":true}))
                 }
                 Err(error) => Err(error),
             },
@@ -121,9 +134,7 @@ impl AppReplayClient {
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
             self.user = None;
-            if let Some(id) = self.user_id {
-                super::app_replay_vault::remove(id, "session")?;
-            }
+            self.remove_session().await?;
         }
         if let Err(error) = &result {
             tracing::error!(target:"app_replay_auth",action=request["action"].as_str().unwrap_or("unknown"),error=%error,"App request failed");
@@ -333,9 +344,7 @@ impl AppReplayClient {
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
             self.user = None;
-            if let Some(id) = self.user_id {
-                super::app_replay_vault::remove(id, "session")?;
-            }
+            self.remove_session().await?;
             tracing::warn!(target:"app_replay_auth","persistent App session expired; reauthenticating once");
             let user = self
                 .bound_user
@@ -387,7 +396,7 @@ impl AppReplayClient {
             let expired=self.invalid_session.swap(false,std::sync::atomic::Ordering::Relaxed);
             if expired && attempt==0 {
                 self.user=None;
-                if let Some(id)=self.user_id {super::app_replay_vault::remove(id,"session")?;}
+                self.remove_session().await?;
                 tracing::warn!(target:"app_replay_auth","回退获取发现 App 会话过期，重新认证一次");
                 let status=self.login_bound(user,&json!({})).await?;
                 if status["data"]["logged_in"]!=true {

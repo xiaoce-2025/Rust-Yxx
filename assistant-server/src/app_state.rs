@@ -60,7 +60,7 @@ impl AppState {
     pub async fn app_replay_client(&self, user_id: Uuid) -> Result<Arc<tokio::sync::Mutex<crate::services::app_replay::AppReplayClient>>, String> {
         let mut clients = self.app_replay_clients.lock().await;
         if let Some(client) = clients.get(&user_id) { return Ok(client.clone()); }
-        let client = Arc::new(tokio::sync::Mutex::new(crate::services::app_replay::AppReplayClient::for_user(user_id).await?));
+        let client = Arc::new(tokio::sync::Mutex::new(crate::services::app_replay::AppReplayClient::for_user(self.store.clone(), user_id).await?));
         clients.insert(user_id, client.clone());
         Ok(client)
     }

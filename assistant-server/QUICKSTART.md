@@ -2,9 +2,9 @@
 
 ## 项目概览
 
-这是一个用 **Rust + Axum** 框架实现的智能助手服务器，采用**文件存储**（无需数据库）架构。
+这是一个用 **Rust + Axum** 框架实现的智能助手服务器，使用内嵌 SQLite 保存业务数据。
 
-- ✅ **无数据库依赖** - 使用文件存储 (JSON)
+- ✅ **内嵌 SQLite** - 随服务启动，无需单独部署数据库
 - ✅ **完整的用户认证系统** - 支持注册、登录、登出
 - ✅ **对话管理** - 创建和管理多个对话
 - ✅ **用户设置** - 自定义模型和界面配置
@@ -106,14 +106,8 @@ cargo build --release
 # 查看所有数据文件
 ls data/
 
-# 查看用户列表
-type data\users.json | ConvertFrom-Json
-
-# 查看活跃会话
-type data\sessions.json | ConvertFrom-Json
-
-# 清除所有数据（谨慎！）
-rm data\*.json
+# 查看数据库中保存的数据集合
+sqlite3 data/assistant.sqlite3 "SELECT name FROM collections ORDER BY name;"
 ```
 
 ---
@@ -209,18 +203,7 @@ Write-Host "✓ 主题: $($settings.theme)"
 
 ## 数据文件说明
 
-所有数据存储在 `data/` 目录（JSON 格式）：
-
-| 文件 | 内容 | 说明 |
-|------|------|------|
-| `data/users.json` | 用户账户数据 | 包含用户名、邮箱、密码哈希 |
-| `data/sessions.json` | 活跃会话 | 包含 token、过期时间、用户关联 |
-| `data/conversations.json` | 对话记录 | 包含对话 ID、标题、时间戳 |
-| `data/messages.json` | 消息历史 | 包含消息内容、角色、时间戳 |
-| `data/user_configs.json` | 用户设置 | 包含模型、主题、API 密钥 |
-| `data/wechat_bindings.json` | WeChat 绑定 | 包含 OpenID、昵称、头像 |
-
----
+业务数据保存在 `data/assistant.sqlite3`，讲义、TeX、PDF 和视频仍在原有目录。升级与备份步骤见 [服务说明](README.md#数据迁移与备份)。
 
 ## 常见问题
 
@@ -280,7 +263,7 @@ cargo build
 assistant-server/
 ├── src/
 │   ├── main.rs              # 应用入口
-│   ├── store.rs             # 文件存储实现 (关键!)
+│   ├── store.rs             # SQLite 存储实现
 │   ├── app_state.rs         # 应用状态
 │   ├── auth.rs              # 认证逻辑
 │   ├── config.rs            # 配置管理
@@ -289,7 +272,7 @@ assistant-server/
 │   ├── routes/              # API 路由
 │   ├── services/            # 业务服务
 │   └── plugins/             # 消息处理插件
-├── data/                    # 数据存储 (JSON 文件)
+├── data/                    # 数据库和其他服务数据
 ├── config/                  # 配置文件
 ├── Cargo.toml              # Rust 依赖配置
 ├── test-api.ps1            # API 测试脚本 ⭐
@@ -307,14 +290,13 @@ assistant-server/
 
 1. 查看 [COMMANDS.md](COMMANDS.md) - 全面的命令参考
 2. 查看 [README.md](README.md) - 项目详细说明
-3. 阅读源码 - 理解文件存储的实现
+3. 阅读源码 - 理解 SQLite 存储的实现
 
 ### 扩展功能
 
 1. **实现完整的对话功能** - 查看 `src/routes/conversations.rs`
 2. **添加 WeChat 消息处理** - 查看 `src/routes/wechat.rs`
 3. **自定义插件** - 添加到 `src/plugins/`
-4. **数据库迁移** - 如果需要可以添加 PostgreSQL 支持
 
 ### 部署应用
 
@@ -438,7 +420,7 @@ GET    /health                   - 服务健康状态
 
 ✅ **立即开始**：运行 `cargo run` 然后 `.\test-api.ps1`
 
-✅ **查看日志**：`data/` 目录下的 JSON 文件包含所有数据
+✅ **查看日志**：在服务终端查看启动、迁移和任务日志
 
 ✅ **修改配置**：编辑 `config/development.toml` 
 

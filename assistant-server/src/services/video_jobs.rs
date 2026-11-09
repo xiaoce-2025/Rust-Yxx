@@ -341,7 +341,7 @@ mod tests {
             "day_of_week":"","is_processed":false,"tex_filename":null
         }]))
         .unwrap();
-        lesson_storage::save_lessons(&username, "course", &lessons).unwrap();
+        lesson_storage::save_lessons(&state.store, &username, "course", &lessons).await.unwrap();
         let artifacts = temp.path().join("artifacts");
         std::fs::create_dir_all(&artifacts).unwrap();
         let notes = artifacts.join("notes.tex");
@@ -386,7 +386,7 @@ mod tests {
             "generated notes"
         );
         assert!(!artifacts.exists());
-        assert!(lesson_storage::load_lessons(&username, "course").unwrap()[0].is_processed);
+        assert!(lesson_storage::load_lessons(&state.store, &username, "course").await.unwrap()[0].is_processed);
         assert!(!state.course_busy(user, "course").await);
     }
 

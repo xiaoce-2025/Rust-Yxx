@@ -76,6 +76,7 @@ fn resume_legacy_alignment(job: &mut TranslationJob) -> bool {
 }
 
 pub struct Entry {
+    store: Arc<crate::store::FileStore>,
     pub job: Mutex<TranslationJob>,
     task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -116,7 +117,8 @@ pub async fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
 async fn save(entry: &Entry) -> Result<(), String> {
     let mut job = entry.job.lock().await;
     job.updated_at = Utc::now();
-    atomic_json(&dir(job.id).join("manifest.json"), &*job).await
+    let payload = serde_json::to_string(&*job).map_err(|error| error.to_string())?;
+    entry.store.save_sidecar(&dir(job.id).join("manifest.json"), &payload).await
 }
 
 async fn stage(entry: &Entry, name: &str) -> Result<(), String> {
@@ -228,6 +230,7 @@ pub async fn start(state: &AppState, id: Uuid, retry: bool) -> Result<Translatio
                 .await
                 .map_err(|e| e.to_string())?;
             let entry = Arc::new(Entry {
+                store: state.store.clone(),
                 job: Mutex::new(job),
                 task: Mutex::new(None),
             });
@@ -322,19 +325,27 @@ async fn launch(state: AppState, entry: Arc<Entry>) {
 
 pub async fn restore(state: &AppState) -> Result<(), String> {
     fs::create_dir_all(ROOT).await.map_err(|e| e.to_string())?;
+    let mut ids: std::collections::HashSet<Uuid> = state
+        .store
+        .sidecar_paths_under(Path::new(ROOT))
+        .await?
+        .iter()
+        .filter_map(|path| path.strip_suffix("/manifest.json")?.parse().ok())
+        .collect();
     let mut dirs = fs::read_dir(ROOT).await.map_err(|e| e.to_string())?;
     while let Some(item) = dirs.next_entry().await.map_err(|e| e.to_string())? {
-        let Ok(id) = Uuid::parse_str(&item.file_name().to_string_lossy()) else {
-            continue;
-        };
-        let bytes = match fs::read(item.path().join("manifest.json")).await {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let mut job: TranslationJob = match serde_json::from_slice(&bytes) {
-            Ok(job) => job,
+        if let Ok(id) = Uuid::parse_str(&item.file_name().to_string_lossy()) {
+            if item.file_type().await.map_err(|e| e.to_string())?.is_dir() {
+                ids.insert(id);
+            }
+        }
+    }
+    for id in ids {
+        let mut job: TranslationJob = match state.store.load_sidecar(&dir(id).join("manifest.json")).await {
+            Ok(Some(job)) => job,
+            Ok(None) => continue,
             Err(error) => {
-                tracing::error!(%id, %error, "翻译清单损坏，保留文件供恢复");
+                tracing::error!(%id, %error, "读取翻译断点失败");
                 continue;
             }
         };
@@ -361,6 +372,7 @@ pub async fn restore(state: &AppState) -> Result<(), String> {
         tracing::info!(target: "video_translation", job_id=%id, status=%job.status, resume, deleting,
             completed_blocks=job.blocks.iter().filter(|b| b.done).count(), total_blocks=job.blocks.len(), "已加载翻译任务断点");
         let entry = Arc::new(Entry {
+            store: state.store.clone(),
             job: Mutex::new(job),
             task: Mutex::new(None),
         });
@@ -415,6 +427,7 @@ pub async fn finish_remove(state: &AppState, id: Uuid) -> Result<(), String> {
             }
         }
     }
+    state.store.delete_sidecar(&target.join("manifest.json")).await?;
     state.video_translations.entries.lock().await.remove(&id);
     tracing::info!(target: "video_translation", job_id=%id, "翻译任务文件与缓存清理完成");
     Ok(())
@@ -424,6 +437,7 @@ async fn run(state: &AppState, entry: &Entry) -> Result<(), String> {
     let snapshot = entry.job.lock().await.clone();
     let id = snapshot.id;
     let root = dir(id);
+    fs::create_dir_all(&root).await.map_err(|e| e.to_string())?;
     let source = state
         .pkuvideo_fw_jobs
         .read()
@@ -852,6 +866,7 @@ mod tests {
         let mut job = test_job(id);
         job.status = "running".into();
         let entry = Arc::new(Entry {
+            store: state.store.clone(),
             job: Mutex::new(job),
             task: Mutex::new(None),
         });
@@ -901,6 +916,7 @@ mod tests {
         });
         rx.await.unwrap();
         let entry = Arc::new(Entry {
+            store: state.store.clone(),
             job: Mutex::new(test_job(id)),
             task: Mutex::new(Some(task)),
         });
@@ -914,8 +930,7 @@ mod tests {
         remove(&state, id).await.unwrap();
         assert!(dropped.load(Ordering::SeqCst));
         let tombstone: TranslationJob =
-            serde_json::from_slice(&fs::read(dir(id).join("manifest.json")).await.unwrap())
-                .unwrap();
+            state.store.load_sidecar(&dir(id).join("manifest.json")).await.unwrap().unwrap();
         assert_eq!(tombstone.status, "deleting");
         assert!(dir(id).exists());
         finish_remove(&state, id).await.unwrap();
