@@ -47,11 +47,9 @@
       position: absolute;
       inset: 0 0 0 auto;
       width: 53%;
-      height: 280px;
-      object-fit: cover;
-      object-position: center 33%;
-      transform: scaleY(.685);
-      transform-origin: top;
+      height: 100%;
+      object-fit: contain;
+      object-position: right center;
     }
     .hero-copy {
       position: relative;
@@ -71,8 +69,8 @@
     .workspace {
       display: grid;
       grid-template-columns: minmax(240px, 23%) minmax(0, 1fr);
-      gap: clamp(16px, 2.3vw, 38px);
-      padding: 32px clamp(16px, 2.2vw, 36px) 40px;
+      gap: clamp(12px, 1.6vw, 28px);
+      padding: 16px clamp(16px, 2.2vw, 36px) 40px;
     }
     .course-panel {
       padding: 16px 14px 24px;
@@ -81,7 +79,8 @@
       min-width: 0;
     }
     .course-panel h2, .section-title { margin: 0; font-size: clamp(17px, 1.35vw, 21px); font-weight: 600; line-height: 1.3; }
-    .course-panel h2 { display: flex; align-items: center; gap: 12px; margin: 0 8px 18px; }
+    .course-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 8px 18px; }
+    .course-panel h2 { display: flex; align-items: center; gap: 12px; }
     .course-panel h2 .icon, .section-heading > .icon { color: var(--accent); font-size: 22px; }
     .course-filters { display: grid; gap: 10px; margin: 0 8px 14px; }
     .search-box { position: relative; }
@@ -114,6 +113,7 @@
     .course-item:hover:not(:disabled), .course-item[aria-pressed="true"] { background: #fce5e5; }
     .course-item[aria-pressed="true"] { color: var(--accent); }
     .course-item[aria-pressed="true"] > .icon { color: inherit; }
+    .course-name { font-weight: 600; }
     .course-info { display: block; font-size: 13px; color: var(--muted); }
     .section-header {
       display: flex;
@@ -126,11 +126,9 @@
     }
     .section-heading { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
     .section-title { overflow-wrap: anywhere; }
-    .section-meta { display: flex; align-items: center; gap: 6px; min-height: 24px; }
-    #refreshLessonsBtn { padding: 3px; color: var(--accent); border: 0; background: transparent; line-height: 1; }
-    #refreshLessonsBtn:hover:not(:disabled) { background: #fce5e5; }
+    #lessonSectionTerm { margin-top: 4px; }
     .toolbar, .lesson-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; }
-    .toolbar button, .lesson-actions button {
+    .course-panel-heading button, .toolbar button, .lesson-actions button {
       display: inline-flex;
       align-items: center;
       gap: 8px;
@@ -138,9 +136,10 @@
       font-size: 13px;
     }
     .toolbar button[hidden] { display: none; }
-    .toolbar button.ghost, .lesson-actions button.ghost { background: transparent; border: 0; }
-    .toolbar button.ghost:hover:not(:disabled), .lesson-actions button:hover:not(:disabled) { background: #fce5e5; }
-    .toolbar .ghost .icon, .lesson-actions .icon, .lesson-item > .icon, #downloadAllBtn { color: var(--accent); }
+    .course-panel-heading button.ghost, .toolbar button.ghost, .lesson-actions button.ghost { background: transparent; border: 0; }
+    .course-panel-heading button:hover:not(:disabled), .toolbar button.ghost:hover:not(:disabled), .lesson-actions button:hover:not(:disabled) { background: #fce5e5; }
+    .course-panel-heading button.ghost, .toolbar .ghost .icon, .lesson-actions .icon, .lesson-item > .icon, #downloadAllBtn { color: var(--accent); }
+    #processAllBtn, #downloadAllBtn { font-weight: 600; }
     .status { margin-top: 10px; font-size: 14px; color: var(--muted); }
     .status:empty, .course-info:empty { display: none; }
     .status.error { color: var(--warn); }
@@ -171,14 +170,14 @@
     .lesson-item.processed { background: #f0f3eb; border-color: transparent; border-radius: 9px; }
     .lesson-datetime { min-width: clamp(118px, 10.5vw, 173px); }
     .lesson-date { font-size: 15px; font-weight: 600; }
-    .lesson-title { font-size: 14px; }
+    .lesson-title { font-size: 14px; font-weight: 600; }
     .lesson-time-row { display: flex; flex-wrap: wrap; gap: 0 16px; font-size: 13px; color: var(--muted); }
     .lesson-day { color: #286a21; }
     .lesson-info { display: flex; align-items: center; gap: 8px 20px; padding-left: clamp(12px, 2vw, 30px); border-left: 1px solid #cfc4c4; }
     .lesson-title { min-width: clamp(75px, 7vw, 118px); }
     .lesson-title .hint { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
     .lesson-status { display: inline-flex; align-items: center; gap: 4px; background: #eee9e9; color: #4d4141; border-radius: 20px; padding: 3px 10px; font-size: 12px; white-space: nowrap; }
-    .lesson-status.done { background: #def0d3; color: #24651b; }
+    .lesson-status.done { background: #def0d3; color: #24651b; font-weight: 600; }
     .lesson-actions { margin-left: auto; justify-content: flex-end; column-gap: clamp(8px, 2.6vw, 44px); padding-right: 12px; }
     @media (max-width: 960px) {
       .workspace { grid-template-columns: minmax(185px, 25%) minmax(0, 1fr); }
@@ -188,8 +187,8 @@
     @media (max-width: 640px) {
       .hero { min-height: auto; }
       .hero-copy { max-width: none; padding-bottom: 10px; }
-      .hero-art { position: static; order: 1; width: 100%; height: 140px; transform: none; }
-      .workspace { grid-template-columns: minmax(0, 1fr); padding-top: 16px; }
+      .hero-art { position: static; order: 1; width: 100%; height: auto; }
+      .workspace { grid-template-columns: minmax(0, 1fr); }
       .course-list { max-height: 240px; overflow: auto; }
       .lesson-datetime { min-width: 98px; }
       .lesson-info { padding-left: 0; border: 0; gap: 6px; }
@@ -282,7 +281,7 @@
   </svg>
   <main>
     <section class="hero" aria-labelledby="pageTitle">
-      <img class="hero-art" src="/home-hero-transparent.png" alt="学习路上，小希与你相伴。" />
+      <img class="hero-art" src="/course-replay-hero.webp" width="2172" height="391" alt="" />
       <div class="hero-copy">
         <div class="eyebrow"><svg class="icon" aria-hidden="true"><use href="#replay-icon-video"/></svg>课程回放批量处理</div>
         <h1 id="pageTitle">课程回放批量处理</h1>
@@ -292,7 +291,10 @@
 
     <div class="workspace">
       <aside class="course-panel" aria-labelledby="courseListTitle">
-        <h2 id="courseListTitle"><svg class="icon" aria-hidden="true"><use href="#replay-icon-layers"/></svg>课程列表</h2>
+        <div class="course-panel-heading">
+          <h2 id="courseListTitle"><svg class="icon" aria-hidden="true"><use href="#replay-icon-layers"/></svg>课程列表</h2>
+          <button id="refreshBtn" class="ghost small" aria-label="刷新课程列表"><svg class="icon" aria-hidden="true"><use href="#replay-icon-refresh"/></svg>刷新</button>
+        </div>
         <div class="course-filters">
           <label class="search-box">
             <svg class="icon" aria-hidden="true"><use href="#replay-icon-search"/></svg>
@@ -313,14 +315,11 @@
             <svg class="icon" aria-hidden="true"><use href="#replay-icon-book"/></svg>
             <div>
               <h2 class="section-title" id="lessonSectionTitle">课节列表</h2>
-              <div class="section-meta">
-                <span class="course-info" id="lessonSectionTerm"></span>
-                <button id="refreshLessonsBtn" class="ghost small" title="刷新课节列表" aria-label="刷新课节列表" hidden><svg class="icon" aria-hidden="true"><use href="#replay-icon-refresh"/></svg></button>
-              </div>
+              <div class="course-info" id="lessonSectionTerm"></div>
             </div>
           </div>
           <div class="toolbar">
-            <button id="refreshBtn" class="ghost small"><svg class="icon" aria-hidden="true"><use href="#replay-icon-refresh"/></svg>刷新课程列表</button>
+            <button id="refreshLessonsBtn" class="ghost small" hidden><svg class="icon" aria-hidden="true"><use href="#replay-icon-refresh"/></svg>刷新课节列表</button>
             <button id="manualAddBtn" class="ghost small" hidden><svg class="icon" aria-hidden="true"><use href="#replay-icon-plus"/></svg>手动添加课节</button>
             <button id="processAllBtn" hidden><svg class="icon" aria-hidden="true"><use href="#replay-icon-layers"/></svg>处理全部课节</button>
             <button id="downloadAllBtn" class="ghost small" hidden><svg class="icon" aria-hidden="true"><use href="#replay-icon-download"/></svg>下载完整PDF</button>
@@ -565,7 +564,7 @@
       courseListEl.innerHTML = filtered.map(course => `
         <button type="button" class="course-item" data-course-id="${esc(course.key)}" ${isProcessing ? 'disabled' : ''}>
           <svg class="icon" aria-hidden="true"><use href="#replay-icon-book"/></svg>
-          <span>${esc(course.name)}<span class="course-info">学期：${esc(course.term)}</span></span>
+          <span><span class="course-name">${esc(course.name)}</span><span class="course-info">学期：${esc(course.term)}</span></span>
         </button>
       `).join("");
       courseListEl.querySelectorAll(".course-item").forEach((item, index) => {
