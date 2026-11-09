@@ -4,185 +4,208 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>「严小希」小助手-课程回放批量处理</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400,600,800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --ink: #13241d;
-      --line: rgba(19,36,29,.18);
-      --accent: #0c7a57;
-      --warn: #982a3d;
+      --ink: #291718;
+      --muted: #5e5152;
+      --line: #eddadb;
+      --accent: #a90000;
+      --warn: #a02739;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      color: var(--ink);
-      font-family: "Manrope", "Segoe UI", sans-serif;
-      background:
-        radial-gradient(50rem 20rem at -10% -10%, rgba(181,91,35,.2), transparent 60%),
-        radial-gradient(60rem 26rem at 110% 110%, rgba(12,122,87,.2), transparent 60%),
-        #edf3ed;
       min-height: 100vh;
-      --site-page-inset: 20px;
-      padding: 0 var(--site-page-inset) var(--site-page-inset);
-    }
-    .wrap {
-      max-width: 960px;
-      margin: 0 auto;
-      border-radius: 20px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,.82);
-      backdrop-filter: blur(8px);
-      box-shadow: 0 18px 38px rgba(0,0,0,.1);
-      padding: 20px;
-    }
-    h1 {
-      margin: 0;
-      font-family: "Noto Serif SC", serif;
-      font-size: 30px;
-    }
-    .sub { margin-top: 6px; color: #4f645b; font-size: 13px; }
-    .toolbar { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
-    button {
-      border: 0;
-      border-radius: 12px;
-      padding: 10px 14px;
-      cursor: pointer;
-      font-weight: 700;
-      background: var(--accent);
-      color: #fff;
-    }
-    button.ghost {
-      color: var(--ink);
-      background: rgba(255,255,255,.8);
-      border: 1px solid var(--line);
-    }
-    button.small {
-      padding: 6px 10px;
-      font-size: 12px;
-      border-radius: 8px;
-    }
-    .card {
-      margin-top: 16px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: rgba(255,255,255,.7);
-      padding: 16px;
-    }
-    .course-list {
-      margin-top: 12px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      color: var(--ink);
+      font: 16px/1.45 "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+      background: #fcf7f7;
     }
-    .course-item {
-      border: 1px solid var(--line);
+    body .site-header { background: #fffafa; font-size: 15px; font-weight: 600; --site-header-height: 47px; }
+    body .site-header .site-header-inner { width: calc(100% - 2 * clamp(16px, 3.4vw, 56px)); }
+    main { flex: 1; }
+    .icon {
+      width: 1.25em;
+      height: 1.25em;
+      flex: none;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.7;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .hero {
+      position: relative;
+      display: grid;
+      align-items: center;
+      min-height: 191px;
+      background: linear-gradient(105deg, #fdf3f3, #f9e7e7);
+      overflow: hidden;
+    }
+    .hero-art {
+      position: absolute;
+      inset: 0 0 0 auto;
+      width: 53%;
+      height: 280px;
+      object-fit: cover;
+      object-position: center 33%;
+      transform: scaleY(.685);
+      transform-origin: top;
+    }
+    .hero-copy {
+      position: relative;
+      margin-inline: clamp(24px, 7.6vw, 126px);
+      padding: 24px 0;
+      max-width: 48%;
+    }
+    .eyebrow { display: flex; align-items: center; gap: 8px; color: var(--accent); font-weight: 700; }
+    .eyebrow .icon { font-size: 20px; }
+    h1 { margin: 8px 0 4px; font-size: clamp(32px, 3.2vw, 49px); line-height: 1.2; letter-spacing: .04em; }
+    .sub { margin: 0; color: var(--muted); }
+    button { border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font: inherit; font-weight: 700; background: var(--accent); color: white; }
+    button.ghost { color: var(--ink); background: #fffafa; border: 1px solid var(--line); }
+    button.small { padding: 6px 10px; font-size: 14px; }
+    button:disabled { opacity: .5; cursor: default; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(240px, 23%) minmax(0, 1fr);
+      gap: clamp(16px, 2.3vw, 38px);
+      padding: 32px clamp(16px, 2.2vw, 36px) 40px;
+    }
+    .course-panel {
+      padding: 16px 14px 24px;
+      background: linear-gradient(150deg, #fcf5f5, #fcf0f0);
       border-radius: 12px;
-      padding: 12px;
-      cursor: pointer;
-      background: #fff;
-      transition: all 0.2s;
+      min-width: 0;
     }
-    .course-item:hover {
-      border-color: var(--accent);
-      background: rgba(12,122,87,.05);
+    .course-panel h2, .section-title { margin: 0; font-size: clamp(20px, 1.65vw, 27px); line-height: 1.25; }
+    .course-panel h2 { display: flex; align-items: center; gap: 12px; margin: 0 8px 18px; }
+    .course-panel h2 .icon, .section-heading > .icon { color: var(--accent); font-size: 28px; }
+    .course-filters { display: grid; gap: 10px; margin: 0 8px 14px; }
+    .search-box { position: relative; }
+    .search-box .icon { position: absolute; top: 50%; left: 11px; transform: translateY(-50%); color: #623938; pointer-events: none; }
+    .course-filters input, .semester-select {
+      width: 100%;
+      min-width: 0;
+      padding: 7px 10px;
+      border-radius: 9px;
+      border: 1px solid #e6dcdc;
+      background: #fffafa;
+      color: var(--ink);
+      font: inherit;
     }
-    .course-item.selected {
-      border-color: var(--accent);
-      background: rgba(12,122,87,.1);
+    .course-filters input { padding-left: 39px; }
+    .course-list { display: grid; gap: 2px; }
+    .course-item {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      width: 100%;
+      padding: 8px 14px;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+      overflow-wrap: anywhere;
     }
-    .course-title {
-      font-weight: 600;
-      font-size: 14px;
+    .course-item > .icon { font-size: 19px; color: #663b39; }
+    .course-item:hover:not(:disabled), .course-item[aria-pressed="true"] { background: #fce5e5; }
+    .course-item[aria-pressed="true"] { color: var(--accent); }
+    .course-item[aria-pressed="true"] > .icon { color: inherit; }
+    .course-info { display: block; font-size: 14px; color: var(--muted); font-weight: 400; }
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px 20px;
+      padding: 16px 0 12px;
+      border-bottom: 1px solid var(--line);
     }
-    .course-info {
-      font-size: 12px;
-      color: #6b7280;
-      margin-top: 4px;
+    .section-heading { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
+    .section-title { overflow-wrap: anywhere; }
+    .section-meta { display: flex; align-items: center; gap: 6px; min-height: 24px; }
+    #refreshLessonsBtn { padding: 3px; color: var(--accent); border: 0; background: transparent; line-height: 1; }
+    #refreshLessonsBtn:hover:not(:disabled) { background: #fce5e5; }
+    .toolbar, .lesson-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; }
+    .toolbar button, .lesson-actions button {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      white-space: nowrap;
+      font-size: 15px;
     }
-    .status { margin-top: 10px; min-height: 18px; font-size: 12px; }
+    .toolbar button[hidden] { display: none; }
+    .toolbar button.ghost, .lesson-actions button.ghost { background: transparent; border: 0; }
+    .toolbar button.ghost:hover:not(:disabled), .lesson-actions button:hover:not(:disabled) { background: #fce5e5; }
+    .toolbar .ghost .icon, .lesson-actions .icon, .lesson-item > .icon, #downloadAllBtn { color: var(--accent); }
+    .status { margin-top: 10px; font-size: 14px; color: var(--muted); }
+    .status:empty, .course-info:empty { display: none; }
     .status.error { color: var(--warn); }
-    .status.success { color: var(--accent); }
-    .status.loading { color: #f59e0b; }
+    .status.success { color: #286a21; }
+    .status.loading { color: #855418; }
     .loading-spinner {
-      border: 3px solid rgba(12,122,87,.2);
+      border: 3px solid #a9000026;
       border-top-color: var(--accent);
       border-radius: 50%;
       width: 20px;
       height: 20px;
-      animation: spin 0.8s linear infinite;
+      animation: spin .8s linear infinite;
       display: inline-block;
       margin-right: 8px;
       vertical-align: middle;
     }
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-    .lesson-list {
-      margin-top: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .lesson-list { margin-top: 12px; }
     .lesson-item {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      padding: 12px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: #fff;
-      gap: 12px;
+      gap: 8px 18px;
+      min-height: 63px;
+      padding: 7px clamp(10px, 1.25vw, 20px);
+      border-bottom: 1px solid #eee3e3;
     }
-    .lesson-item.processed {
-      background: rgba(12,122,87,.05);
-    }
-    .lesson-datetime {
+    .lesson-item.processed { background: #f0f3eb; border-color: transparent; border-radius: 9px; }
+    .lesson-datetime { min-width: clamp(118px, 10.5vw, 173px); }
+    .lesson-date, .lesson-title { font-size: 18px; font-weight: 700; }
+    .lesson-time-row { display: flex; flex-wrap: wrap; gap: 0 16px; font-size: 15px; color: var(--muted); }
+    .lesson-day { color: #286a21; font-weight: 600; }
+    .lesson-info { display: flex; align-items: center; gap: 8px 20px; padding-left: clamp(12px, 2vw, 30px); border-left: 1px solid #cfc4c4; }
+    .lesson-title { min-width: clamp(75px, 7vw, 118px); }
+    .lesson-title .hint { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+    .lesson-status { display: inline-flex; align-items: center; gap: 4px; background: #eee9e9; color: #4d4141; border-radius: 20px; padding: 3px 12px; font-size: 14px; white-space: nowrap; }
+    .lesson-status.done { background: #def0d3; color: #24651b; }
+    .lesson-actions { margin-left: auto; justify-content: flex-end; column-gap: clamp(8px, 2.6vw, 44px); padding-right: 12px; }
+    .page-footer {
       display: flex;
-      flex-direction: column;
+      flex-wrap: wrap;
+      justify-content: space-between;
       align-items: center;
-      min-width: 80px;
-      padding-right: 12px;
-      border-right: 1px solid var(--line);
+      gap: 6px 20px;
+      padding: 12px clamp(16px, 2.7vw, 45px);
+      border-top: 1px solid #f4e8e8;
+      background: #fcf1f1;
     }
-    .lesson-date {
-      font-weight: 600;
-      font-size: 14px;
-      color: var(--ink);
+    .footer-motto { color: var(--accent); font: italic 700 23px "Yu Mincho", "Noto Serif SC", serif; }
+    @media (max-width: 960px) {
+      .workspace { grid-template-columns: minmax(185px, 25%) minmax(0, 1fr); }
+      .course-panel { padding-inline: 8px; }
+      .lesson-actions { gap: 4px; }
     }
-    .lesson-time-row {
-      display: flex;
-      gap: 8px;
+    @media (max-width: 640px) {
+      .hero { min-height: auto; }
+      .hero-copy { max-width: none; padding-bottom: 10px; }
+      .hero-art { position: static; order: 1; width: 100%; height: 140px; transform: none; }
+      .workspace { grid-template-columns: minmax(0, 1fr); padding-top: 16px; }
+      .course-list { max-height: 240px; overflow: auto; }
+      .lesson-datetime { min-width: 98px; }
+      .lesson-info { padding-left: 0; border: 0; gap: 6px; }
+      .lesson-title { min-width: 0; }
+      .lesson-actions { width: 100%; padding-right: 0; }
     }
-    .lesson-time {
-      font-size: 12px;
-      color: #6b7280;
-    }
-    .lesson-day {
-      font-size: 12px;
-      color: var(--accent);
-    }
-    .lesson-info {
-      flex: 1;
-    }
-    .lesson-title {
-      font-weight: 600;
-      font-size: 14px;
-    }
-    .lesson-status {
-      font-size: 12px;
-      color: #6b7280;
-      margin-top: 2px;
-    }
-    .lesson-actions {
-      display: flex;
-      gap: 8px;
-    }
-    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
-    .course-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-    .semester-select { padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); font-size: 13px; background: #fff; min-width: 180px; }
-    .section-header { display: flex; align-items: center; justify-content: space-between; }
-    .section-title { font-weight: 600; font-size: 16px; }
     /* 大弹窗样式 */
     .big-overlay {
       position: fixed;
@@ -254,10 +277,76 @@
   </style>
 </head>
 <body>
-  <main class="wrap">
-    <h1>课程回放批量处理</h1>
-    <div class="sub">自动获取北大教学网课程列表，批量处理课程的全部回放视频。</div>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="replay-icon-video" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="m10 8 6 4-6 4z"/></symbol>
+    <symbol id="replay-icon-layers" viewBox="0 0 24 24"><path d="m12 2 10 6-10 6L2 8zM2 12l10 6 10-6M2 16l10 6 10-6"/></symbol>
+    <symbol id="replay-icon-book" viewBox="0 0 24 24"><path d="M12 5C9 2 5 2 2 4v15c3-2 7-2 10 1 3-3 7-3 10-1V4c-3-2-7-2-10 1zm0 0v15"/></symbol>
+    <symbol id="replay-icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="replay-icon-refresh" viewBox="0 0 24 24"><path d="M21 4v5h-5M3 20v-5h5M3 10a9 9 0 0 1 15-5l3 4M3 15l3 4a9 9 0 0 0 15-5"/></symbol>
+    <symbol id="replay-icon-plus" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/></symbol>
+    <symbol id="replay-icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M3 16v5h18v-5"/></symbol>
+    <symbol id="replay-icon-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 10h18"/></symbol>
+    <symbol id="replay-icon-play" viewBox="0 0 24 24"><path d="M6 4a1 1 0 0 1 1.5-.9l13 8a1 1 0 0 1 0 1.8l-13 8A1 1 0 0 1 6 20z"/></symbol>
+    <symbol id="replay-icon-file" viewBox="0 0 24 24"><path d="M5 3h9l5 5v13H5zm9 0v5h5M8 12h8m-8 4h8"/></symbol>
+    <symbol id="replay-icon-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
+  </svg>
+  <main>
+    <section class="hero" aria-labelledby="pageTitle">
+      <img class="hero-art" src="/home-hero-transparent.png" alt="学习路上，小希与你相伴。" />
+      <div class="hero-copy">
+        <div class="eyebrow"><svg class="icon" aria-hidden="true"><use href="#replay-icon-video"/></svg>课程回放批量处理</div>
+        <h1 id="pageTitle">课程回放批量处理</h1>
+        <p class="sub">自动获取北大教学网课程列表，批量处理课程的全部回放视频，生成可下载的学习资料。</p>
+      </div>
+    </section>
 
+    <div class="workspace">
+      <aside class="course-panel" aria-labelledby="courseListTitle">
+        <h2 id="courseListTitle"><svg class="icon" aria-hidden="true"><use href="#replay-icon-layers"/></svg>课程列表</h2>
+        <div class="course-filters">
+          <label class="search-box">
+            <svg class="icon" aria-hidden="true"><use href="#replay-icon-search"/></svg>
+            <input type="search" id="courseSearch" placeholder="搜索课程名称..." aria-label="搜索课程名称" />
+          </label>
+          <select id="semesterSelect" class="semester-select" aria-label="筛选学期">
+            <option value="">加载中...</option>
+          </select>
+        </div>
+        <div id="courseList" class="course-list">
+          <div class="status loading"><span class="loading-spinner"></span>正在加载课程列表...</div>
+        </div>
+      </aside>
+
+      <section aria-labelledby="lessonSectionTitle">
+        <div class="section-header">
+          <div class="section-heading">
+            <svg class="icon" aria-hidden="true"><use href="#replay-icon-book"/></svg>
+            <div>
+              <h2 class="section-title" id="lessonSectionTitle">课节列表</h2>
+              <div class="section-meta">
+                <span class="course-info" id="lessonSectionTerm"></span>
+                <button id="refreshLessonsBtn" class="ghost small" title="刷新课节列表" aria-label="刷新课节列表" hidden><svg class="icon" aria-hidden="true"><use href="#replay-icon-refresh"/></svg></button>
+              </div>
+            </div>
+          </div>
+          <div class="toolbar">
+            <button id="refreshBtn" class="ghost small"><svg class="icon" aria-hidden="true"><use href="#replay-icon-refresh"/></svg>刷新课程列表</button>
+            <button id="manualAddBtn" class="ghost small" hidden><svg class="icon" aria-hidden="true"><use href="#replay-icon-plus"/></svg>手动添加课节</button>
+            <button id="processAllBtn" hidden><svg class="icon" aria-hidden="true"><use href="#replay-icon-layers"/></svg>处理全部课节</button>
+            <button id="downloadAllBtn" class="ghost small" hidden><svg class="icon" aria-hidden="true"><use href="#replay-icon-download"/></svg>下载完整PDF</button>
+          </div>
+        </div>
+        <div id="status" class="status" role="status"></div>
+        <div id="lessonList" class="lesson-list"><div class="status">请选择课程</div></div>
+        <div id="batchSubmissionResults" class="status error" hidden></div>
+        <details id="manualRecords" style="margin-top:16px;display:none"><summary>手动查询记录（成功和失败均会保留）</summary><div id="manualRecordList"></div></details>
+      </section>
+    </div>
+  </main>
+  <footer class="page-footer">
+    <span>「严小希」小助手 · 由 cxxdgc 开发</span>
+    <span class="footer-motto" lang="ja">朝の日射し浴びて</span>
+  </footer>
     <!-- 功能暂不可用弹窗 -->
     <div class="big-overlay" id="bigOverlay">
       <div class="big-dialog">
@@ -268,42 +357,6 @@
       </div>
     </div>
 
-    <div class="toolbar">
-      <button id="goAppBtn" class="ghost">返回首页</button>
-      <button id="refreshBtn" class="ghost">刷新课程列表</button>
-    </div>
-
-    <div id="status" class="status"></div>
-
-    <div class="card" id="courseSection">
-      <div class="course-header">
-        <strong>选择课程</strong>
-        <select id="semesterSelect" class="semester-select">
-          <option value="">加载中...</option>
-        </select>
-      </div>
-      <div id="courseList" class="course-list">
-        <div class="status loading">
-          <span class="loading-spinner"></span>正在加载课程列表...
-        </div>
-      </div>
-    </div>
-
-    <div class="card" id="lessonSection" style="display: none;">
-      <div class="section-header">
-        <div class="section-title" id="lessonSectionTitle">课节列表</div>
-        <div style="display: flex; gap: 8px; align-items: center;">
-          <button id="backBtn" class="ghost small">返回</button>
-          <button id="manualAddBtn" class="ghost small">手动添加课节</button>
-          <button id="processAllBtn" class="ghost small">处理全部课节</button>
-          <button id="downloadAllBtn" class="ghost small" style="display: none;">下载完整PDF</button>
-        </div>
-      </div>
-      <div id="lessonList" class="lesson-list"></div>
-      <div id="batchSubmissionResults" class="status error" hidden></div>
-      <details id="manualRecords" style="margin-top:16px;display:none"><summary>手动查询记录（成功和失败均会保留）</summary><div id="manualRecordList"></div></details>
-    </div>
-  </main>
     <div class="modal-overlay" id="manualAddModal">
       <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="manualAddTitle">
         <h3 id="manualAddTitle">手动添加课节</h3>
@@ -367,15 +420,17 @@
   <script>
     const statusEl = document.getElementById("status");
     const courseListEl = document.getElementById("courseList");
-    const lessonSectionEl = document.getElementById("lessonSection");
     const lessonListEl = document.getElementById("lessonList");
     const refreshBtnEl = document.getElementById("refreshBtn");
     const semesterSelectEl = document.getElementById("semesterSelect");
-    const backBtnEl = document.getElementById("backBtn");
+    const refreshLessonsBtnEl = document.getElementById("refreshLessonsBtn");
+    const courseSearchEl = document.getElementById("courseSearch");
+    const manualAddBtnEl = document.getElementById("manualAddBtn");
     const processAllBtnEl = document.getElementById("processAllBtn");
     const downloadAllBtnEl = document.getElementById("downloadAllBtn");
     const lessonSectionTitleEl = document.getElementById("lessonSectionTitle");
 
+    let lessonRequest = 0;
     let selectedCourse = null;
     let selectedCourseName = null;
     let allCourses = [];
@@ -393,10 +448,10 @@
 
     function setProcessing(processing) {
       isProcessing = processing;
+      semesterSelectEl.disabled = processing;
       document.querySelectorAll('button').forEach(btn => {
         const id = btn.id;
-        // 允许刷新和返回按钮始终可用
-        if (id !== 'refreshBtn' && id !== 'backBtn' && id !== 'goAppBtn' && id !== 'manualAddCancel') {
+        if (id !== 'refreshBtn' && id !== 'refreshLessonsBtn' && id !== 'manualAddCancel') {
           btn.disabled = processing;
         }
       });
@@ -437,23 +492,27 @@
     }
 
     async function loadCourseList() {
-      courseListEl.innerHTML = '<div class="status loading"><span class="loading-spinner"></span>正在加载课程列表...</div>';
-      statusEl.textContent = "";
+      if (!allCourses.length) {
+        courseListEl.innerHTML = '<div class="status loading"><span class="loading-spinner"></span>正在加载课程列表...</div>';
+      }
 
       try {
         const resp = await api("/api/pkuvideofullclass/courses");
         if (resp.success && resp.courses && resp.courses.length > 0) {
           allCourses = resp.courses;
           populateSemesterSelect(allCourses);
-          renderCourses(allCourses);
-        } else {
+          renderCourses();
+          selectDefaultCourse();
+        } else if (resp.success) {
           allCourses = [];
+          if (!isProcessing) selectCourse(null, null);
           semesterSelectEl.innerHTML = '<option value="">无可用学期</option>';
           courseListEl.innerHTML = '<div class="status">未找到课程，请确认已正确绑定IAAA账号</div>';
+        } else {
+          throw new Error(resp.message || "课程列表不可用");
         }
       } catch (err) {
-        allCourses = [];
-        courseListEl.innerHTML = '';
+        if (!allCourses.length) courseListEl.innerHTML = '';
         statusEl.textContent = "加载课程列表失败: " + err.message;
         statusEl.className = "status error";
       }
@@ -463,13 +522,15 @@
       const semesters = [...new Set(courses.map(c => c.term).filter(t => t))];
       const sortedSemesters = sortSemesters(semesters);
 
-      let optionsHtml = '<option value="">全部学期</option>' +
+      const previousTerm = semesterSelectEl.value;
+      const showingAllTerms = semesterSelectEl.options[0]?.textContent === "全部学期" && previousTerm === "";
+      const optionsHtml = '<option value="">全部学期</option>' +
         sortedSemesters.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
 
       semesterSelectEl.innerHTML = optionsHtml;
 
       if (sortedSemesters.length > 0) {
-        semesterSelectEl.value = sortedSemesters[0];
+        semesterSelectEl.value = showingAllTerms || semesters.includes(previousTerm) ? previousTerm : sortedSemesters[0];
       }
     }
 
@@ -495,28 +556,53 @@
       });
     }
 
-    function renderCourses(courses) {
-      const selectedTerm = semesterSelectEl.value;
-      const filtered = selectedTerm ? courses.filter(c => c.term === selectedTerm) : courses;
-      if (filtered.length === 0) {
-        courseListEl.innerHTML = '<div class="status">该学期暂无课程</div>';
-        return;
-      }
-      courseListEl.innerHTML = filtered.map(course => `
-        <div class="course-item" data-course-id="${course.key}" data-course-name="${esc(course.name)}">
-          <div class="course-title">${esc(course.name)}</div>
-          <div class="course-info">学期: ${course.term}</div>
-        </div>
-      `).join("");
-      document.querySelectorAll(".course-item").forEach(item => {
-        item.addEventListener("click", handleCourseSelect);
+    function coursesInSelectedTerm() {
+      const term = semesterSelectEl.value;
+      return term ? allCourses.filter(course => course.term === term) : allCourses;
+    }
+
+    function updateCourseSelection() {
+      courseListEl.querySelectorAll(".course-item").forEach(item => {
+        item.setAttribute("aria-pressed", String(item.dataset.courseId === selectedCourse));
       });
     }
 
-    semesterSelectEl.addEventListener("change", () => renderCourses(allCourses));
+    function renderCourses() {
+      const query = courseSearchEl.value.trim().toLocaleLowerCase();
+      const filtered = coursesInSelectedTerm().filter(course => course.name.toLocaleLowerCase().includes(query));
+      if (!filtered.length) {
+        courseListEl.innerHTML = '<div class="status">' +
+          (query ? '没有匹配的课程' : '该学期暂无课程') + '</div>';
+        return;
+      }
+      courseListEl.innerHTML = filtered.map(course => `
+        <button type="button" class="course-item" data-course-id="${esc(course.key)}" ${isProcessing ? 'disabled' : ''}>
+          <svg class="icon" aria-hidden="true"><use href="#replay-icon-book"/></svg>
+          <span>${esc(course.name)}<span class="course-info">学期：${esc(course.term)}</span></span>
+        </button>
+      `).join("");
+      courseListEl.querySelectorAll(".course-item").forEach((item, index) => {
+        item.addEventListener("click", () => selectCourse(filtered[index].key, filtered[index].name));
+      });
+      updateCourseSelection();
+    }
+
+    semesterSelectEl.addEventListener("change", () => {
+      renderCourses();
+      selectDefaultCourse();
+    });
+    courseSearchEl.addEventListener("input", renderCourses);
+
+    function selectDefaultCourse() {
+      if (isProcessing) return;
+      const courses = coursesInSelectedTerm();
+      if (courses.some(course => course.key === selectedCourse)) return;
+      const first = courses[0];
+      selectCourse(first?.key ?? null, first?.name ?? null);
+    }
 
     function esc(s) {
-      return String(s || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      return String(s || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
     }
 
     async function appAuth(action, body = {}) {
@@ -741,40 +827,44 @@
       }
     }
 
-    async function handleCourseSelect(e) {
-      const courseItem = e.currentTarget;
-      const courseId = courseItem.dataset.courseId;
-      const courseName = courseItem.dataset.courseName;
-
+    async function selectCourse(courseId, courseName) {
+      const request = ++lessonRequest;
       selectedCourse = courseId;
       selectedCourseName = courseName;
+      currentLessons = [];
       currentManualAttempts = [];
+      activeLessons.clear();
+      updateCourseSelection();
 
-      statusEl.textContent = "正在加载课节列表...";
+      lessonSectionTitleEl.textContent = courseName || "课节列表";
+      const term = allCourses.find(course => course.key === courseId)?.term;
+      document.getElementById("lessonSectionTerm").textContent = term ? "学期：" + term : "";
+      refreshLessonsBtnEl.hidden = !courseId;
+      manualAddBtnEl.hidden = true;
+      processAllBtnEl.hidden = true;
+      downloadAllBtnEl.hidden = true;
+      document.getElementById("manualRecords").style.display = "none";
+      document.getElementById("batchSubmissionResults").hidden = true;
+      lessonListEl.innerHTML = courseId ? "" : '<div class="status">请选择课程</div>';
+      statusEl.textContent = courseId ? "正在加载课节列表..." : "";
       statusEl.className = "status loading";
+      if (!courseId) return;
 
       try {
         const resp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos`);
-        if (resp.success) {
-          currentLessons = resp.lessons || [];
-
-          activeLessons.clear();
-          for (const task of resp.processing_tasks || []) {
-            activeLessons.add(task.lesson_id);
-            pollProcessStatus(task.lesson_id, courseId, task.job_id);
-          }
-          renderLessonList(resp);
-        } else {
-          currentLessons = [];
-          processingLessonId = null;
-          renderLessonList({ lessons: [], total: 0, processed: 0 });
+        if (request !== lessonRequest) return;
+        currentLessons = resp.lessons || [];
+        for (const task of resp.processing_tasks || []) {
+          activeLessons.add(task.lesson_id);
+          pollProcessStatus(task.lesson_id, courseId, task.job_id);
         }
+        manualAddBtnEl.hidden = false;
+        processAllBtnEl.hidden = false;
+        renderLessonList(resp);
       } catch (err) {
-        currentLessons = [];
-        processingLessonId = null;
+        if (request !== lessonRequest) return;
         statusEl.textContent = "加载课节列表失败: " + err.message;
         statusEl.className = "status error";
-        renderLessonList({ lessons: [], total: 0, processed: 0 });
       }
     }
 
@@ -784,11 +874,7 @@
       document.getElementById('manualRecordList').innerHTML = currentManualAttempts.map(a =>
         `<p>${esc(a.date)} · 手动查询 · ${a.status === 'success' ? '成功' : a.status === 'pending' ? '查询已提交／可重试' : '失败'}：${esc(a.message)}</p>`).join('');
       const lessons = resp.lessons || [];
-      const total = resp.total || 0;
-      const processed = resp.processed || 0;
       const hasProcessed = lessons.some(lesson => lesson.tex_filename);
-
-      lessonSectionTitleEl.textContent = selectedCourseName || "课节列表";
 
       if (lessons.length === 0) {
         lessonListEl.innerHTML = '<div class="status">暂无课节信息，请点击"刷新课节列表"按钮获取</div>';
@@ -798,6 +884,7 @@
           const isDownloadingThisLesson = downloadingLessonId === lesson.id;
           return `
             <div class="lesson-item ${lesson.is_processed ? 'processed' : ''}">
+              <svg class="icon" aria-hidden="true"><use href="#replay-icon-calendar"/></svg>
               <div class="lesson-datetime">
                 <div class="lesson-date">${esc(lesson.date)}</div>
                 <div class="lesson-time-row">
@@ -807,17 +894,16 @@
               </div>
               <div class="lesson-info">
                 <div class="lesson-title">第${index + 1}节 ${lesson.manual_replay ? '<span class="hint">手动添加 · 好学 App</span>' : ''}</div>
-                <div class="lesson-status">
+                <div class="lesson-status ${lesson.is_processed && !isProcessingThisLesson && !isDownloadingThisLesson ? 'done' : ''}">
+                  ${lesson.is_processed && !isProcessingThisLesson && !isDownloadingThisLesson ? '<svg class="icon" aria-hidden="true"><use href="#replay-icon-check"/></svg>' : ''}
                   ${isProcessingThisLesson ? '处理中...' : (isDownloadingThisLesson ? '生成PDF中...' : (lesson.is_processed ? '已处理' : '未处理'))}
                 </div>
               </div>
               <div class="lesson-actions">
-                <button class="ghost small" onclick="handleWatchReplay('${lesson.id}')" ${canWatchReplay(lesson) ? '' : 'disabled title="暂无回放地址"'}>观看回放</button>
-                ${isProcessingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">处理中...</span>' : ''}
-                ${isDownloadingThisLesson ? '<span class="status processing" style="padding: 4px 8px;">生成中...</span>' : ''}
-                ${!isProcessingThisLesson && !isDownloadingThisLesson && !lesson.tex_filename ? '<button class="ghost small" onclick="handleProcessLesson(\'' + lesson.id + '\')">提交处理</button>' : ''}
-                ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleReprocessLesson(\'' + lesson.id + '\')">重新处理</button>' : ''}
-                ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadPdf(\'' + lesson.id + '\')">下载PDF</button>' : ''}
+                <button class="ghost small" onclick="handleWatchReplay('${lesson.id}')" ${canWatchReplay(lesson) ? '' : 'disabled title="暂无回放地址"'}><svg class="icon" aria-hidden="true"><use href="#replay-icon-play"/></svg>观看回放</button>
+                ${!isProcessingThisLesson && !isDownloadingThisLesson && !lesson.tex_filename ? '<button class="ghost small" onclick="handleProcessLesson(\'' + lesson.id + '\')"><svg class="icon" aria-hidden="true"><use href="#replay-icon-file"/></svg>提交处理</button>' : ''}
+                ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleReprocessLesson(\'' + lesson.id + '\')"><svg class="icon" aria-hidden="true"><use href="#replay-icon-refresh"/></svg>重新处理</button>' : ''}
+                ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadPdf(\'' + lesson.id + '\')"><svg class="icon" aria-hidden="true"><use href="#replay-icon-download"/></svg>下载PDF</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.manual_replay ? '<button class="ghost small" onclick="handleDeleteManualLesson(\'' + lesson.id + '\')">删除课节</button>' : ''}
               </div>
             </div>
@@ -825,50 +911,36 @@
         }).join("");
       }
 
-      downloadAllBtnEl.style.display = hasProcessed ? 'inline-block' : 'none';
+      downloadAllBtnEl.hidden = !hasProcessed;
       statusEl.textContent = "";
       statusEl.className = "status";
-
-      document.getElementById("courseSection").style.display = "none";
-      lessonSectionEl.style.display = "block";
-      refreshBtnEl.textContent = "刷新课节列表";
     }
-
-    function handleBack() {
-      selectedCourse = null;
-      selectedCourseName = null;
-      currentLessons = [];
-      currentManualAttempts = [];
-
-      lessonSectionEl.style.display = "none";
-      document.getElementById("courseSection").style.display = "block";
-      refreshBtnEl.textContent = "刷新课程列表";
-    }
-
-    backBtnEl.addEventListener("click", handleBack);
 
     async function refreshLessonList() {
-      if (!selectedCourse) return;
+      const courseId = selectedCourse;
+      if (!courseId || isProcessing) return;
 
-      refreshBtnEl.disabled = true;
+      refreshLessonsBtnEl.disabled = true;
       statusEl.textContent = "正在刷新课节列表...";
       statusEl.className = "status loading";
 
       try {
-        const resp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/refresh`, "POST");
+        const resp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos/refresh`, "POST");
+        if (selectedCourse !== courseId) return;
         if (resp.success) {
           statusEl.textContent = resp.message || "刷新成功";
           statusEl.className = "status success";
-          await handleCourseSelect({ currentTarget: { dataset: { courseId: selectedCourse, courseName: selectedCourseName } } });
+          await selectCourse(selectedCourse, selectedCourseName);
         } else {
           statusEl.textContent = resp.message || "刷新失败";
           statusEl.className = "status error";
         }
       } catch (err) {
+        if (selectedCourse !== courseId) return;
         statusEl.textContent = "刷新失败: " + err.message;
         statusEl.className = "status error";
       } finally {
-        refreshBtnEl.disabled = false;
+        refreshLessonsBtnEl.disabled = false;
       }
     }
 
@@ -1004,20 +1076,23 @@
     }
 
     async function handleReprocessLesson(lessonId) {
-      if (!confirm("确定要重新处理该课节吗？旧的tex文件将被删除。")) return;
+      const courseId = selectedCourse;
+      if (isProcessing || !courseId || !confirm("确定要重新处理该课节吗？旧的tex文件将被删除。")) return;
 
       try {
         statusEl.textContent = "正在重置处理状态...";
         statusEl.className = "status loading";
 
-        const resp = await api(`/api/pkuvideofullclass/courses/${selectedCourse}/videos/${lessonId}/reprocess`, "POST");
+        const resp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos/${lessonId}/reprocess`, "POST");
 
+        if (selectedCourse !== courseId) return;
         statusEl.textContent = resp.message || "已重置处理状态";
         statusEl.className = "status success";
 
         // 刷新课节列表
-        await handleCourseSelect({ currentTarget: { dataset: { courseId: selectedCourse, courseName: selectedCourseName } } });
+        await selectCourse(selectedCourse, selectedCourseName);
       } catch (error) {
+        if (selectedCourse !== courseId) return;
         console.error('重新处理失败:', error);
         statusEl.textContent = "重新处理失败: " + error.message;
         statusEl.className = "status error";
@@ -1041,7 +1116,7 @@
       const batch=event.detail;
       if (!batch.id) return;
       if (selectedCourse && selectedCourse===batch.course_id) {
-        await handleCourseSelect({currentTarget:{dataset:{courseId:selectedCourse,courseName:selectedCourseName}}});
+        await selectCourse(selectedCourse, selectedCourseName);
       }
       statusEl.textContent = batch.error || `批量提交完成：${batch.submitted} 个课节已入队，${batch.failed} 个提交失败。视频将在队列中继续处理。`;
       statusEl.className = batch.failed || batch.error ? 'status error' : 'status success';
@@ -1058,13 +1133,8 @@
 
     downloadAllBtnEl.addEventListener("click", handleDownloadCoursePdf);
 
-    refreshBtnEl.addEventListener("click", () => {
-      if (selectedCourse) {
-        refreshLessonList();
-      } else {
-        refreshCourseList();
-      }
-    });
+    refreshBtnEl.addEventListener("click", refreshCourseList);
+    refreshLessonsBtnEl.addEventListener("click", refreshLessonList);
 
     async function handleDownloadCoursePdf() {
       if (isProcessing) {
@@ -1125,6 +1195,7 @@
     }
 
     async function refreshCourseList() {
+      if (isProcessing) return;
       refreshBtnEl.disabled = true;
       statusEl.textContent = "正在刷新课程列表...";
       statusEl.className = "status loading";
@@ -1132,9 +1203,11 @@
       try {
         const resp = await api("/api/pkuvideofullclass/courses/refresh", "POST");
         if (resp.success) {
-          statusEl.textContent = resp.message;
-          statusEl.className = "status success";
-          loadCourseList();
+          await loadCourseList();
+          if (statusEl.className !== "status error" && statusEl.textContent === "正在刷新课程列表...") {
+            statusEl.textContent = resp.message || "课程列表已刷新";
+            statusEl.className = "status success";
+          }
         } else {
           statusEl.textContent = resp.message || "刷新失败";
           statusEl.className = "status error";
@@ -1146,10 +1219,6 @@
         refreshBtnEl.disabled = false;
       }
     }
-
-    document.getElementById("goAppBtn").addEventListener("click", () => {
-      location.href = "/";
-    });
 
     document.getElementById("keyConfirmBtn").addEventListener("click", () => {
       const hint = document.getElementById("keyHint");
