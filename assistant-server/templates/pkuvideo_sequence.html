@@ -11,6 +11,7 @@
       --line: #eddadb;
       --accent: #a90000;
       --warn: #a02739;
+      --replay-gutter: clamp(16px, 2.2vw, 36px);
     }
     * { box-sizing: border-box; }
     body {
@@ -23,7 +24,7 @@
       background: #fcf7f7;
     }
     body .site-header { background: #fffafa; --site-header-height: 47px; }
-    body .site-header .site-header-inner { width: calc(100% - 2 * clamp(16px, 3.4vw, 56px)); }
+    body .site-header .site-header-inner, body .site-footer { width: calc(100% - 2 * var(--replay-gutter)); }
     main { flex: 1; }
     .icon {
       width: 1.25em;
@@ -39,23 +40,23 @@
       position: relative;
       display: grid;
       align-items: center;
-      min-height: 191px;
+      min-height: 160px;
       background: linear-gradient(105deg, #fdf3f3, #f9e7e7);
       overflow: hidden;
     }
     .hero-art {
       position: absolute;
       inset: 0 0 0 auto;
-      width: 53%;
+      width: min(42%, 480px);
       height: 100%;
-      object-fit: contain;
-      object-position: right center;
+      object-fit: cover;
+      mask-image: linear-gradient(to right, transparent, #000 23%);
     }
     .hero-copy {
       position: relative;
-      margin-inline: clamp(24px, 7.6vw, 126px);
-      padding: 24px 0;
-      max-width: 48%;
+      margin-inline: var(--replay-gutter);
+      padding: 12px 0;
+      max-width: min(640px, 55%);
     }
     .eyebrow { display: flex; align-items: center; gap: 8px; color: var(--accent); font-weight: 500; }
     .eyebrow .icon { font-size: 16px; }
@@ -70,7 +71,7 @@
       display: grid;
       grid-template-columns: minmax(240px, 23%) minmax(0, 1fr);
       gap: clamp(12px, 1.6vw, 28px);
-      padding: 16px clamp(16px, 2.2vw, 36px) 40px;
+      padding: 16px var(--replay-gutter) 40px;
     }
     .course-panel {
       padding: 16px 14px 24px;
@@ -118,16 +119,22 @@
     .section-header {
       display: flex;
       align-items: center;
-      justify-content: space-between;
       flex-wrap: wrap;
-      gap: 12px 20px;
+      gap: 8px 16px;
       padding: 16px 0 12px;
       border-bottom: 1px solid var(--line);
     }
     .section-heading { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
     .section-title { overflow-wrap: anywhere; }
     #lessonSectionTerm { margin-top: 4px; }
-    .toolbar, .lesson-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; }
+    .toolbar, .lesson-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 4px 6px;
+      margin-left: auto;
+    }
     .course-panel-heading button, .toolbar button, .lesson-actions button {
       display: inline-flex;
       align-items: center;
@@ -139,11 +146,10 @@
     .course-panel-heading button.ghost, .toolbar button.ghost, .lesson-actions button.ghost { background: transparent; border: 0; }
     .course-panel-heading button:hover:not(:disabled), .toolbar button.ghost:hover:not(:disabled), .lesson-actions button:hover:not(:disabled) { background: #fce5e5; }
     .course-panel-heading button.ghost, .toolbar .ghost .icon, .lesson-actions .icon, .lesson-item > .icon, #downloadAllBtn { color: var(--accent); }
-    #processAllBtn, #downloadAllBtn { font-weight: 600; }
+    .toolbar button, .lesson-actions button { padding: 6px 8px; font-weight: 700; }
     .status { margin-top: 10px; font-size: 14px; color: var(--muted); }
     .status:empty, .course-info:empty { display: none; }
     .status.error { color: var(--warn); }
-    .status.success { color: #286a21; }
     .status.loading { color: #855418; }
     .loading-spinner {
       border: 3px solid #a9000026;
@@ -164,36 +170,32 @@
       align-items: center;
       gap: 8px 18px;
       min-height: 63px;
-      padding: 7px clamp(10px, 1.25vw, 20px);
+      padding: 7px 0 7px clamp(10px, 1.25vw, 20px);
       border-bottom: 1px solid #eee3e3;
     }
-    .lesson-item.processed { background: #f0f3eb; border-color: transparent; border-radius: 9px; }
     .lesson-datetime { min-width: clamp(118px, 10.5vw, 173px); }
     .lesson-date { font-size: 15px; font-weight: 600; }
     .lesson-title { font-size: 14px; font-weight: 600; }
     .lesson-time-row { display: flex; flex-wrap: wrap; gap: 0 16px; font-size: 13px; color: var(--muted); }
-    .lesson-day { color: #286a21; }
     .lesson-info { display: flex; align-items: center; gap: 8px 20px; padding-left: clamp(12px, 2vw, 30px); border-left: 1px solid #cfc4c4; }
     .lesson-title { min-width: clamp(75px, 7vw, 118px); }
     .lesson-title .hint { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
     .lesson-status { display: inline-flex; align-items: center; gap: 4px; background: #eee9e9; color: #4d4141; border-radius: 20px; padding: 3px 10px; font-size: 12px; white-space: nowrap; }
     .lesson-status.done { background: #def0d3; color: #24651b; font-weight: 600; }
-    .lesson-actions { margin-left: auto; justify-content: flex-end; column-gap: clamp(8px, 2.6vw, 44px); padding-right: 12px; }
+    .lesson-status.in-progress { background: #fce5e5; color: var(--accent); font-weight: 600; }
     @media (max-width: 960px) {
       .workspace { grid-template-columns: minmax(185px, 25%) minmax(0, 1fr); }
       .course-panel { padding-inline: 8px; }
-      .lesson-actions { gap: 4px; }
     }
     @media (max-width: 640px) {
-      .hero { min-height: auto; }
-      .hero-copy { max-width: none; padding-bottom: 10px; }
-      .hero-art { position: static; order: 1; width: 100%; height: auto; }
+      .hero-copy { max-width: min(78%, 340px); }
+      .hero-art { width: 58%; opacity: .45; mask-image: linear-gradient(to right, transparent, #000 65%); }
       .workspace { grid-template-columns: minmax(0, 1fr); }
       .course-list { max-height: 240px; overflow: auto; }
       .lesson-datetime { min-width: 98px; }
       .lesson-info { padding-left: 0; border: 0; gap: 6px; }
       .lesson-title { min-width: 0; }
-      .lesson-actions { width: 100%; padding-right: 0; }
+      .lesson-actions { width: 100%; }
     }
     /* 大弹窗样式 */
     .big-overlay {
@@ -281,7 +283,7 @@
   </svg>
   <main>
     <section class="hero" aria-labelledby="pageTitle">
-      <img class="hero-art" src="/course-replay-hero.webp" width="2172" height="391" alt="" />
+      <img class="hero-art" src="/course-replay-hero-v2.webp" width="1440" height="480" alt="" />
       <div class="hero-copy">
         <div class="eyebrow"><svg class="icon" aria-hidden="true"><use href="#replay-icon-video"/></svg>课程回放批量处理</div>
         <h1 id="pageTitle">课程回放批量处理</h1>
@@ -564,7 +566,7 @@
       courseListEl.innerHTML = filtered.map(course => `
         <button type="button" class="course-item" data-course-id="${esc(course.key)}" ${isProcessing ? 'disabled' : ''}>
           <svg class="icon" aria-hidden="true"><use href="#replay-icon-book"/></svg>
-          <span><span class="course-name">${esc(course.name)}</span><span class="course-info">学期：${esc(course.term)}</span></span>
+          <span class="course-name">${esc(course.name)}</span>
         </button>
       `).join("");
       courseListEl.querySelectorAll(".course-item").forEach((item, index) => {
@@ -868,8 +870,9 @@
         lessonListEl.innerHTML = lessons.map((lesson, index) => {
           const isProcessingThisLesson = activeLessons.has(lesson.id) || processingLessonId === lesson.id;
           const isDownloadingThisLesson = downloadingLessonId === lesson.id;
+          const isDone = lesson.is_processed && !isProcessingThisLesson && !isDownloadingThisLesson;
           return `
-            <div class="lesson-item ${lesson.is_processed ? 'processed' : ''}">
+            <div class="lesson-item">
               <svg class="icon" aria-hidden="true"><use href="#replay-icon-calendar"/></svg>
               <div class="lesson-datetime">
                 <div class="lesson-date">${esc(lesson.date)}</div>
@@ -880,8 +883,8 @@
               </div>
               <div class="lesson-info">
                 <div class="lesson-title">第${index + 1}节 ${lesson.manual_replay ? '<span class="hint">手动添加 · 好学 App</span>' : ''}</div>
-                <div class="lesson-status ${lesson.is_processed && !isProcessingThisLesson && !isDownloadingThisLesson ? 'done' : ''}">
-                  ${lesson.is_processed && !isProcessingThisLesson && !isDownloadingThisLesson ? '<svg class="icon" aria-hidden="true"><use href="#replay-icon-check"/></svg>' : ''}
+                <div class="lesson-status ${isProcessingThisLesson ? 'in-progress' : (isDone ? 'done' : '')}">
+                  ${isDone ? '<svg class="icon" aria-hidden="true"><use href="#replay-icon-check"/></svg>' : ''}
                   ${isProcessingThisLesson ? '处理中...' : (isDownloadingThisLesson ? '生成PDF中...' : (lesson.is_processed ? '已处理' : '未处理'))}
                 </div>
               </div>
