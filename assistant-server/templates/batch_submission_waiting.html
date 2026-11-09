@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN" data-batch-waiting>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>任务正在提交中</title>
+  <!-- batch-submission-guard -->
+</head>
+<body>
+  <div id="globalBatchSubmissionOverlay" role="alertdialog" aria-modal="true" aria-labelledby="globalBatchTitle" tabindex="-1">
+    <div class="batch-dialog">
+      <div class="batch-spinner" aria-hidden="true"></div>
+      <h2 id="globalBatchTitle">任务正在提交中</h2>
+      <p id="globalBatchMessage" role="status" aria-live="polite">任务正在提交中，请不要离开本页面</p>
+      <p id="globalBatchProgress"></p>
+    </div>
+  </div>
+</body>
+</html>

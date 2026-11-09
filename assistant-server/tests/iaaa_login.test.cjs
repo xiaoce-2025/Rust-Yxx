@@ -70,11 +70,11 @@ test('failed authentication displays the error, clears credentials and allows re
   assert.equal(location.href, '');
 });
 
-test('malformed and external redirect targets fall back to the app', async () => {
+test('malformed and external redirect targets fall back to the homepage', async () => {
   for (const next of ['https://evil.example', '//evil.example', 'javascript:alert(1)', 'http://[']) {
     const {node, location} = environment('?next=' + encodeURIComponent(next));
     await node('iaaaForm').listeners.submit(event);
-    assert.equal(location.href, '/app');
+    assert.equal(location.href, '/');
   }
 });
 

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, '../templates/batch_submission_guard.html'), 'utf8');
+const waitingHtml = fs.readFileSync(path.join(__dirname, '../templates/batch_submission_waiting.html'), 'utf8');
 const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
 const STATUS = '/api/pkuvideofullclass/batch-submit/status';
 const START = '/api/pkuvideofullclass/batch-submit';
@@ -11,7 +12,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 function response(value, status = 200) {
   return {status, ok: status >= 200 && status < 300, json: async () => structuredClone(value), clone() { return response(value,status); }};
 }
-function environment(fetcher, page='/settings') {
+function environment(fetcher, page='/settings', waiting=false) {
   const calls = [], events = [], docListeners = new Map(), windowListeners = new Map(), nodes = new Map();
   const timers = new Map();
   let timerId=0;
@@ -19,6 +20,7 @@ function environment(fetcher, page='/settings') {
   class Element {
     constructor(id) {this.id=id;this.children=[];this.style={};this.attributes=new Map();this.inert=false;this.textContent='';this.innerHTML='';}
     setAttribute(k,v) {this.attributes.set(k,v);}
+    hasAttribute(k) {return this.attributes.has(k);}
     toggleAttribute(k,on) {if(on)this.attributes.set(k,'');else this.attributes.delete(k);}
     appendChild(child) {this.children.push(child);nodes.set(child.id,child);}
     contains(child) {return child===this || this.children.includes(child);}
@@ -30,13 +32,20 @@ function environment(fetcher, page='/settings') {
     addEventListener: (name,handler) => {if(!docListeners.has(name))docListeners.set(name,[]);docListeners.get(name).push(handler);}
   };
   const app = new Element('app');document.body.appendChild(app);
+  if (waiting) {
+    assert.match(waitingHtml, /<html[^>]+data-batch-waiting>/);
+    assert.match(waitingHtml, /id="globalBatchSubmissionOverlay"/);
+    document.documentElement.setAttribute('data-batch-waiting','');
+    document.body.appendChild(new Element('globalBatchSubmissionOverlay'));
+  }
   const storage = new Map();
   const window = {
     fetch: async (input,options) => {const url=new URL(typeof input==='string'?input:input.url,'https://assistant.example');calls.push(url.pathname);return fetcher(url.pathname,options);},
     addEventListener: (name,handler) => {if(!windowListeners.has(name))windowListeners.set(name,[]);windowListeners.get(name).push(handler);},
     dispatchEvent: event => {events.push(event);for(const handler of windowListeners.get(event.type)||[])handler(event);return true;}
   };
-  vm.runInNewContext(script,{window,document,URL,Date,location:{href:'https://assistant.example'+page,origin:'https://assistant.example'},
+  vm.runInNewContext(script,{window,document,URL,Date,location:{href:'https://assistant.example'+page,origin:'https://assistant.example',
+    reload:()=>events.push({type:'reload'})},
     localStorage:{setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},
     CustomEvent:class {constructor(type,options){this.type=type;this.detail=options.detail;}},
     setInterval:(fn,delay)=>{const id=++timerId;timers.set(id,{fn,delay});return id;},clearInterval:id=>timers.delete(id),console
@@ -45,9 +54,20 @@ function environment(fetcher, page='/settings') {
     tick:async()=>{for(const {fn,delay} of [...timers.values()])if(delay===2000)await fn();await flush();}};
 }
 
-test('reopening a page restores the non-dismissible mask before substantive APIs run', async () => {
+test('an idle page renders and starts its APIs without an initial status request', async () => {
+  const env=environment(async()=>response({ok:true}));
+  await env.window.fetch('/api/auth/me');
+  await env.window.fetch('/api/user/api-config');
+  assert.deepEqual(env.calls,['/api/auth/me','/api/user/api-config']);
+  assert.equal(env.window.BatchSubmission.active,false);
+  assert.equal(env.nodes.get('globalBatchSubmissionOverlay').style.display,'none');
+  assert.equal(env.app.inert,false);
+});
+
+test('the server waiting page stays masked until it can reload the original URL', async () => {
   let status={active:true,id:'batch-1',total:3,completed:1,submitted:1,failed:0,estimated_remaining_seconds:25};
-  const env=environment(async route=>response(route===STATUS?status:{ok:true}));
+  const env=environment(async route=>response(route===STATUS?status:{ok:true}), '/settings?theme=dark', true);
+  assert.equal(env.nodes.get('globalBatchSubmissionOverlay').style.display,'grid');
   await flush();
   assert.equal(env.window.BatchSubmission.active,true);
   assert.equal(env.nodes.get('globalBatchSubmissionOverlay').style.display,'grid');
@@ -57,15 +77,12 @@ test('reopening a page restores the non-dismissible mask before substantive APIs
   for(const handler of env.docListeners.get('keydown'))handler({key:'Escape',preventDefault(){prevented=true;},stopImmediatePropagation(){}});
   assert.equal(prevented,true);
   assert.equal(env.window.BatchSubmission.active,true);
-  const pending=env.window.fetch('/api/user/api-config');
-  await flush();
+  await assert.rejects(env.window.fetch('/api/user/api-config'),/任务正在提交中/);
   assert.equal(env.calls.includes('/api/user/api-config'),false);
   status={...status,active:false,status:'completed',completed:3};
   await env.window.BatchSubmission.refresh();
-  await pending;
-  assert.equal(env.nodes.get('globalBatchSubmissionOverlay').style.display,'none');
-  assert.equal(env.app.inert,false);
-  assert.equal(env.events.some(event=>event.type==='batchsubmissioncomplete'),true);
+  assert.equal(env.nodes.get('globalBatchSubmissionOverlay').style.display,'grid');
+  assert.equal(env.events.filter(event=>event.type==='reload').length,1);
 });
 
 test('an idle status racing with batch start cannot dismiss its mask', async () => {
@@ -126,6 +143,7 @@ test('unauthorized status cancels polling and successful login resumes it', asyn
   let authenticated=false;
   const env=environment(async route=>route===STATUS?response({active:false},authenticated?200:401):response({}));
   await env.window.BatchSubmission.ready;
+  await env.tick();
   assert.equal(env.calls.filter(p=>p===STATUS).length,1);
   for(let i=0;i<3;i++)await env.tick();
   await env.window.BatchSubmission.refresh();

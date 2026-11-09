@@ -16,8 +16,6 @@
       font: 14px/1.5 Arial, "Microsoft YaHei", "PingFang SC", sans-serif;
       background: #fcf7f7;
     }
-    body .site-header { background: #fffafa; --site-header-height: 47px; }
-    body .site-header .site-header-inner, body .site-footer { width: calc(100% - 2 * var(--replay-gutter)); }
     main { flex: 1; }
     .icon {
       width: 1.25em;

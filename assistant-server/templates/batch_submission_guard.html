@@ -1,9 +1,9 @@
 
 <style>
-  html[data-batch-locked], html[data-batch-locked] body { overflow:hidden!important; }
-  html[data-batch-checking] body > :not(#globalBatchSubmissionOverlay) { visibility:hidden!important; }
+  html[data-batch-locked], html[data-batch-locked] body, html[data-batch-waiting] { overflow:hidden!important; }
   #globalBatchSubmissionOverlay { position:fixed;inset:0;z-index:2147483647;display:none;place-items:center;background:rgba(8,15,30,.74);backdrop-filter:blur(5px);padding:24px;box-sizing:border-box;visibility:visible!important; }
   #globalBatchSubmissionOverlay .batch-dialog { width:min(100%,460px);box-sizing:border-box;background:#fff;color:#172033;border-radius:18px;padding:32px;box-shadow:0 24px 80px #0005;text-align:center;font:16px/1.7 system-ui,sans-serif; }
+  html[data-batch-waiting] #globalBatchSubmissionOverlay { display:grid; }
   #globalBatchSubmissionOverlay h2 {font-size:21px;margin:16px 0 12px;color:#172033;}
   #globalBatchSubmissionOverlay p {margin:10px 0;color:#475569;}
   #globalBatchSubmissionOverlay .batch-spinner {width:32px;height:32px;border:3px solid #dbeafe;border-top-color:#2563eb;border-radius:50%;margin:auto;animation:global-batch-spin 1s linear infinite;}
@@ -17,23 +17,22 @@
   const HINT = 'assistant.batch-submission.active';
   const rawFetch = window.fetch.bind(window);
   const authPage = ['/auth','/auth/admin'].includes(new URL(location.href).pathname);
-  let pollingEnabled = !authPage;
+  const waitingPage = document.documentElement.hasAttribute('data-batch-waiting');
+  let pollingEnabled = false;
   let pollTimer;
-  let state = {active:false};
-  let checking = true;
+  let state = {active:waitingPage};
   let receivedAt = Date.now();
   let overlay;
-  let readyResolved = false;
-  let resolveReady;
   let statusFlight;
   let starting=false;
   const previousInert = new Map();
-  const ready = new Promise(resolve => {resolveReady=resolve;});
-  document.documentElement.setAttribute('data-batch-checking','');
+  const ready = Promise.resolve();
 
   function mount() {
     if (!document.body) return;
-    if (!overlay) {
+    if (waitingPage) {
+      overlay = document.getElementById('globalBatchSubmissionOverlay');
+    } else if (!overlay) {
       overlay = document.createElement('div');
       overlay.id = 'globalBatchSubmissionOverlay';
       overlay.setAttribute('role','alertdialog');
@@ -46,8 +45,7 @@
     draw();
   }
   function draw() {
-    document.documentElement.toggleAttribute('data-batch-checking',checking);
-    const blocked = checking || state.active;
+    const blocked = state.active;
     document.documentElement.toggleAttribute('data-batch-locked',blocked);
     if (!overlay || !document.body) return;
     overlay.style.display = blocked ? 'grid' : 'none';
@@ -59,7 +57,9 @@
         child.inert=true;
       }
       const remaining = Math.max(1,Math.ceil((state.estimated_remaining_seconds || 15)-(Date.now()-receivedAt)/1000));
-      document.getElementById('globalBatchMessage').textContent = checking ? '正在确认任务提交状态，请稍候…' : `任务正在提交中，请不要离开本页面，预计还需要${remaining}s提交完成`;
+      document.getElementById('globalBatchMessage').textContent = state.estimated_remaining_seconds
+        ? `任务正在提交中，请不要离开本页面，预计还需要${remaining}s提交完成`
+        : '任务正在提交中，请不要离开本页面';
       document.getElementById('globalBatchProgress').textContent = state.total ? `已提交 ${state.completed || 0} / ${state.total} 个课节（成功入队 ${state.submitted || 0}，失败 ${state.failed || 0}）` : '';
       if (!overlay.contains(document.activeElement)) overlay.focus({preventScroll:true});
     } else {
@@ -68,16 +68,20 @@
     }
   }
   function apply(value) {
+    if (waitingPage && !value.active) {
+      clearInterval(pollTimer);
+      pollingEnabled=false;
+      location.reload();
+      return;
+    }
     const wasActive = state.active;
     state=value;
-    checking=false;
     receivedAt=Date.now();
     try {
       if (value.active) localStorage.setItem(HINT,JSON.stringify({id:value.id || 'starting'}));
       else localStorage.removeItem(HINT);
     } catch (_) {}
     draw();
-    if (!value.active && !readyResolved) {readyResolved=true;resolveReady();}
     if (wasActive && !value.active) window.dispatchEvent(new CustomEvent('batchsubmissioncomplete',{detail:value}));
   }
   function stopPolling() {
@@ -85,12 +89,12 @@
     if (pollTimer !== undefined) {clearInterval(pollTimer);pollTimer=undefined;}
     apply({active:false});
   }
-  function resumePolling() {
+  function resumePolling(immediate = true) {
     // The login page navigates away after authentication and never needs task status.
-    if (authPage) return;
+    if (authPage || pollingEnabled) return;
     pollingEnabled=true;
     if (pollTimer === undefined) pollTimer=setInterval(poll,2000);
-    poll();
+    if (immediate) poll();
   }
   function poll() {
     if (!pollingEnabled) return Promise.resolve();
@@ -105,7 +109,7 @@
         if (typeof value.active!=='boolean') throw new Error('提交状态无效');
         if (!starting || value.active) apply(value);
       } catch (error) {
-        // Fail closed during restoration; a network failure must not dismiss an active mask.
+        // A network failure must not dismiss an active mask.
         draw();
       } finally {statusFlight=null;}
     })();
@@ -122,7 +126,7 @@
   window.fetch=async function(input,options) {
     if (isApi(input) && !isLightweight(input)) {
       await ready;
-      if (state.active || checking) throw new Error('任务正在提交中，请等待批量提交完成后再操作');
+      if (state.active) throw new Error('任务正在提交中，请等待批量提交完成后再操作');
     }
     const response=await rawFetch(input,options);
     if (isApi(input)) {
@@ -141,7 +145,7 @@
   };
   window.BatchSubmission={
     ready,
-    get active() {return checking || state.active;},
+    get active() {return state.active;},
     get status() {return state;},
     refresh:poll,
     async start(body) {
@@ -163,22 +167,20 @@
   document.addEventListener('DOMContentLoaded',mount,{once:true});
   if (document.body) mount();
   for (const name of ['click','submit','pointerdown']) document.addEventListener(name,event => {
-    if ((checking || state.active) && (!overlay || !overlay.contains(event.target))) {event.preventDefault();event.stopImmediatePropagation();}
+    if (state.active && (!overlay || !overlay.contains(event.target))) {event.preventDefault();event.stopImmediatePropagation();}
   },true);
   document.addEventListener('keydown',event => {
-    if ((checking || state.active) && ['Escape','Tab','Enter',' '].includes(event.key)) {
+    if (state.active && ['Escape','Tab','Enter',' '].includes(event.key)) {
       event.preventDefault();event.stopImmediatePropagation();if (overlay) overlay.focus({preventScroll:true});
     }
   },true);
-  window.addEventListener('beforeunload',event => {if(state.active){event.preventDefault();event.returnValue='';}});
+  window.addEventListener('beforeunload',event => {if(state.active && !waitingPage){event.preventDefault();event.returnValue='';}});
   window.addEventListener('storage',event => {
     if(event.key===HINT && pollingEnabled) {
-      if(event.newValue && !state.active) apply({active:true});
       poll();
     }
   });
   setInterval(draw,1000);
-  if (authPage) stopPolling();
-  else resumePolling();
+  resumePolling(waitingPage);
 })();
 </script>
