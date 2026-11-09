@@ -126,6 +126,8 @@ fn guarded_page(source: &'static str) -> Html<String> {
 
 fn site_page(source: &'static str, active_path: &str) -> Html<String> {
     let css = include_str!("../../templates/site-header.css");
+    let footer_css = include_str!("../../templates/site-footer.css");
+    let footer = include_str!("../../templates/site-footer.html");
     let guard = include_str!("../../templates/batch_submission_guard.html");
     let header = include_str!("../../templates/site-header.html").replacen(
         &format!("href=\"{active_path}\""),
@@ -133,8 +135,9 @@ fn site_page(source: &'static str, active_path: &str) -> Html<String> {
         1,
     );
     Html(source
-        .replacen("<head>", &format!("<head>{guard}<style>{css}</style>"), 1)
-        .replacen("<body>", &format!("<body>{header}"), 1))
+        .replacen("<head>", &format!("<head>{guard}<style>{css}{footer_css}</style>"), 1)
+        .replacen("<body>", &format!("<body>{header}"), 1)
+        .replacen("<!-- site-footer -->", footer, 1))
 }
 
 #[cfg(test)]

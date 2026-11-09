@@ -1,0 +1,11 @@
+.site-footer {
+  width: min(1280px, calc(100% - 48px));
+  margin-inline: auto;
+  padding: 18px 0;
+  color: #655554;
+  font: 13px/normal Arial, "Microsoft YaHei", sans-serif;
+}
+
+@media (max-width: 760px) {
+  .site-footer { width: calc(100% - 32px); }
+}
