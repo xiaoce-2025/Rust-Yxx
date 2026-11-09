@@ -5,27 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>「严小希」小助手-课程回放批量处理</title>
   <style>
-    :root {
-      --ink: #291718;
-      --muted: #5e5152;
-      --line: #eddadb;
-      --accent: #a90000;
-      --warn: #a02739;
-      --replay-gutter: clamp(16px, 2.2vw, 36px);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      color: var(--ink);
-      font: 14px/1.5 Arial, "Microsoft YaHei", "PingFang SC", sans-serif;
-      background: #fcf7f7;
-    }
-    body .site-header { background: #fffafa; --site-header-height: 47px; }
-    body .site-header .site-header-inner, body .site-footer { width: calc(100% - 2 * var(--replay-gutter)); }
-    main { flex: 1; }
+    /* replay-hero */
     .replay-announcement {
       display: flex;
       align-items: center;
@@ -48,43 +28,6 @@
     }
     .replay-announcement button:hover { background: #ffffff26; }
     .replay-announcement button:focus-visible { outline-color: #fff; }
-    .icon {
-      width: 1.25em;
-      height: 1.25em;
-      flex: none;
-      fill: none;
-      stroke: currentColor;
-      stroke-width: 1.7;
-      stroke-linecap: round;
-      stroke-linejoin: round;
-    }
-    .hero {
-      position: relative;
-      display: grid;
-      align-items: center;
-      min-height: 160px;
-      background: linear-gradient(105deg, #fdf3f3, #f9e7e7);
-      overflow: hidden;
-    }
-    .hero-art {
-      position: absolute;
-      inset: 0 0 0 auto;
-      width: min(100%, 960px);
-      height: 100%;
-      object-fit: cover;
-      object-position: right center;
-      mask-image: linear-gradient(to right, transparent, #000 23%);
-    }
-    .hero-copy {
-      position: relative;
-      margin-inline: var(--replay-gutter);
-      padding: 12px 0;
-      max-width: min(640px, 55%);
-    }
-    .eyebrow { display: flex; align-items: center; gap: 8px; color: var(--accent); font-weight: 500; }
-    .eyebrow .icon { font-size: 16px; }
-    h1 { margin: 8px 0 6px; font-size: clamp(25px, 2.3vw, 36px); font-weight: 600; line-height: 1.25; }
-    .sub { margin: 0; color: var(--muted); }
     button { border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font: inherit; background: var(--accent); color: white; }
     button.ghost { color: var(--ink); background: #fffafa; border: 1px solid var(--line); }
     button.small { padding: 6px 10px; font-size: 13px; }
@@ -210,8 +153,6 @@
       .course-panel { padding-inline: 8px; }
     }
     @media (max-width: 640px) {
-      .hero-copy { max-width: min(78%, 340px); }
-      .hero-art { opacity: .42; mask-image: linear-gradient(to right, transparent, #000 70%); }
       .workspace { grid-template-columns: minmax(0, 1fr); }
       .course-list { max-height: 240px; overflow: auto; }
       .lesson-datetime { min-width: 88px; }
@@ -250,7 +191,6 @@
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
-    <symbol id="replay-icon-video" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="m10 8 6 4-6 4z"/></symbol>
     <symbol id="replay-icon-layers" viewBox="0 0 24 24"><path d="m12 2 10 6-10 6L2 8zM2 12l10 6 10-6M2 16l10 6 10-6"/></symbol>
     <symbol id="replay-icon-book" viewBox="0 0 24 24"><path d="M12 5C9 2 5 2 2 4v15c3-2 7-2 10 1 3-3 7-3 10-1V4c-3-2-7-2-10 1zm0 0v15"/></symbol>
     <symbol id="replay-icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
@@ -267,14 +207,7 @@
     <button type="button" id="dismissReplayAnnouncement" aria-label="关闭公告">×</button>
   </aside>
   <main>
-    <section class="hero" aria-labelledby="pageTitle">
-      <img class="hero-art" src="/course-replay-hero-v3.webp" width="1920" height="320" alt="" />
-      <div class="hero-copy">
-        <div class="eyebrow"><svg class="icon" aria-hidden="true"><use href="#replay-icon-video"/></svg>课程回放批量处理</div>
-        <h1 id="pageTitle">课程回放批量处理</h1>
-        <p class="sub">自动获取北大教学网课程列表，批量处理课程的全部回放视频，生成可下载的学习资料。</p>
-      </div>
-    </section>
+    <!-- replay-hero -->
 
     <div class="workspace">
       <aside class="course-panel" aria-labelledby="courseListTitle">

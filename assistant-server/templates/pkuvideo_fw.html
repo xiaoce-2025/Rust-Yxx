@@ -3,89 +3,57 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>「严小希」小助手-视频下载</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
+  <title>「严小希」小助手-回放中转与下载</title>
   <style>
-    :root {
-      --ink: #13241d;
-      --line: rgba(19,36,29,.18);
-      --accent: #0c7a57;
-      --warn: #982a3d;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      font-family: "Manrope", "Segoe UI", sans-serif;
-      background:
-        radial-gradient(50rem 20rem at -10% -10%, rgba(181,91,35,.2), transparent 60%),
-        radial-gradient(60rem 26rem at 110% 110%, rgba(12,122,87,.2), transparent 60%),
-        #edf3ed;
-      min-height: 100vh;
-      --site-page-inset: 20px;
-      padding: 0 var(--site-page-inset) var(--site-page-inset);
-    }
-    .wrap {
-      max-width: 960px;
-      margin: 0 auto;
-      border-radius: 20px;
+    /* replay-hero */
+    .workspace { padding: 16px var(--replay-gutter) 40px; }
+    .panel {
+      min-width: 0;
+      padding: clamp(16px, 1.5vw, 24px);
       border: 1px solid var(--line);
-      background: rgba(255,255,255,.82);
-      backdrop-filter: blur(8px);
-      box-shadow: 0 18px 38px rgba(0,0,0,.1);
-      padding: 20px;
+      border-radius: 16px;
+      background: #fffafa;
+      box-shadow: 0 5px 14px #4d17140b;
     }
-    h1 {
-      margin: 0;
-      font-family: "Noto Serif SC", serif;
-      font-size: 30px;
+    .panel-heading {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      margin-bottom: 14px;
     }
-    .sub { margin-top: 6px; color: #4f645b; font-size: 13px; }
-    .toolbar { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
-    button {
-      border: 0;
-      border-radius: 12px;
-      padding: 10px 14px;
-      cursor: pointer;
-      font-weight: 700;
-      background: var(--accent);
-      color: #fff;
-    }
-    button.ghost {
-      color: var(--ink);
-      background: rgba(255,255,255,.8);
-      border: 1px solid var(--line);
-    }
-    .grid {
-      margin-top: 14px;
-      display: grid;
+    .panel-heading h2, .panel-heading h3 {
+      display: flex;
+      align-items: center;
       gap: 10px;
-      grid-template-columns: 1fr 1fr;
+      margin: 0;
+      font-size: clamp(17px, 1.35vw, 21px);
+      font-weight: 600;
     }
-    .field label { font-size: 12px; display: block; margin-bottom: 4px; color: #4f635b; }
+    .panel-heading .icon, .file-row .icon { color: var(--accent); }
+    .input-panel { max-width: 760px; margin-inline: auto; }
+    .input-panel .sub { margin-bottom: 14px; }
+    .grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+    .field label { display: block; margin-bottom: 4px; color: var(--muted); }
     .field input {
       width: 100%;
-      border-radius: 10px;
+      padding: 9px 10px;
       border: 1px solid var(--line);
-      padding: 10px;
-      font: inherit;
+      border-radius: 9px;
       background: #fff;
+      color: var(--ink);
+      font: inherit;
     }
+    .field small { display: block; margin-top: 4px; color: var(--muted); }
+    .field a { color: var(--accent); }
     .full { grid-column: 1 / -1; }
-    .status { margin-top: 10px; color: var(--warn); min-height: 18px; font-size: 12px; }
-    .card {
-      margin-top: 16px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: rgba(255,255,255,.7);
-      padding: 12px;
-    }
-    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
-    @media (max-width: 760px) {
-      .grid { grid-template-columns: 1fr; }
-    }
+    .toolbar { margin-top: 16px; }
+    button { border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font: inherit; background: var(--accent); color: white; }
+    button.ghost { color: var(--ink); background: #fffafa; border: 1px solid var(--line); }
+    button:disabled { opacity: .5; cursor: default; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .status { margin: 0 0 12px; color: var(--muted); }
+    .status:empty { display: none; }
     .modal-overlay {
       display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
       background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center;
@@ -93,8 +61,9 @@
     .modal-dialog {
       background: #fff; border-radius: 16px; padding: 24px; max-width: 520px; width: 90%;
       box-shadow: 0 20px 60px rgba(0,0,0,.3);
+      max-height: 90vh; overflow-y: auto;
     }
-    .modal-dialog h3 { margin: 0 0 8px; font-family: "Noto Serif SC", serif; }
+    .modal-dialog h3 { margin: 0 0 8px; }
     .modal-dialog p { font-size: 13px; color: #6b7280; margin: 0 0 12px; }
     .key-url-box { background: #f3f4f6; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
     .key-url-box a { font-size: 12px; word-break: break-all; color: var(--accent); }
@@ -108,52 +77,59 @@
       text-align: center; color: #9ca3af; font-size: 13px; margin-bottom: 12px;
       transition: border-color .2s, background .2s; cursor: pointer;
     }
-    .drop-zone.drag-over { border-color: var(--accent); background: rgba(12,122,87,.06); }
-    .drop-zone.loaded { border-color: var(--accent); border-style: solid; background: rgba(12,122,87,.04); }
+    .drop-zone.drag-over { border-color: var(--accent); background: #fce5e5; }
+    .drop-zone.loaded { border-color: var(--accent); border-style: solid; background: #fdf3f3; }
     .drop-zone.loaded .drop-icon { color: var(--accent); }
     .key-hint { font-size: 12px; min-height: 18px; margin: -8px 0 8px; }
     .key-hint.ok { color: var(--accent); }
     .key-hint.err { color: var(--warn); }
     .job-result {
-      margin-top: 16px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: rgba(255,255,255,.7);
-      padding: 12px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr);
+      gap: clamp(12px, 1.6vw, 28px);
     }
-    .result-actions {
-      margin-top: 12px;
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .action-btn {
-      padding: 8px 14px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,.8);
-      color: var(--ink);
+    .job-result[hidden] { display: none; }
+    .job-result:not([data-status="succeeded"]) { grid-template-columns: minmax(0, 760px); justify-content: center; }
+    .job-result:not([data-status="succeeded"]) .preview-panel { display: none; }
+    .job-panel { display: flex; flex-direction: column; }
+    .job-meta { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+    .job-date { margin: 4px 0 0; color: var(--muted); }
+    .status-badge {
+      border-radius: 20px;
+      padding: 3px 10px;
+      background: #def0d3;
+      color: #24651b;
       font-size: 12px;
-      cursor: pointer;
       font-weight: 600;
     }
-    .action-btn:hover {
-      background: var(--accent);
-      color: #fff;
+    .job-panel .status-badge { margin-left: auto; }
+    .job-result:not([data-status="succeeded"]) .status-badge { display: none; }
+    .file-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .file-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
     }
-    .action-btn.delete {
-      border-color: var(--warn);
-      color: var(--warn);
-    }
-    .action-btn.delete:hover {
-      background: var(--warn);
-      color: #fff;
-    }
+    .file-row button { margin-left: auto; }
+    .translation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .result-actions { display: flex; flex-direction: column; flex: 1; }
+    .delete-actions { margin-top: auto; padding-top: 16px; }
+    .delete-actions button { color: var(--accent); }
+    .delete-actions button:hover { background: #fce5e5; }
     video {
+      display: block;
       width: 100%;
-      max-height: 480px;
+      aspect-ratio: 16 / 9;
+      max-height: 70vh;
       border-radius: 10px;
       background: #000;
+    }
+    @media (max-width: 760px) {
+      .job-result, .grid { grid-template-columns: minmax(0, 1fr); }
     }
     .progress-wrap {
       margin-top: 12px;
@@ -164,7 +140,7 @@
     }
     .progress-bar {
       height: 100%;
-      background: linear-gradient(90deg, #0c7a57, #22c55e);
+      background: var(--accent);
       border-radius: 8px;
       transition: width .3s;
       display: flex;
@@ -178,42 +154,60 @@
   </style>
 </head>
 <body>
-  <main class="wrap">
-    <h1>PKU Video 视频下载</h1>
-    <div class="sub">输入课程回放的下载链接和你的门户账密，下载视频后可直接在线预览。每个用户同时只能处理一个视频。（IAAA账密用于教学网登陆鉴权，你的账密会被直接发送至北大IAAA验证服务器，我们不会储存您的账密）</div>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="fw-icon-video" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="m10 8 6 4-6 4z"/></symbol>
+    <symbol id="fw-icon-task" viewBox="0 0 24 24"><path d="M9 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3M8 11h8m-8 5h8"/><rect x="9" y="2" width="6" height="4" rx="1"/></symbol>
+    <symbol id="fw-icon-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M3 16v5h18v-5"/></symbol>
+  </svg>
+  <main>
+    <!-- replay-hero -->
 
-    <div class="toolbar">
-      <button id="goAppBtn" class="ghost">返回首页</button>
-      <button id="submitBtn">提交下载任务</button>
+    <div class="workspace">
+      <div id="status" class="status" role="status"></div>
+
+      <section class="panel input-panel" id="inputSection" hidden aria-labelledby="inputTitle">
+        <div class="panel-heading"><h2 id="inputTitle"><svg class="icon" aria-hidden="true"><use href="#fw-icon-download"/></svg>提交下载任务</h2></div>
+        <p class="sub">每个用户同时只能处理一个视频。IAAA 账号和密码用于教学网登录鉴权，会直接发送至北大 IAAA 验证服务器，本站不会储存。</p>
+        <div class="grid">
+          <div class="field full">
+            <label for="videoUrl">视频下载链接</label>
+            <input id="videoUrl" placeholder="https://..." />
+            <small>如何获取课程回放下载链接？<a href="https://www.cxxdgc.cn/blog/project/videodownload2025autumn_addition" target="_blank">点此查看</a></small>
+          </div>
+          <div class="field">
+            <label for="pkuAuthOne">IAAA账号</label>
+            <input id="pkuAuthOne" placeholder="2x000xxxxx" />
+          </div>
+          <div class="field">
+            <label for="pkuAuthTwo">IAAA密码</label>
+            <input id="pkuAuthTwo" type="password" placeholder="xxxxx" />
+          </div>
+        </div>
+        <div class="toolbar"><button id="submitBtn">提交下载任务</button></div>
+      </section>
+
+      <div class="job-result" id="jobResult" hidden>
+        <section class="panel preview-panel" aria-labelledby="previewTitle">
+          <div class="panel-heading">
+            <h2 id="previewTitle"><svg class="icon" aria-hidden="true"><use href="#fw-icon-video"/></svg>当前视频</h2>
+            <span class="status-badge">下载完成</span>
+          </div>
+          <div id="videoPreview"></div>
+        </section>
+        <section class="panel job-panel" aria-labelledby="jobTitle">
+          <div class="panel-heading">
+            <h2 id="jobTitle"><svg class="icon" aria-hidden="true"><use href="#fw-icon-task"/></svg>任务信息</h2>
+            <span class="status-badge">下载任务已完成</span>
+          </div>
+          <p class="job-meta" id="jobMeta"></p>
+          <p class="job-date" id="jobDate" hidden></p>
+          <div class="progress-wrap" id="progressWrap" style="display: none;" role="progressbar" aria-label="下载进度" aria-valuemin="0" aria-valuemax="100">
+            <div class="progress-bar" id="progressBar" style="width: 0%;">0%</div>
+          </div>
+          <div class="result-actions" id="resultActions"></div>
+        </section>
+      </div>
     </div>
-
-    <section class="grid" id="inputSection">
-      <div class="field full">
-        <label for="videoUrl">视频下载链接</label>
-        <input id="videoUrl" placeholder="https://..." />
-        <div style="font-size: 12px; margin-top: 4px; color: #6b7280;">如何获取课程回放下载链接？<a href="https://www.cxxdgc.cn/blog/project/videodownload2025autumn_addition" target="_blank" style="color: #0c7a57;">点此查看</a></div>
-      </div>
-      <div class="field">
-        <label for="pkuAuthOne">IAAA账号</label>
-        <input id="pkuAuthOne" placeholder="2x000xxxxx" />
-      </div>
-      <div class="field">
-        <label for="pkuAuthTwo">IAAA密码</label>
-        <input id="pkuAuthTwo" type="password" placeholder="xxxxx" />
-      </div>
-    </section>
-
-    <div id="status" class="status"></div>
-
-    <section class="job-result" id="jobResult" style="display: none;">
-      <strong>任务状态</strong>
-      <div class="mono" id="jobMeta">加载中...</div>
-      <div class="progress-wrap" id="progressWrap" style="display: none;">
-        <div class="progress-bar" id="progressBar" style="width: 0%;">0%</div>
-      </div>
-      <div id="videoPreview" style="display: none; margin-top: 12px;"></div>
-      <div class="result-actions" id="resultActions"></div>
-    </section>
 
     <div class="modal-overlay" id="keyModal">
       <div class="modal-dialog">
@@ -235,6 +229,8 @@
     </div>
   </main>
 
+  <!-- site-footer -->
+
   <dialog id="restartTranslationDialog" style="border:0;border-radius:12px;max-width:420px;width:85%">
     <form onsubmit="event.preventDefault(); submitRestartTranslation();">
       <h3>重新翻译：管理员验证</h3>
@@ -253,7 +249,7 @@
     const jobMetaEl = document.getElementById("jobMeta");
     const jobResultEl = document.getElementById("jobResult");
     const inputSection = document.getElementById("inputSection");
-    const submitBtn = document.getElementById("submitBtn");
+    const jobDateEl = document.getElementById("jobDate");
     const videoPreview = document.getElementById("videoPreview");
     const resultActions = document.getElementById("resultActions");
     const progressWrap = document.getElementById("progressWrap");
@@ -295,16 +291,19 @@
     }
 
     function renderJob(job) {
+      inputSection.hidden = true;
+      jobResultEl.hidden = false;
+      jobResultEl.dataset.status = job.status;
+      const createdAt = new Date(job.created_at);
+      jobDateEl.hidden = Number.isNaN(createdAt.getTime());
+      if (!jobDateEl.hidden) jobDateEl.textContent = "创建时间：" + createdAt.toLocaleString("zh-CN");
+
       if (job.status === "succeeded") {
-        jobMetaEl.textContent = "下载完成！";
+        jobMetaEl.textContent = "";
         progressWrap.style.display = "none";
-        jobResultEl.style.display = "block";
-        inputSection.style.display = "none";
-        submitBtn.style.display = "none";
 
         // 视频预览
         const videoUrl = `/api/pkuvideo_fw/jobs/${job.id}/video.mp4`;
-        videoPreview.style.display = "block";
         if (videoPreview.dataset.jobId !== job.id) {
           videoPreview.dataset.jobId = job.id;
           translationReady = false;
@@ -321,22 +320,30 @@
           </div>
         `;
 
-        resultActions.innerHTML = `
-          <button id="translateBtn" class="action-btn" onclick="startTranslation(false)" style="background: var(--accent); color: #fff;">视频翻译</button>
-          <button id="restartTranslationBtn" class="action-btn" onclick="confirmRestartTranslation()" hidden disabled>重新翻译</button>
-          <button class="action-btn" onclick="downloadVideo('${job.id}')">下载原视频</button>
-          <button id="downloadTranslatedBtn" class="action-btn" onclick="downloadTranslatedVideo()" hidden disabled>下载翻译视频</button>
-          <button class="action-btn delete" onclick="deleteJob('${job.id}')">删除任务</button>
-        `;
+          resultActions.innerHTML = `
+            <section class="file-section" aria-labelledby="fileTitle">
+              <div class="panel-heading"><h3 id="fileTitle"><svg class="icon" aria-hidden="true"><use href="#fw-icon-download"/></svg>视频文件</h3></div>
+              <div class="file-row">
+                <svg class="icon" aria-hidden="true"><use href="#fw-icon-video"/></svg><span>课程回放视频（MP4）</span>
+                <button onclick="downloadVideo('${job.id}')">下载原视频</button>
+              </div>
+              <div class="translation-actions">
+                <button id="translateBtn" class="ghost" onclick="startTranslation(false)">视频翻译</button>
+                <button id="restartTranslationBtn" class="ghost" onclick="confirmRestartTranslation()" hidden disabled>重新翻译</button>
+                <button id="downloadTranslatedBtn" class="ghost" onclick="downloadTranslatedVideo()" hidden disabled>下载翻译视频</button>
+              </div>
+            </section>
+            <div class="delete-actions">
+              <button class="ghost" onclick="deleteJob('${job.id}')">删除当前任务</button>
+            </div>
+          `;
           refreshTranslation();
         }
       } else if (job.status === "failed") {
         jobMetaEl.textContent = "下载失败: " + esc(job.error || "未知错误");
         progressWrap.style.display = "none";
-        jobResultEl.style.display = "block";
-        videoPreview.style.display = "none";
         resultActions.innerHTML = `
-          <button class="action-btn delete" onclick="deleteJob('${job.id}')">删除任务</button>
+          <div class="delete-actions"><button class="ghost" onclick="deleteJob('${job.id}')">删除当前任务</button></div>
         `;
       } else if (job.status === "running" || job.status === "pending") {
         const pct = job.progress != null ? job.progress : 0;
@@ -344,11 +351,7 @@
         progressWrap.style.display = "block";
         progressBar.style.width = pct + "%";
         progressBar.textContent = pct + "%";
-        progressBar.setAttribute('aria-valuenow', pct);
-        jobResultEl.style.display = "block";
-        inputSection.style.display = "none";
-        submitBtn.style.display = "none";
-        videoPreview.style.display = "none";
+        progressWrap.setAttribute('aria-valuenow', pct);
         resultActions.innerHTML = "";
       }
     }
@@ -373,9 +376,8 @@
           }
         } else {
           // 没有任务，显示输入表单
-          inputSection.style.display = "";
-          submitBtn.style.display = "";
-          jobResultEl.style.display = "none";
+          inputSection.hidden = false;
+          jobResultEl.hidden = true;
         }
       } catch (err) {
         statusEl.textContent = "加载任务状态失败: " + err.message;
@@ -395,10 +397,7 @@
         .then(resp => {
           activeJobId = resp.job_id;
           statusEl.textContent = "提交成功，任务已入队。";
-          inputSection.style.display = "none";
-          submitBtn.style.display = "none";
-          jobResultEl.style.display = "block";
-          jobMetaEl.textContent = "正在下载中，请稍后...";
+          renderJob({ status: "pending" });
           startPolling();
         })
         .catch(err => {
@@ -535,10 +534,8 @@
         statusEl.textContent = "任务删除成功";
         activeJobId = "";
         // 重新显示输入表单
-        inputSection.style.display = "";
-        submitBtn.style.display = "";
-        jobResultEl.style.display = "none";
-        videoPreview.style.display = "none";
+        inputSection.hidden = false;
+        jobResultEl.hidden = true;
         videoPreview.innerHTML = "";
         delete videoPreview.dataset.jobId;
         translationReady = false;
@@ -711,17 +708,13 @@
       document.body.removeChild(a);
     }
 
-    document.getElementById("goAppBtn").addEventListener("click", () => {
-      location.href = "/";
-    });
     document.getElementById("submitBtn").addEventListener("click", checkM3u8AndSubmit);
 
     async function openLessonReplay() {
       const query = new URLSearchParams(location.search);
       const courseId = query.get('course_id'), lessonId = query.get('lesson_id');
       if (!courseId || !lessonId) return checkExistingJob();
-      inputSection.style.display = 'none';
-      submitBtn.style.display = 'none';
+      inputSection.hidden = true;
       statusEl.textContent = '正在准备课程回放，请稍候…';
       history.replaceState(null, '', '/pkuvideo_fw');
       try {

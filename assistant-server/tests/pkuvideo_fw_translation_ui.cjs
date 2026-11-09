@@ -17,6 +17,7 @@ class Element {
   appendChild(child) { this.children.push(child); child.parent = this; }
   removeChild(child) { this.children = this.children.filter(c => c !== child); }
   remove() { this.parent?.removeChild(this); }
+  setAttribute(name, value) { this[name] = String(value); }
   removeAttribute(name) { delete this[name]; }
   pause() { this.paused = true; }
   play() { this.paused = false; return Promise.resolve(); }
@@ -51,7 +52,7 @@ class Element {
   });
   const html = fs.readFileSync(path.join(__dirname, '../templates/pkuvideo_fw.html'), 'utf8');
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1]
-    .replace('checkLogin().then(() => openManualReplay());', '');
+    .replace('checkLogin().then(() => openLessonReplay());', '');
   vm.runInContext(script, context);
   vm.runInContext('activeJobId = "job-1";', context);
   element('fwPlayer').dataset.variant = 'source';
@@ -128,8 +129,22 @@ class Element {
   assert.equal(vm.runInContext('translationReady', context), false);
   assert.equal(element('downloadTranslatedBtn').hidden, true);
   assert.equal(player.dataset.variant, 'source');
+
+  for (const status of ['pending', 'running', 'failed', 'succeeded']) {
+    context.testJob = { id: 'job-1', status, progress: 42, created_at: '2026-09-18T06:26:00Z' };
+    vm.runInContext('renderJob(testJob)', context);
+    assert.equal(element('inputSection').hidden, true, `Hide submission form for ${status}`);
+    assert.equal(element('jobResult').hidden, false);
+    assert.equal(element('jobResult').dataset.status, status);
+  }
+  context.confirm = () => false;
+  await vm.runInContext('deleteJob("job-1")', context);
+  assert.equal(element('inputSection').hidden, true);
+  context.confirm = () => true;
   await vm.runInContext('deleteJob("job-1")', context);
   assert.equal(requests.at(-1).method, 'DELETE');
+  assert.equal(element('inputSection').hidden, false);
+  assert.equal(element('jobResult').hidden, true);
   assert.equal(vm.runInContext('activeJobId', context), '');
   assert.equal(element('videoPreview').dataset.jobId, undefined);
   assert.equal(vm.runInContext('translationReady', context), false);

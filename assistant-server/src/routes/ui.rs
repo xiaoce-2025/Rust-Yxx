@@ -117,11 +117,31 @@ async fn pkuvideofullclass_page() -> Html<String> {
 }
 
 async fn pkuvideo_fw_page() -> Html<String> {
-    site_page(include_str!("../../templates/pkuvideo_fw.html"), "/pkuvideo_fw")
+    replay_page(
+        include_str!("../../templates/pkuvideo_fw.html"),
+        "/pkuvideo_fw",
+        "回放中转与下载",
+        "下载课程回放并在线预览，便捷保存到本地。",
+    )
 }
 
 async fn pkuvideo_sequence_page() -> Html<String> {
-    site_page(include_str!("../../templates/pkuvideo_sequence.html"), "/pkuvideo_sequence")
+    replay_page(
+        include_str!("../../templates/pkuvideo_sequence.html"),
+        "/pkuvideo_sequence",
+        "课程回放批量处理",
+        "自动获取北大教学网课程列表，批量处理课程的全部回放视频，生成可下载的学习资料。",
+    )
+}
+
+fn replay_page(source: &str, active_path: &str, title: &str, description: &str) -> Html<String> {
+    let hero = include_str!("../../templates/replay-hero.html")
+        .replace("{{replay_title}}", title)
+        .replace("{{replay_description}}", description);
+    let page = source
+        .replacen("/* replay-hero */", include_str!("../../templates/replay-hero.css").trim_start(), 1)
+        .replacen("    <!-- replay-hero -->", hero.trim_end(), 1);
+    site_page(&page, active_path)
 }
 
 async fn user_center_page() -> Html<String> {
@@ -136,7 +156,7 @@ fn guarded_page(source: &'static str) -> Html<String> {
     site_page(source, "")
 }
 
-fn site_page(source: &'static str, active_path: &str) -> Html<String> {
+fn site_page(source: &str, active_path: &str) -> Html<String> {
     let css = include_str!("../../templates/site-header.css");
     let footer_css = include_str!("../../templates/site-footer.css");
     let footer = include_str!("../../templates/site-footer.html");
