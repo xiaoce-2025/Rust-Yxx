@@ -26,6 +26,28 @@
     body .site-header { background: #fffafa; --site-header-height: 47px; }
     body .site-header .site-header-inner, body .site-footer { width: calc(100% - 2 * var(--replay-gutter)); }
     main { flex: 1; }
+    .replay-announcement {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px var(--replay-gutter);
+      background: rgb(139, 0, 18);
+      color: #fff;
+    }
+    .replay-announcement[hidden] { display: none; }
+    .replay-announcement p { flex: 1; margin: 0; }
+    .replay-announcement button {
+      flex: none;
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      background: transparent;
+      color: inherit;
+      font-size: 24px;
+      line-height: 1;
+    }
+    .replay-announcement button:hover { background: #ffffff26; }
+    .replay-announcement button:focus-visible { outline-color: #fff; }
     .icon {
       width: 1.25em;
       height: 1.25em;
@@ -47,9 +69,10 @@
     .hero-art {
       position: absolute;
       inset: 0 0 0 auto;
-      width: min(42%, 480px);
+      width: min(100%, 960px);
       height: 100%;
       object-fit: cover;
+      object-position: right center;
       mask-image: linear-gradient(to right, transparent, #000 23%);
     }
     .hero-copy {
@@ -168,17 +191,16 @@
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 8px 18px;
+      gap: 6px 10px;
       min-height: 63px;
-      padding: 7px 0 7px clamp(10px, 1.25vw, 20px);
+      padding: 7px 0;
       border-bottom: 1px solid #eee3e3;
     }
-    .lesson-datetime { min-width: clamp(118px, 10.5vw, 173px); }
+    .lesson-datetime { min-width: 100px; }
     .lesson-date { font-size: 15px; font-weight: 600; }
     .lesson-title { font-size: 14px; font-weight: 600; }
-    .lesson-time-row { display: flex; flex-wrap: wrap; gap: 0 16px; font-size: 13px; color: var(--muted); }
-    .lesson-info { display: flex; align-items: center; gap: 8px 20px; padding-left: clamp(12px, 2vw, 30px); border-left: 1px solid #cfc4c4; }
-    .lesson-title { min-width: clamp(75px, 7vw, 118px); }
+    .lesson-time-row { display: flex; flex-wrap: wrap; gap: 0 8px; font-size: 13px; color: var(--muted); }
+    .lesson-info { display: grid; grid-template-columns: 64px auto; align-items: center; justify-items: start; gap: 6px; text-align: left; }
     .lesson-title .hint { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
     .lesson-status { display: inline-flex; align-items: center; gap: 4px; background: #eee9e9; color: #4d4141; border-radius: 20px; padding: 3px 10px; font-size: 12px; white-space: nowrap; }
     .lesson-status.done { background: #def0d3; color: #24651b; font-weight: 600; }
@@ -189,53 +211,12 @@
     }
     @media (max-width: 640px) {
       .hero-copy { max-width: min(78%, 340px); }
-      .hero-art { width: 58%; opacity: .45; mask-image: linear-gradient(to right, transparent, #000 65%); }
+      .hero-art { opacity: .42; mask-image: linear-gradient(to right, transparent, #000 70%); }
       .workspace { grid-template-columns: minmax(0, 1fr); }
       .course-list { max-height: 240px; overflow: auto; }
-      .lesson-datetime { min-width: 98px; }
-      .lesson-info { padding-left: 0; border: 0; gap: 6px; }
-      .lesson-title { min-width: 0; }
+      .lesson-datetime { min-width: 88px; }
+      .lesson-info { grid-template-columns: 54px auto; }
       .lesson-actions { width: 100%; }
-    }
-    /* 大弹窗样式 */
-    .big-overlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,.55);
-      backdrop-filter: blur(6px);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 9999;
-    }
-    .big-dialog {
-      background: #fff;
-      border-radius: 20px;
-      padding: 40px 36px 32px;
-      max-width: 520px;
-      width: 90%;
-      text-align: center;
-      box-shadow: 0 20px 60px rgba(0,0,0,.25);
-    }
-    .big-dialog .icon-warn {
-      font-size: 48px;
-      margin-bottom: 16px;
-    }
-    .big-dialog h2 {
-      font-family: "Noto Serif SC", serif;
-      font-size: 22px;
-      margin: 0 0 12px;
-      color: var(--ink);
-    }
-    .big-dialog p {
-      font-size: 14px;
-      color: #6b7280;
-      line-height: 1.7;
-      margin: 0 0 20px;
-    }
-    .big-dialog button {
-      padding: 10px 28px;
-      font-size: 14px;
     }
     .modal-overlay {
       display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -281,9 +262,13 @@
     <symbol id="replay-icon-file" viewBox="0 0 24 24"><path d="M5 3h9l5 5v13H5zm9 0v5h5M8 12h8m-8 4h8"/></symbol>
     <symbol id="replay-icon-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
   </svg>
+  <aside class="replay-announcement" id="replayAnnouncement" aria-labelledby="replayAnnouncementTitle">
+    <p><strong id="replayAnnouncementTitle">项目使用提醒</strong>　由于教学网2026年9月20日对回放视频进行的加密更新和2026年10月22-24日进行的安全性更新，本功能模块稳定性受到部分影响，请在使用项目时不要在其他地方登录教学网，并欢迎通过提交issue向我们反映问题！</p>
+    <button type="button" id="dismissReplayAnnouncement" aria-label="关闭公告">×</button>
+  </aside>
   <main>
     <section class="hero" aria-labelledby="pageTitle">
-      <img class="hero-art" src="/course-replay-hero-v2.webp" width="1440" height="480" alt="" />
+      <img class="hero-art" src="/course-replay-hero-v3.webp" width="1920" height="320" alt="" />
       <div class="hero-copy">
         <div class="eyebrow"><svg class="icon" aria-hidden="true"><use href="#replay-icon-video"/></svg>课程回放批量处理</div>
         <h1 id="pageTitle">课程回放批量处理</h1>
@@ -335,16 +320,6 @@
     </div>
   </main>
   <!-- site-footer -->
-    <!-- 功能暂不可用弹窗 -->
-    <div class="big-overlay" id="bigOverlay">
-      <div class="big-dialog">
-        <div class="icon-warn">&#9888;</div>
-        <h2>项目使用提醒</h2>
-        <p>由于教学网2026年9月20日对回放视频进行的加密更新和2026年10月22-24日进行的安全性更新，本功能模块稳定性受到部分影响，请在使用项目时不要在其他地方登录教学网，并欢迎通过提交issue向我们反映问题！</p>
-        <button onclick="document.getElementById('bigOverlay').remove()">我知道了</button>
-      </div>
-    </div>
-
     <div class="modal-overlay" id="manualAddModal">
       <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="manualAddTitle">
         <h3 id="manualAddTitle">手动添加课节</h3>
@@ -439,7 +414,7 @@
       semesterSelectEl.disabled = processing;
       document.querySelectorAll('button').forEach(btn => {
         const id = btn.id;
-        if (id !== 'refreshBtn' && id !== 'refreshLessonsBtn' && id !== 'manualAddCancel') {
+        if (id !== 'refreshBtn' && id !== 'refreshLessonsBtn' && id !== 'manualAddCancel' && id !== 'dismissReplayAnnouncement') {
           btn.disabled = processing;
         }
       });
@@ -1278,6 +1253,10 @@
         input.click();
       });
     })();
+
+    document.getElementById("dismissReplayAnnouncement").addEventListener("click", () => {
+      document.getElementById("replayAnnouncement").hidden = true;
+    });
 
     checkLogin();
     checkBinding();

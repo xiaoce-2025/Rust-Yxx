@@ -48,6 +48,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
             ([(axum::http::header::CONTENT_TYPE, "image/webp")],
                 include_bytes!("../../assest/course-replay-hero-v2.webp").as_slice())
         }))
+        .route("/course-replay-hero-v3.webp", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "image/webp")],
+                include_bytes!("../../assest/course-replay-hero-v3.webp").as_slice())
+        }))
         .route("/chat", get(app_page))
         .route("/pkuvideo", get(pkuvideo_page))
         .route("/pkuvideofullclass", get(pkuvideofullclass_page))
