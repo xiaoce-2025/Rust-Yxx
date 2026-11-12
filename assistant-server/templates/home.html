@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>首页 | 「严小希」小助手</title>
+  <style>
+    :root { --red: #9b0000; --ink: #2c2020; --muted: #655554; --line: #eadcda; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #fff; color: var(--ink); font-family: Arial, "Microsoft YaHei", sans-serif; }
+    a { color: inherit; text-decoration: none; }
+    a:focus-visible { outline: 2px solid var(--red); outline-offset: 3px; }
+    .shell { width: min(1280px, calc(100% - 48px)); margin: auto; }
+    .hero { background: linear-gradient(105deg, #fff6f2, #f7e5df); }
+    .hero-inner { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 32px; min-height: 308px; }
+    .hero-copy { padding: 28px 0; }
+    .eyebrow { color: var(--red); font-size: 14px; font-weight: bold; letter-spacing: .12em; }
+    h1 { margin: 12px 0; font-size: clamp(32px, 4vw, 58px); line-height: 1.15; }
+    p { color: var(--muted); line-height: 1.65; }
+    .hero p { margin: 0; }
+    .hero img { display: block; width: 100%; height: 308px; object-fit: contain; }
+    .quick-links { background: #fcf6f4; border-top: 1px solid #fff; }
+    .quick-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .quick-link { display: block; padding: 18px; border-inline-start: 1px solid var(--line); }
+    .quick-link:last-child { border-inline-end: 1px solid var(--line); }
+    .quick-link:hover { background: #fff; }
+    .quick-link strong { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; font-size: 16px; }
+    .quick-link p { margin: 5px 0 0; font-size: 13px; }
+    .arrow { color: var(--red); }
+    .section-band { margin: 0; padding: 10px 24px; background: #9b0000; color: #fff; text-align: center; font-size: 15px; }
+    .setup { padding: 38px 0 44px; background: #fbf0ed; }
+    .setup h3 { margin: 0; font-size: clamp(23px, 3vw, 34px); text-align: center; }
+    .setup-intro { margin: 8px 0 24px; text-align: center; }
+    .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; background: #fff; border: 1px solid var(--line); }
+    .steps li { padding: 20px; }
+    .steps li + li { border-inline-start: 1px solid var(--line); }
+    .step-number { color: var(--red); font-size: 16px; font-weight: bold; margin-right: 6px; }
+    .steps p { margin: 8px 0 0; font-size: 14px; }
+    .steps a { color: var(--red); text-decoration: underline; text-underline-offset: 3px; }
+    footer { padding: 18px 0; color: var(--muted); font-size: 13px; }
+    @media (max-width: 760px) {
+      .shell { width: calc(100% - 32px); }
+      .quick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .quick-link { border: 1px solid var(--line); margin: 0 -1px -1px 0; padding: 14px; }
+    }
+    @media (max-width: 540px) {
+      .hero-inner { grid-template-columns: 1fr; gap: 0; }
+      .hero-copy { padding: 24px 0 12px; }
+      .hero img { height: auto; max-height: 205px; }
+      .steps { grid-template-columns: 1fr; }
+      .steps li + li { border-inline-start: 0; border-top: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero" aria-labelledby="welcome-title">
+      <div class="shell hero-inner">
+        <div class="hero-copy">
+          <span class="eyebrow">「严小希」学习工作台</span>
+          <h1 id="welcome-title">学习路上，小希相伴</h1>
+          <p>在这里查看课程回放、处理视频，或和小希开始一段对话。</p>
+        </div>
+        <img src="/auth/login-picture.cf4a1b3511c8.webp" width="1672" height="941" alt="严小希校园插画" />
+      </div>
+    </section>
+    <nav class="quick-links" id="tools-title" aria-label="常用功能">
+      <div class="shell quick-grid">
+        <a class="quick-link" href="/pkuvideo_sequence">
+          <strong>课程回放批量处理 <span class="arrow" aria-hidden="true">↗</span></strong>
+          <p>按课程查看回放，选择多个课节批量处理。</p>
+        </a>
+        <a class="quick-link" href="/pkuvideo">
+          <strong>PKU Video 工作台 <span class="arrow" aria-hidden="true">↗</span></strong>
+          <p>提交课程视频，查看处理进度和结果。</p>
+        </a>
+        <a class="quick-link" href="/pkuvideo_fw">
+          <strong>视频下载与翻译 <span class="arrow" aria-hidden="true">↗</span></strong>
+          <p>下载回放视频，提交视频翻译任务。</p>
+        </a>
+        <a class="quick-link" href="/chat">
+          <strong>和小希聊天 <span class="arrow" aria-hidden="true">↗</span></strong>
+          <p>开始新对话，或继续之前的会话。</p>
+        </a>
+      </div>
+    </nav>
+    <section aria-labelledby="setup-title">
+      <h2 class="section-band" id="setup-title">课程回放入门</h2>
+      <div class="setup">
+        <div class="shell">
+          <h3>从绑定账号到观看回放</h3>
+          <p class="setup-intro">绑定北大 IAAA 账号后，即可在批量处理页查看课程列表。</p>
+          <ol class="steps">
+            <li><span class="step-number" aria-hidden="true">01.</span><a href="/pkuvideo_fullclass?callback=/">绑定北大 IAAA 账号</a><p>连接教学网账号，获取你的课程。</p></li>
+            <li><span class="step-number" aria-hidden="true">02.</span><a href="/pkuvideo_sequence">打开课程列表</a><p>选择课程，查看已有回放的课节。</p></li>
+            <li><span class="step-number" aria-hidden="true">03.</span><strong>观看或处理课节</strong><p>打开单节回放，或勾选多个课节批量处理。</p></li>
+          </ol>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer class="shell">「严小希」小助手 · 由 cxxdgc 开发</footer>
+</body>
+</html>

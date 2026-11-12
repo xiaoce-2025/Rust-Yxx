@@ -119,8 +119,8 @@
     const loginForm = document.getElementById("loginForm");
     const registerForm = document.getElementById("registerForm");
 
-    const requestedNext = new URLSearchParams(location.search).get("next") || "/app";
-    let next = "/app";
+    const requestedNext = new URLSearchParams(location.search).get("next") || "/";
+    let next = "/";
     try {
       const nextUrl = new URL(requestedNext, location.origin);
       if (nextUrl.origin === location.origin && ["http:", "https:"].includes(nextUrl.protocol)) {

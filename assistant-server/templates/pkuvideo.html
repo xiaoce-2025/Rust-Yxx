@@ -24,7 +24,8 @@
         radial-gradient(60rem 26rem at 110% 110%, rgba(12,122,87,.2), transparent 60%),
         #edf3ed;
       min-height: 100vh;
-      padding: 20px;
+      --site-page-inset: 20px;
+      padding: 0 var(--site-page-inset) var(--site-page-inset);
     }
     .wrap {
       max-width: 960px;
@@ -191,7 +192,7 @@
     <div class="sub">在下方输入课程回放的下载链接和你的门户账密，让严小希来帮你上课记笔记！（IAAA账密用于教学网登陆鉴权，你的账密会被直接发送至北大IAAA验证服务器，我们不会储存您的账密）</div>
 
     <div class="toolbar">
-      <button id="goAppBtn" class="ghost">返回聊天主页</button>
+      <button id="goAppBtn" class="ghost">返回首页</button>
       <button id="submitBtn">提交处理任务</button>
       <button id="historyBtn">查看历史记录</button>
     </div>
@@ -543,7 +544,7 @@
     }
 
     document.getElementById("goAppBtn").addEventListener("click", () => {
-      location.href = "/app";
+      location.href = "/";
     });
     document.getElementById("submitBtn").addEventListener("click", checkM3u8AndSubmit);
     document.getElementById("historyBtn").addEventListener("click", loadHistory);

@@ -34,10 +34,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
                 (CACHE_CONTROL, "public, max-age=31536000, immutable")],
                 include_bytes!("../../assest/login_preview.ef807508d656.webp").as_slice())
         }))
-        .route("/", get(app_page))
-        .route("/app", get(app_page))
+        .route("/", get(home_page))
+        .route("/chat", get(app_page))
         .route("/pkuvideo", get(pkuvideo_page))
         .route("/pkuvideofullclass", get(pkuvideofullclass_page))
+        .route("/pkuvideo_fullclass", get(pkuvideofullclass_page))
         .route("/pkuvideo_fw", get(pkuvideo_fw_page))
         .route("/pkuvideo_sequence", get(pkuvideo_sequence_page))
         .route("/settings", get(settings_page))
@@ -48,7 +49,7 @@ async fn require_login(State(state): State<AppState>, request: Request, next: Ne
     if matches!(request.uri().path(), "/auth" | "/auth/iaaa-login.css" | "/auth/login-picture.png" | LOGIN_IMAGE_URL | LOGIN_PREVIEW_URL) {
         return next.run(request).await;
     }
-    let target = request.uri().path_and_query().map(|uri| uri.as_str()).unwrap_or("/app").to_string();
+    let target = request.uri().path_and_query().map(|uri| uri.as_str()).unwrap_or("/").to_string();
     let (mut parts, body) = request.into_parts();
     let mut response = if crate::auth::CurrentUser::from_request_parts(&mut parts, &state).await.is_ok() {
         next.run(Request::from_parts(parts, body)).await
@@ -67,8 +68,12 @@ async fn app_page() -> Html<String> {
     guarded_page(include_str!("../../templates/app.html"))
 }
 
+async fn home_page() -> Html<String> {
+    site_page(include_str!("../../templates/home.html"), "/")
+}
+
 async fn pkuvideo_page() -> Html<String> {
-    guarded_page(include_str!("../../templates/pkuvideo.html"))
+    site_page(include_str!("../../templates/pkuvideo.html"), "/pkuvideo")
 }
 
 async fn pkuvideofullclass_page() -> Html<String> {
@@ -76,11 +81,11 @@ async fn pkuvideofullclass_page() -> Html<String> {
 }
 
 async fn pkuvideo_fw_page() -> Html<String> {
-    guarded_page(include_str!("../../templates/pkuvideo_fw.html"))
+    site_page(include_str!("../../templates/pkuvideo_fw.html"), "/pkuvideo_fw")
 }
 
 async fn pkuvideo_sequence_page() -> Html<String> {
-    guarded_page(include_str!("../../templates/pkuvideo_sequence.html"))
+    site_page(include_str!("../../templates/pkuvideo_sequence.html"), "/pkuvideo_sequence")
 }
 
 async fn settings_page() -> Html<String> {
@@ -88,7 +93,20 @@ async fn settings_page() -> Html<String> {
 }
 
 fn guarded_page(source: &'static str) -> Html<String> {
-    Html(source.replacen("<head>", &format!("<head>{}", include_str!("../../templates/batch_submission_guard.html")), 1))
+    site_page(source, "")
+}
+
+fn site_page(source: &'static str, active_path: &str) -> Html<String> {
+    let css = include_str!("../../templates/site-header.css");
+    let guard = include_str!("../../templates/batch_submission_guard.html");
+    let header = include_str!("../../templates/site-header.html").replacen(
+        &format!("href=\"{active_path}\""),
+        &format!("href=\"{active_path}\" aria-current=\"page\""),
+        1,
+    );
+    Html(source
+        .replacen("<head>", &format!("<head>{guard}<style>{css}</style>"), 1)
+        .replacen("<body>", &format!("<body>{header}"), 1))
 }
 
 #[cfg(test)]
@@ -115,7 +133,8 @@ mod tests {
         let app = routes(state.clone()).with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
-        for path in ["/", "/app", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fw", "/pkuvideo_sequence"] {
+        assert_eq!(client.get(format!("{base}/app")).send().await.unwrap().status(), 404);
+        for path in ["/", "/chat", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence"] {
             let response = client.get(format!("{base}{path}")).send().await.unwrap();
             assert_eq!(response.status(), 303);
             assert_eq!(response.headers()["location"], format!("/auth?next={}", urlencoding::encode(path)));
@@ -152,8 +171,30 @@ mod tests {
                 .header("cookie", format!("assistant_token={token}")).send().await.unwrap();
             assert_eq!(response.status().as_u16(), expected);
             assert_eq!(response.headers()["cache-control"], "no-store");
-            if expected == 200 { assert!(response.text().await.unwrap().contains("<!doctype html>")); }
-            else { assert!(response.text().await.unwrap().is_empty()); }
+            if expected == 200 {
+                assert!(response.text().await.unwrap().contains("<!doctype html>"));
+                for (path, marker) in [
+                    ("/", "id=\"tools-title\""),
+                    ("/chat", "id=\"messageInput\""),
+                    ("/pkuvideo_sequence", "href=\"/pkuvideo_sequence\" aria-current=\"page\""),
+                    ("/pkuvideo", "href=\"/pkuvideo\" aria-current=\"page\""),
+                    ("/pkuvideo_fw", "href=\"/pkuvideo_fw\" aria-current=\"page\""),
+                    ("/pkuvideo_fullclass?callback=/", "IAAA账密绑定"),
+                ] {
+                    let response = client.get(format!("{base}{path}"))
+                        .header("cookie", format!("assistant_token={token}")).send().await.unwrap();
+                    assert_eq!(response.status(), 200, "{path}");
+                    let html = response.text().await.unwrap();
+                    assert!(html.contains(marker), "{path}");
+                    let (_, header) = html.split_once("<header class=\"site-header\">").unwrap();
+                    let (header, _) = header.split_once("</header>").unwrap();
+                    let mut links = header.match_indices("href=").map(|(index, _)| &header[index + 6..]);
+                    for href in ["/", "/pkuvideo_sequence", "/pkuvideo", "/pkuvideo_fw"] {
+                        assert_eq!(links.next().unwrap().split('"').next(), Some(href));
+                    }
+                    assert!(links.next().is_none());
+                }
+            } else { assert!(response.text().await.unwrap().is_empty()); }
         }
         server.abort();
     }

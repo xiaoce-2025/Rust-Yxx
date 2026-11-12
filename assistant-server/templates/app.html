@@ -51,7 +51,7 @@
     .app {
       display: grid;
       grid-template-columns: 290px 1fr;
-      min-height: 100vh;
+      min-height: calc(100vh - 43px);
       gap: 12px;
       padding: 12px;
     }
@@ -234,6 +234,7 @@
           <div class="tiny" id="headHint">输入消息开始对话</div>
         </div>
         <div class="toolbar">
+          <button class="ghost" id="goHomeBtn">首页</button>
           <button id="themeToggleBtn" class="ghost">切换主题</button>
           <button id="logoutBtn" class="danger">退出</button>
         </div>
@@ -375,7 +376,7 @@
 
     async function logout() {
       try { await api("/api/auth/logout", "POST", {}); } catch {}
-      location.href = "/auth?next=/app";
+      location.href = "/auth?next=/chat";
     }
 
     function toggleTheme() {
@@ -388,7 +389,7 @@
       try {
         await fetchMe();
       } catch {
-        location.href = "/auth?next=/app";
+        location.href = "/auth?next=/chat";
         return;
       }
       await loadConversations();
@@ -406,6 +407,7 @@
     });
     document.getElementById("sendBtn").addEventListener("click", sendCurrentMessage);
     document.getElementById("themeToggleBtn").addEventListener("click", toggleTheme);
+    document.getElementById("goHomeBtn").addEventListener("click", () => { location.href = "/"; });
     document.getElementById("logoutBtn").addEventListener("click", logout);
 
     el.messageInput.addEventListener("keydown", (e) => {
