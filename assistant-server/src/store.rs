@@ -201,6 +201,58 @@ async fn write_collection(
 }
 
 impl FileStore {
+    pub async fn admin_users(&self) -> Vec<FileUser> {
+        self.users.read().await.values().cloned().collect()
+    }
+
+    pub async fn admin_update_user(&self, id: Uuid, active: bool, storage: i32, processing: i32, priority: u32) -> Result<(), crate::error::ApiError> {
+        use crate::error::ApiError;
+        let mut users = self.users.write().await;
+        let mut updated = users.clone();
+        let user = updated.get_mut(&id).ok_or(ApiError::NotFound)?;
+        user.is_active = active;
+        user.storage_quota = storage;
+        user.processing_quota = processing;
+        user.processing_priority = priority;
+        user.updated_at = Utc::now();
+        self.save_collection("users", &updated).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+        *users = updated;
+        Ok(())
+    }
+
+    pub async fn admin_revoke_sessions(&self, user_id: Uuid) -> Result<usize, StoreError> {
+        let mut sessions = self.sessions.write().await;
+        let mut updated = sessions.clone();
+        updated.retain(|_, s| s.user_id != user_id);
+        let count = sessions.len() - updated.len();
+        self.save_collection("sessions", &updated).await?;
+        *sessions = updated;
+        Ok(count)
+    }
+
+    pub async fn admin_session_counts(&self) -> HashMap<Uuid, usize> {
+        let mut counts = HashMap::new();
+        for session in self.sessions.read().await.values().filter(|s| s.expires_at > Utc::now()) {
+            *counts.entry(session.user_id).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    pub async fn admin_whitelist(&self) -> Vec<String> {
+        self.whitelist.read().await.allowed_emails.clone()
+    }
+
+    pub async fn admin_save_whitelist(&self, emails: Vec<String>) -> Result<(), StoreError> {
+        let mut whitelist = self.whitelist.write().await;
+        let updated = RegistrationWhitelist { allowed_emails: emails };
+        let path = self.data_dir.join("whitelist.json");
+        let temporary = self.data_dir.join("whitelist.json.tmp");
+        tokio::fs::write(&temporary, serde_json::to_vec_pretty(&updated)?).await?;
+        tokio::fs::rename(&temporary, &path).await?;
+        *whitelist = updated;
+        Ok(())
+    }
+
     pub async fn new(data_dir: PathBuf) -> Result<Self, StoreError> {
         tokio::fs::create_dir_all(&data_dir).await?;
         let db = SqlitePoolOptions::new()

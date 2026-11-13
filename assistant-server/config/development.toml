@@ -15,6 +15,11 @@ qr_bot_type = "test"
 [security]
 session_ttl_hours = 24
 
+# 管理后台账户 ID，登录后可从 /api/auth/me 的 user_id 获取。
+# 空列表关闭后台权限。在实际加载的环境配置中填写账户 UUID。
+[admin]
+user_ids = []
+
 [cors]
 allowed_origins = ["http://localhost:3000", "http://localhost:8080"]
 allow_credentials = true

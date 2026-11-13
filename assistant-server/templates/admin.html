@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>站点管理 | 「严小希」小助手</title>
+  <style>
+    :root { --brand:#9b0000; --text:#333; --muted:#666; --line:#ddd; --link:#6f3330; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:#fff; color:var(--text); font:13px/1.5 Arial,"Microsoft YaHei",sans-serif; }
+    a { color:var(--link); text-decoration:none; } a:hover { text-decoration:underline; }
+    button,input,select { font:inherit; } button { cursor:pointer; } button:disabled { opacity:.5; cursor:default; }
+    [hidden] { display:none !important; } :focus-visible { outline:2px solid #777; outline-offset:2px; }
+    .header { min-height:60px; padding:14px 32px; display:flex; align-items:center; justify-content:space-between; gap:20px; border-bottom:1px solid var(--line); }
+    .brand { font-size:21px; font-weight:400; color:var(--brand); }
+    .user-tools { display:flex; gap:12px; align-items:center; font-size:11px; }
+    .user-tools a,.user-tools button { color:#555; text-decoration:underline; text-underline-offset:3px; }
+    .text-button { border:0; padding:0; background:none; }
+    .breadcrumbs { min-height:35px; padding:8px 32px; background:#f2efed; color:#666; font-size:12px; border-bottom:1px solid var(--line); }
+    .breadcrumbs span { padding:0 8px; color:#999; }
+    .layout { display:grid; grid-template-columns:245px minmax(0,1fr); min-height:calc(100vh - 96px); }
+    .sidebar { background:#fafafa; border-right:1px solid var(--line); padding:16px 0; }
+    .nav-search { display:block; margin:0 12px 18px; width:calc(100% - 24px); }
+    .nav-group { margin-bottom:22px; }
+    .nav-group h2 { margin:0; padding:7px 16px; background:#eeeae7; color:#555; font-size:12px; font-weight:400; }
+    .nav-group a { display:block; padding:8px 16px; font-weight:600; border-bottom:1px solid #e8e8e8; }
+    .nav-group a[aria-current=page] { background:#e8e8e8; color:#222; }
+    .nav-group a:hover { background:#eee; text-decoration:none; }
+    main { min-width:0; padding:22px 32px 50px; }
+    h1 { font-size:22px; font-weight:400; margin:0 0 20px; color:#444; } h2 { font-size:13px; }
+    .title-row { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:18px; }
+    .title-row h1 { margin:0; } .object-tools { display:flex; align-items:center; gap:8px; }
+    .button { border:1px solid #ccc; background:#f7f7f7; color:#444; padding:6px 12px; border-radius:3px; line-height:1.5; display:inline-block; }
+    a.button:hover { text-decoration:none; } .button:hover { background:#eee; }
+    .default { background:#555; border-color:#555; color:white; } .default:hover { background:#333; }
+    .object-tools .button { border-radius:14px; padding:4px 13px; font-size:11px; background:#777; border-color:#777; color:white; }
+    input:not([type=checkbox]),select { background:#fff; color:#333; border:1px solid #ccc; border-radius:3px; padding:5px 8px; }
+    input[type=search] { min-height:30px; } input[type=checkbox] { accent-color:#666; vertical-align:middle; }
+    .index { max-width:760px; } .module { margin-bottom:26px; }
+    .module h2,.fieldset-title { margin:0; background:#eeeae7; color:#514943; font-weight:400; font-size:13px; padding:8px 12px; }
+    table { width:100%; border-collapse:collapse; text-align:left; font-size:12px; }
+    th,td { border-bottom:1px solid #ddd; padding:9px 12px; vertical-align:top; }
+    th { background:#f6f6f6; color:#666; font-size:11px; font-weight:600; white-space:nowrap; }
+    tbody tr:nth-child(even) { background:#fafafa; } tbody tr:hover { background:#f4f4f4; } tbody tr.selected { background:#eee9df; }
+    .index th { font-size:13px; background:transparent; width:65%; } .index td { white-space:nowrap; }
+    .add-link { color:#555; font-size:11px; } .add-link::before { content:'＋'; color:#52744b; margin-right:4px; }
+    .changelist { display:grid; grid-template-columns:minmax(0,1fr) 190px; gap:24px; align-items:start; }
+    .results { min-width:0; } .toolbar { background:#f8f8f8; border-top:1px solid #ddd; border-bottom:1px solid #ddd; padding:10px; }
+    .search-form { display:flex; gap:8px; align-items:center; } .search-form input { width:300px; min-width:0; max-width:100%; }
+    .search-form label { font-size:16px; color:#888; } .search-form .button { padding:4px 10px; font-size:11px; white-space:nowrap; }
+    .actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px; color:#666; font-size:11px; border-bottom:1px solid #ddd; }
+    .actions select { font-size:11px; max-width:230px; } .actions .button { font-size:11px; padding:3px 9px; }
+    .action-count { color:#888; margin-left:5px; } .table-wrap { overflow-x:auto; } .data-table { white-space:nowrap; }
+    .record-name { font-weight:600; } .check-cell { width:32px; padding-right:2px; }
+    .sort-link { border:0; background:none; padding:0; color:inherit; font:inherit; cursor:pointer; }
+    .boolean { font-size:13px; font-weight:700; } .yes { color:#4b7941; } .no { color:#a24c42; } .monospace { font:11px/1.7 Consolas,monospace; }
+    .filters { background:#f8f8f8; } .filters h2 { margin:0; padding:9px 12px; background:#eeeae7; font-size:12px; font-weight:400; }
+    .filter-group { padding:12px 0; border-bottom:1px solid #ddd; } .filter-group h3 { font-size:12px; margin:0 12px 7px; font-weight:400; }
+    .filter-group a { display:block; padding:3px 12px; color:#777; border-left:3px solid transparent; font-size:11px; }
+    .filter-group a[aria-current=true] { color:#222; font-weight:700; border-left-color:#777; } .filter-group a:hover { color:#222; }
+    .paginator { padding:12px 10px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; color:#666; font-size:11px; border-bottom:1px solid #ddd; }
+    .page-number { background:#eee; border:0; padding:3px 8px; color:#555; } .page-number[aria-current=page] { background:#666; color:white; } .paginator .total { margin-left:6px; }
+    .empty { padding:30px 12px; color:#888; text-align:center; } .help { font-size:11px; color:#777; margin:7px 0 0; }
+    .change-form { max-width:1000px; } fieldset { margin:0 0 22px; padding:0; border:0; min-width:0; }
+    .form-row { padding:13px 12px; border-bottom:1px solid #eee; display:grid; grid-template-columns:170px minmax(0,1fr); align-items:start; gap:14px; }
+    .form-row>label,.form-row>span:first-child { padding-top:5px; color:#555; } .form-row .required { font-weight:700; }
+    .field-value { padding-top:5px; overflow-wrap:anywhere; } .form-row input:not([type=checkbox]) { width:320px; max-width:100%; } .form-row input[type=number] { width:110px; }
+    .submit-row { margin:20px 0; background:#f8f8f8; border:1px solid #ddd; padding:12px; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; border-radius:3px; }
+    .submit-buttons { display:flex; gap:9px; flex-wrap:wrap; margin-left:auto; } .delete-link { color:#a24c42; align-self:center; } .delete-link:hover { color:#7c332b; }
+    #notice { padding:11px 14px; margin:0 0 20px; background:#f5f5f5; color:#555; border-bottom:1px solid #ddd; overflow-wrap:anywhere; }
+    #notice.success { background:#edf4e9; color:#416138; } #notice.error { background:#f9eded; color:#93453c; }
+    .errornote { color:#93453c; margin:0 0 16px; }
+    dialog { width:min(520px,calc(100% - 32px)); padding:24px; border:1px solid #bbb; color:#333; background:#fff; }
+    dialog::backdrop { background:#0005; } dialog h2 { margin:0 0 16px; font-size:20px; font-weight:400; }
+    dialog p { margin:0 0 22px; } .confirmation-actions { display:flex; gap:10px; justify-content:flex-end; }
+    @media(max-width:1100px) { .layout { grid-template-columns:210px minmax(0,1fr); } main { padding:22px; } .changelist { grid-template-columns:minmax(0,1fr) 155px; gap:16px; } th,td { padding:8px; } }
+    @media(max-width:800px) { .header { padding:12px 16px; flex-wrap:wrap; gap:8px; } .brand { font-size:18px; } .user-tools { gap:8px; flex-wrap:wrap; } .breadcrumbs { padding:8px 16px; } .layout { display:block; } .sidebar { border-right:0; border-bottom:1px solid #ddd; padding:10px 16px; } .nav-search { margin:0; width:100%; } .nav-group { margin:12px 0 0; } .nav-group h2 { padding:5px 8px; } .nav-group a { display:inline-block; border:0; padding:6px 8px; font-size:11px; } main { padding:20px 16px; } .changelist { grid-template-columns:minmax(0,1fr); } .filters { grid-row:1; display:flex; flex-wrap:wrap; gap:0 20px; } .filters h2 { width:100%; } .filter-group { border:0; padding:10px; } .filter-group h3 { margin:0 0 5px; } .filter-group a { display:inline-block; padding:2px 7px; border:0; } .filter-group a[aria-current=true] { text-decoration:underline; } .form-row { grid-template-columns:1fr; gap:4px; } .title-row { align-items:start; } .title-row h1 { font-size:20px; } }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <a class="brand" href="#index">「严小希」小助手 管理</a>
+    <div class="user-tools"><span>欢迎，<strong id="account-name">管理员</strong>。</span><a href="/">查看站点</a><span>/</span><a href="/user-center">用户中心</a><span>/</span><button class="text-button" id="logout">退出登录</button></div>
+  </header>
+  <div class="breadcrumbs" id="breadcrumbs"><a href="#index">首页</a></div>
+  <div class="layout">
+    <nav class="sidebar" aria-label="数据模型导航">
+      <input class="nav-search" id="nav-search" type="search" placeholder="开始输入以筛选…" aria-label="筛选导航模型">
+      <section class="nav-group"><h2>认证和授权</h2><a href="#users" data-model="users">用户</a><a href="#whitelist" data-model="whitelist">注册白名单</a></section>
+      <section class="nav-group"><h2>课程回放</h2><a href="#notes" data-model="notes">课堂笔记任务</a><a href="#replay" data-model="replay">回放中转任务</a><a href="#translation" data-model="translation">视频翻译任务</a></section>
+    </nav>
+    <main>
+      <div class="title-row"><h1 id="page-title">站点管理</h1><div class="object-tools" id="object-tools"></div></div>
+      <div id="notice" role="status" hidden></div>
+      <p id="loading" role="status">正在加载…</p>
+      <div id="view"></div>
+    </main>
+  </div>
+  <dialog id="confirmation" aria-labelledby="confirmation-title" aria-describedby="confirmation-message"><form method="dialog"><h2 id="confirmation-title">你确定吗？</h2><p id="confirmation-message"></p><div class="confirmation-actions"><button class="button" value="cancel" autofocus>取消</button><button class="button default" value="yes">是的，我确定</button></div></form></dialog>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const models = {users:{name:'用户',app:'认证和授权'},whitelist:{name:'注册白名单',app:'认证和授权'},notes:{name:'课堂笔记任务',app:'课程回放'},replay:{name:'回放中转任务',app:'课程回放'},translation:{name:'视频翻译任务',app:'课程回放'}};
+    const statusNames = {pending:'等待中',queued:'排队中',running:'运行中',succeeded:'已完成',failed:'失败',needs_review:'待检查',cancelled:'已取消',deleting:'删除中'};
+    const listState = Object.fromEntries(Object.keys(models).map(key=>[key,{q:'',filter:'all',role:'all',page:1,sort:'',direction:1,selected:new Set()}]));
+    const pageSize = 20;
+    let data = null, model = 'index', recordId = null, formDirty = false, loading = false, submitting = false;
+    function notice(message,type='error') { $('notice').textContent=message; $('notice').className=type; $('notice').hidden=!message; }
+    function date(value) { return value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—'; }
+    function bool(value) { return `<span class="boolean ${value?'yes':'no'}" aria-label="${value?'是':'否'}">${value?'✓':'✗'}</span>`; }
+    function username(id) { return data.users.find(user=>user.id===id)?.username||id; }
+    async function api(path,body) {
+      const response=await fetch(path,{cache:'no-store',...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Admin-Request':'1'},body:JSON.stringify(body)})});
+      if (response.status===401) { location.href='/auth?next=%2Fadmin'; throw new Error('登录已过期。'); }
+      const result=await response.json(); if (!response.ok) throw new Error(result.error||'请求失败，请重试。'); return result;
+    }
+    function askConfirmation(message) {
+      const dialog=$('confirmation');
+      if (dialog.open) return Promise.resolve(false);
+      $('confirmation-message').textContent=message; dialog.returnValue=''; dialog.showModal();
+      return new Promise(resolve=>dialog.addEventListener('close',()=>resolve(dialog.returnValue==='yes'),{once:true}));
+    }
+    async function navigate(target) { if (formDirty&&!await askConfirmation('尚有未保存的修改，确定离开？')) return; formDirty=false; location.hash=target; }
+    function route() {
+      const [key,id]=location.hash.slice(1).split('/'); model=Object.hasOwn(models,key)?key:'index';
+      try { recordId=id?decodeURIComponent(id):null; } catch { recordId=null; }
+      document.querySelectorAll('[data-model]').forEach(link=> { if (link.dataset.model===model) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); });
+      const name=model==='index'?'站点管理':models[model].name;
+      $('page-title').textContent=model==='index'?name:recordId?(recordId==='add'?'添加':'更改')+name:'选择'+name+'以更改';
+      $('breadcrumbs').innerHTML='<a href="#index">首页</a>'+(model==='index'?'':`<span>›</span>${escapeHTML(models[model].app)}<span>›</span>${recordId?`<a href="#${model}">${escapeHTML(name)}</a><span>›</span>${recordId==='add'?'添加':escapeHTML(recordLabel())}`:escapeHTML(name)}`);
+      document.title=$('page-title').textContent+' | 「严小希」站点管理';
+      $('object-tools').innerHTML=model==='whitelist'&&!recordId?'<a class="button" href="#whitelist/add">添加邮箱 ＋</a>':model!=='index'&&!recordId?'<button class="button" data-refresh>刷新</button>':'';
+      if (data) { if (model==='index') renderIndex(); else if (recordId) renderRecord(); else renderList(); }
+    }
+    function recordLabel() { return model==='users'&&data?data.users.find(user=>user.id===recordId)?.username||recordId:recordId; }
+    function renderIndex() {
+      $('view').innerHTML='<div class="index">'+['认证和授权','课程回放'].map(app=>`<section class="module"><h2>${app}</h2><table><tbody>${Object.entries(models).filter(([,info])=>info.app===app).map(([key,info])=>`<tr><th scope="row"><a href="#${key}">${info.name}</a></th><td>${key==='whitelist'?'<a class="add-link" href="#whitelist/add">添加</a>':''}</td><td><a href="#${key}">${['notes','replay','translation'].includes(key)?'查看':'更改'}</a></td></tr>`).join('')}</tbody></table></section>`).join('')+'</div>';
+    }
+    function records() { return model==='users'?data.users:model==='whitelist'?data.whitelist.map(email=>({id:email,email})):data.jobs.filter(job=>job.kind===model); }
+    function filteredRecords() {
+      const state=listState[model],query=state.q.toLowerCase();
+      let items=records().filter(record=> {
+        const text=model==='users'?record.username+' '+record.email+' '+record.id:model==='whitelist'?record.email:record.id+' '+username(record.user_id);
+        const matches=model==='users'?(state.filter==='all'||record.is_active===(state.filter==='active'))&&(state.role==='all'||record.is_admin===(state.role==='admin')):model==='whitelist'?true:state.filter==='all'||record.status===state.filter||(state.filter==='pending'&&record.status==='queued');
+        return text.toLowerCase().includes(query)&&matches;
+      });
+      if (state.sort) items=[...items].sort((a,b)=>String(a[state.sort]??'').localeCompare(String(b[state.sort]??''),'zh-CN',{numeric:true})*state.direction);
+      return items;
+    }
+    function filterGroup(title,key,options) { return `<section class="filter-group"><h3>${title}</h3>${options.map(([value,label])=>`<a href="#${model}" data-filter="${key}" data-value="${value}" ${listState[model][key]===value?'aria-current="true"':''}>${label}</a>`).join('')}</section>`; }
+    function filters() {
+      if (model==='whitelist') return '';
+      return '<aside class="filters" aria-label="筛选"><h2>筛选</h2>'+(model==='users'?filterGroup('按启用状态','filter',[['all','全部'],['active','是'],['inactive','否']])+filterGroup('按管理员身份','role',[['all','全部'],['admin','是'],['member','否']]):filterGroup('按任务状态','filter',[['all','全部'],['pending','等待中 / 排队中'],['running','运行中'],['succeeded','已完成'],['failed','失败'],['needs_review','待检查'],['cancelled','已取消']]))+'</aside>';
+    }
+    function sortHeading(field,label) { return `<th scope="col"><button class="sort-link" data-sort="${field}">${label}${listState[model].sort===field?(listState[model].direction===1?' ▴':' ▾'):''}</button></th>`; }
+    function renderList() {
+      const state=listState[model],items=filteredRecords(),totalPages=Math.max(1,Math.ceil(items.length/pageSize)); state.page=Math.min(state.page,totalPages);
+      const visible=items.slice((state.page-1)*pageSize,state.page*pageSize),selectable=model==='users'||model==='whitelist';
+      state.selected=new Set([...state.selected].filter(id=>visible.some(record=>record.id===id)));
+      const heads=model==='users'?sortHeading('username','用户名')+sortHeading('email','邮箱')+'<th>启用</th><th>管理员</th>'+sortHeading('storage_quota','存储配额')+sortHeading('processing_quota','处理配额')+sortHeading('processing_priority','优先级')+'<th>有效会话</th>'+sortHeading('created_at','创建时间'):model==='whitelist'?sortHeading('email','邮箱地址'):sortHeading('id','任务 ID')+'<th>用户</th>'+sortHeading('status','状态')+sortHeading('updated_at','更新时间');
+      const rows=visible.map(record=> {
+        const link=`<a class="record-name" href="#${model}/${encodeURIComponent(record.id)}">${escapeHTML(model==='users'?record.username:model==='whitelist'?record.email:record.id)}</a>`;
+        const cells=model==='users'?`<td>${link}</td><td>${escapeHTML(record.email)}</td><td>${bool(record.is_active)}</td><td>${bool(record.is_admin)}</td><td>${record.storage_quota}</td><td>${record.processing_quota}</td><td>${record.processing_priority}</td><td>${record.sessions}</td><td>${escapeHTML(new Date(record.created_at).toLocaleDateString('zh-CN'))}</td>`:model==='whitelist'?`<td>${link}</td>`:`<td class="monospace">${link}</td><td>${escapeHTML(username(record.user_id))}</td><td>${escapeHTML(statusNames[record.status]||record.status)}</td><td>${escapeHTML(date(record.updated_at))}</td>`;
+        return `<tr ${state.selected.has(record.id)?'class="selected"':''}>${selectable?`<td class="check-cell"><input type="checkbox" data-select="${escapeHTML(record.id)}" aria-label="选择 ${escapeHTML(model==='users'?record.username:record.email)}" ${state.selected.has(record.id)?'checked':''}></td>`:''}${cells}</tr>`;
+      }).join('');
+      $('view').innerHTML=`<div class="changelist" ${model==='whitelist'?'style="grid-template-columns:minmax(0,1fr)"':''}><div class="results"><div class="toolbar"><form id="search-form" class="search-form"><label for="search-query" aria-label="搜索">⌕</label><input id="search-query" type="search" value="${escapeHTML(state.q)}" aria-label="搜索${models[model].name}"><button class="button" type="submit">搜索</button>${state.q?'<button class="button" type="button" data-clear-search>清除</button>':''}</form></div>${selectable?`<div class="actions"><label for="action">动作：</label><select id="action"><option value="">---------</option>${model==='users'?'<option value="enable">启用所选用户</option><option value="disable">停用所选用户</option><option value="revoke">撤销所选用户的会话</option>':'<option value="remove">删除所选邮箱</option>'}</select><button class="button" data-action>执行</button><span class="action-count" id="selection-count">选中了 ${state.selected.size} 个，共 ${visible.length} 个</span></div>`:''}<div class="table-wrap"><table class="data-table"><thead><tr>${selectable?'<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部记录" '+(visible.length&&visible.every(record=>state.selected.has(record.id))?'checked':'')+'></th>':''}${heads}</tr></thead><tbody>${rows||`<tr><td class="empty" colspan="12">0 条${models[model].name}记录</td></tr>`}</tbody></table></div><div class="paginator" aria-label="分页">${pageLinks(totalPages,state.page)}<span class="total">${items.length} 条${models[model].name}记录</span></div></div>${filters()}</div>`;
+      $('search-form').addEventListener('submit',event=> { event.preventDefault(); state.q=$('search-query').value.trim(); state.page=1; state.selected.clear(); renderList(); });
+      $('select-all')?.addEventListener('change',event=> { visible.forEach(record=>event.target.checked?state.selected.add(record.id):state.selected.delete(record.id)); updateSelection(); });
+    }
+    function pageLinks(total,current) { const numbers=[...new Set([1,total,current-2,current-1,current,current+1,current+2].filter(n=>n>=1&&n<=total))].sort((a,b)=>a-b); return numbers.map((n,i)=>(i&&n>numbers[i-1]+1?'<span>…</span>':'')+`<button class="page-number" data-page="${n}" ${n===current?'aria-current="page"':''}>${n}</button>`).join(''); }
+    function updateSelection() {
+      const state=listState[model],checkboxes=[...document.querySelectorAll('[data-select]')];
+      checkboxes.forEach(input=> { input.checked=state.selected.has(input.dataset.select); input.closest('tr').classList.toggle('selected',input.checked); });
+      $('selection-count').textContent=`选中了 ${state.selected.size} 个，共 ${checkboxes.length} 个`;
+      $('select-all').checked=checkboxes.length>0&&checkboxes.every(input=>input.checked); $('select-all').indeterminate=state.selected.size>0&&!$('select-all').checked;
+    }
+    function readonlyRow(label,value,mono=false) { return `<div class="form-row"><span>${label}：</span><div class="field-value ${mono?'monospace':''}">${escapeHTML(value)}</div></div>`; }
+    function inputRow(label,name,value,help='') { return `<div class="form-row"><label class="required" for="${name}">${label}：</label><div><input id="${name}" name="${name}" type="number" min="${name==='processing_priority'?1:0}" max="${name==='processing_priority'?100:2147483647}" value="${value}" required>${help?`<p class="help">${help}</p>`:''}</div></div>`; }
+    function submitRow(extra='') { return `<div class="submit-row">${extra}<div class="submit-buttons"><button class="button" type="submit" name="save" value="continue">保存并继续编辑</button><button class="button default" type="submit" name="save" value="return">保存</button></div></div>`; }
+    function renderRecord() {
+      if (model==='users') {
+        const user=data.users.find(record=>record.id===recordId); if (!user) return missing();
+        $('view').innerHTML=`<form id="record-form" class="change-form"><p class="errornote" id="form-error" role="alert" hidden></p><fieldset><h2 class="fieldset-title">账户信息</h2>${readonlyRow('用户名',user.username)}${readonlyRow('邮箱',user.email)}${readonlyRow('账户 ID',user.id,true)}${readonlyRow('创建时间',date(user.created_at))}</fieldset><fieldset><h2 class="fieldset-title">权限</h2><div class="form-row"><label for="is_active">启用：</label><div class="field-value"><input id="is_active" name="is_active" type="checkbox" ${user.is_active?'checked':''} ${user.is_admin?'disabled':''}><p class="help">停用后阻止此用户的后续访问。管理员账户不能在此停用。</p></div></div>${readonlyRow('管理员',user.is_admin?'是（由服务配置维护）':'否')}</fieldset><fieldset><h2 class="fieldset-title">配额与处理优先级</h2>${inputRow('存储配额','storage_quota',user.storage_quota)}${inputRow('处理配额','processing_quota',user.processing_quota)}${inputRow('处理优先级','processing_priority',user.processing_priority,'1–100，数值越小越优先；影响后续提交的任务。')}</fieldset><fieldset><h2 class="fieldset-title">登录会话</h2><div class="form-row"><span>有效会话：</span><div class="field-value">${user.sessions}${user.id!==data.current_user_id?'　<button type="button" class="text-button delete-link" data-revoke>撤销全部会话</button>':''}</div></div></fieldset>${submitRow('<a href="#users">返回用户列表</a>')}</form>`;
+        wireForm(saveUser);
+      } else if (model==='whitelist') {
+        const adding=recordId==='add'; if (!adding&&!data.whitelist.includes(recordId)) return missing();
+        $('view').innerHTML=`<form id="record-form" class="change-form"><p class="errornote" id="form-error" role="alert" hidden></p><fieldset><h2 class="fieldset-title">注册白名单</h2><div class="form-row"><label class="required" for="email">邮箱地址：</label><div><input id="email" name="email" type="email" maxlength="254" value="${adding?'':escapeHTML(recordId)}" required autocomplete="off"><p class="help">允许此邮箱注册及通过统一认证登录，邮箱大小写与认证规则保持一致。</p></div></div></fieldset>${submitRow(adding?'<a href="#whitelist">返回列表</a>':'<button type="button" class="text-button delete-link" data-delete-email>删除</button>')}</form>`;
+        wireForm(saveEmail);
+      } else {
+        const job=data.jobs.find(record=>record.id===recordId&&record.kind===model); if (!job) return missing();
+        $('page-title').textContent='查看'+models[model].name;
+        $('view').innerHTML=`<div class="change-form"><fieldset><h2 class="fieldset-title">${models[model].name}</h2>${readonlyRow('任务 ID',job.id,true)}${readonlyRow('所属用户',username(job.user_id))}${readonlyRow('用户 ID',job.user_id,true)}${readonlyRow('状态',statusNames[job.status]||job.status)}${job.created_at?readonlyRow('创建时间',date(job.created_at)):''}${readonlyRow('更新时间',date(job.updated_at))}</fieldset><p class="help">任务状态由处理流程维护，此处只读。</p><div class="submit-row"><a href="#${model}">返回${models[model].name}列表</a></div></div>`;
+      }
+    }
+    function missing() { $('view').innerHTML=`<p>记录不存在或已被移除。</p><p><a href="#${model}">返回列表</a></p>`; }
+    function wireForm(save) {
+      const form=$('record-form'); form.addEventListener('input',()=>formDirty=true); form.addEventListener('change',()=>formDirty=true);
+      form.addEventListener('submit',async event=> {
+        event.preventDefault(); if (submitting) return; submitting=true; form.querySelectorAll('[type=submit]').forEach(button=>button.disabled=true);
+        try { const nextId=await save(form); formDirty=false; await fetchData(); const target=event.submitter?.value==='continue'?model+'/'+encodeURIComponent(nextId):model; if (location.hash.slice(1)===target) route(); else location.hash=target; notice('记录已成功保存。','success'); }
+        catch (error) { $('form-error').textContent=error.message; $('form-error').hidden=false; }
+        finally { submitting=false; form.querySelectorAll('[type=submit]').forEach(button=>button.disabled=false); }
+      });
+    }
+    async function saveUser(form) { const body={is_active:form.elements.is_active.checked}; for (const key of ['storage_quota','processing_quota','processing_priority']) body[key]=Number(form.elements[key].value); await api('/api/admin/users/'+recordId,body); return recordId; }
+    async function saveEmail(form) { const email=form.elements.email.value.trim(); if (data.whitelist.includes(email)&&email!==recordId) throw new Error('此邮箱已在白名单中。'); const emails=data.whitelist.filter(value=>value!==recordId); emails.push(email); await api('/api/admin/whitelist',{emails}); return email; }
+    async function runAction() {
+      const state=listState[model],action=$('action').value,ids=[...state.selected];
+      if (!action) return notice('请选择一个动作。'); if (!ids.length) return notice('请先选择要操作的记录。');
+      if (!await askConfirmation(`确定对所选 ${ids.length} 条记录执行「${$('action').selectedOptions[0].textContent}」？`)) return;
+      const button=document.querySelector('[data-action]'); button.disabled=true; let completed=0;
+      try {
+        if (model==='whitelist') { await api('/api/admin/whitelist',{emails:data.whitelist.filter(email=>!state.selected.has(email))}); completed=ids.length; }
+        else {
+          const targets=ids.map(id=>data.users.find(user=>user.id===id));
+          if (action==='disable'&&targets.some(user=>user.is_admin)) throw new Error('所选记录包含管理员，不能停用。请取消选择管理员后重试。');
+          if (action==='revoke'&&ids.includes(data.current_user_id)) throw new Error('不能撤销自己的会话，请取消选择当前账户。');
+          for (const user of targets) { if (action==='revoke') await api('/api/admin/users/'+user.id+'/revoke-sessions',{}); else await api('/api/admin/users/'+user.id,{is_active:action==='enable',storage_quota:user.storage_quota,processing_quota:user.processing_quota,processing_priority:user.processing_priority}); completed++; }
+        }
+        state.selected.clear(); await fetchData(); route(); notice(`已成功处理 ${completed} 条记录。`,'success');
+      } catch (error) { try { await fetchData(); route(); } catch {} notice(`已处理 ${completed} 条记录。${error.message}`); }
+      finally { button.disabled=false; }
+    }
+    async function fetchData() { data=await api('/api/admin/data'); $('account-name').textContent=data.username; }
+    async function load() { if (loading) return; loading=true; try { await fetchData(); route(); } catch (error) { notice(error.message); } finally { loading=false; $('loading').hidden=true; } }
+    document.addEventListener('click',async event=> {
+      const filter=event.target.closest('[data-filter]');
+      if (filter) { event.preventDefault(); const state=listState[model]; state[filter.dataset.filter]=filter.dataset.value; state.page=1; state.selected.clear(); renderList(); return; }
+      const link=event.target.closest('a[href^="#"]'); if (link) { event.preventDefault(); navigate(link.getAttribute('href').slice(1)); return; }
+      const page=event.target.closest('[data-page]'); if (page) { listState[model].page=Number(page.dataset.page); listState[model].selected.clear(); renderList(); }
+      const sort=event.target.closest('[data-sort]'); if (sort) { const state=listState[model]; state.direction=state.sort===sort.dataset.sort?-state.direction:1; state.sort=sort.dataset.sort; renderList(); }
+      if (event.target.closest('[data-clear-search]')) { listState[model].q=''; listState[model].page=1; renderList(); }
+      if (event.target.closest('[data-refresh]')) { notice(''); load(); }
+      if (event.target.closest('[data-action]')) await runAction();
+      if (event.target.closest('[data-delete-email]')) { if (!await askConfirmation('确定从白名单删除 '+recordId+'？')) return; try { await api('/api/admin/whitelist',{emails:data.whitelist.filter(email=>email!==recordId)}); formDirty=false; await fetchData(); location.hash='whitelist'; notice('邮箱已删除。','success'); } catch (error) { notice(error.message); } }
+      if (event.target.closest('[data-revoke]')) { if (!await askConfirmation('确定撤销该用户的全部登录会话？')) return; try { const result=await api('/api/admin/users/'+recordId+'/revoke-sessions',{}); await fetchData(); if (!formDirty) route(); notice('已撤销 '+result.revoked+' 个会话。','success'); } catch (error) { notice(error.message); } }
+    });
+    document.addEventListener('change',event=> { if (event.target.matches('[data-select]')) { const state=listState[model]; event.target.checked?state.selected.add(event.target.dataset.select):state.selected.delete(event.target.dataset.select); updateSelection(); } });
+    $('nav-search').addEventListener('input',event=> { const query=event.target.value.toLowerCase(); document.querySelectorAll('.nav-group').forEach(group=> { const links=[...group.querySelectorAll('a')]; links.forEach(link=>link.hidden=!link.textContent.toLowerCase().includes(query)); group.hidden=links.every(link=>link.hidden); }); });
+    $('logout').addEventListener('click',async()=> { if (formDirty&&!await askConfirmation('尚有未保存的修改，确定退出？')) return; try { await api('/api/auth/logout',{}); formDirty=false; location.href='/auth?next=%2Fadmin'; } catch (error) { notice(error.message); } });
+    window.addEventListener('hashchange',async event=> {
+      if (formDirty&&!await askConfirmation('尚有未保存的修改，确定离开？')) { history.replaceState(null,'',event.oldURL); return; }
+      formDirty=false; route();
+    });
+    window.addEventListener('beforeunload',event=> { if (formDirty) { event.preventDefault(); event.returnValue=''; } });
+    route(); load();
+  </script>
+</body>
+</html>

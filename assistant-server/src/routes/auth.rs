@@ -51,6 +51,7 @@ struct SimpleResponse {
 
 #[derive(Debug, Serialize)]
 struct CurrentUserResponse {
+    is_admin: bool,
     user_id: Uuid,
     username: String,
     email: String,
@@ -72,6 +73,7 @@ pub fn routes() -> Router<AppState> {
 async fn me(State(state): State<AppState>, current_user: CurrentUser) -> Result<Json<CurrentUserResponse>, ApiError> {
     let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
     Ok(Json(CurrentUserResponse {
+        is_admin: state.settings.admin.user_ids.contains(&current_user.id),
         user_id: current_user.id,
         username: current_user.username,
         email: current_user.email,

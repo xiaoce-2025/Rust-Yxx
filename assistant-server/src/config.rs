@@ -4,6 +4,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
     #[serde(default)]
+    pub admin: AdminConfig,
+    #[serde(default)]
     pub sso: SsoConfig,
     pub server: ServerConfig,
     pub wechat: WeChatConfig,
@@ -17,6 +19,13 @@ pub struct Settings {
     pub pkuvideo: PkuVideoConfig,
     #[serde(default)]
     pub video_translation: VideoTranslationConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AdminConfig {
+    /// Explicit local account IDs; empty means administration is disabled.
+    #[serde(default)]
+    pub user_ids: Vec<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

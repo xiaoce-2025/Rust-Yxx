@@ -53,6 +53,7 @@
   box-shadow: 0 8px 24px #55221b19;
 }
 .site-header .site-account-menu a { padding: 0 14px; }
+.site-header .site-account-menu a[hidden] { display: none; }
 .site-header .site-account[open] .site-account-menu,
 .site-header .site-account:focus-within .site-account-menu { display: block; }
 @media (hover: hover) {

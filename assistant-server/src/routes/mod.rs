@@ -1,4 +1,5 @@
 pub mod sso;
+pub mod admin;
 pub mod auth;
 pub mod batch_guard;
 pub mod manual_lessons;
@@ -44,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .merge(ui::routes(state.clone()))
         .merge(auth::routes())
+        .merge(admin::routes(state.clone()))
         .merge(sso::routes())
         .merge(conversations::routes())
         .merge(pkuvideo::routes())
