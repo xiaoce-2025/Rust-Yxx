@@ -11,7 +11,7 @@ const REDIRECT: &str = "http://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/
 pub async fn verify(username: &str, password: &str) -> Result<(), ApiError> {
     // An isolated cookie jar and a fresh request are essential: cached teaching sessions
     // must never be accepted as proof that the submitted password is correct.
-    let client = crate::services::http_client::builder()
+    let client = reqwest::Client::builder()
         .cookie_store(true)
         .redirect(Policy::none())
         .timeout(Duration::from_secs(15))

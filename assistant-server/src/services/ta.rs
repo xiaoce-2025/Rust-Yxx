@@ -1,18 +1,13 @@
 //! Native Blackboard TA client. Authentication is owned by the existing teaching login cache.
 use super::pkulogin::PkuLoginResult;
-use reqwest::{cookie::Jar, Url};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
 
 const BASE: &str = "https://course.pku.edu.cn";
 const MAX_PAGES: usize = 100;
-const MAX_BODY: usize = 32 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Course {
@@ -73,7 +68,6 @@ pub struct Draft {
 }
 
 pub struct Blackboard {
-    http: reqwest::Client,
     base: Url,
     // Keep the existing cookie-file lease alive for the whole operation.
     login: Option<PkuLoginResult>,
@@ -82,46 +76,20 @@ pub struct Blackboard {
 impl Blackboard {
     #[cfg(test)]
     pub(crate) fn test_client(base: &str) -> Self {
+        let cookie = std::env::temp_dir().join(format!("ta-test-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&cookie, "# Netscape HTTP Cookie File\n").unwrap();
         Self {
-            http: reqwest::Client::builder().no_proxy().build().unwrap(),
             base: Url::parse(base).unwrap(),
-            login: None,
+            login: Some(PkuLoginResult::new(cookie, "Windows TA-test".into())),
         }
     }
     pub fn from_session(login: PkuLoginResult) -> Result<Self, String> {
-        let base = Url::parse(BASE).unwrap();
-        let jar = Arc::new(Jar::default());
-        {
-            let _lock = login.lock_cookie();
-            let content = std::fs::read_to_string(&login.cookie_file)
-                .map_err(|_| "无法读取教学网缓存，请在用户中心检查教学网绑定".to_string())?;
-            if let Err(error) = import_cookies(&jar, &content, chrono::Utc::now().timestamp()) {
-                login.invalidate();
-                return Err(error);
-            }
+        if !login.cookie_file.is_file() {
+            return Err("无法读取教学网缓存，请在用户中心检查教学网绑定".into());
         }
-        let allowed = base.clone();
-        let http = teaching_client_builder()
-            .cookie_provider(jar)
-            .user_agent(&login.user_agent)
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-                if attempt.previous().len() >= 8 {
-                    return attempt.error("教学网重定向过多");
-                }
-                if same_origin(&allowed, attempt.url()) {
-                    attempt.follow()
-                } else {
-                    attempt.stop()
-                }
-            }))
-            .build()
-            .map_err(|error| transport_error("初始化客户端", "client", error))?;
-        tracing::info!(target: "teaching_ta", tls_backend="native-tls", "助教客户端复用教学网缓存会话");
+        tracing::info!(target: "teaching_ta", transport="curl", "助教客户端复用教学网回放的缓存会话与请求逻辑");
         Ok(Self {
-            http,
-            base,
+            base: Url::parse(BASE).unwrap(),
             login: Some(login),
         })
     }
@@ -135,49 +103,31 @@ impl Blackboard {
         Ok(url)
     }
 
-    async fn bytes(&self, response: reqwest::Response) -> Result<Vec<u8>, String> {
-        let route = safe_route(response.url());
-        tracing::info!(target: "teaching_ta", route=%route, status=response.status().as_u16(), "教学网响应");
-        let login_redirect = response.status().is_redirection()
+    async fn bytes(
+        &self,
+        response: super::pkulogin::TeachingResponse,
+        url: &Url,
+    ) -> Result<Vec<u8>, String> {
+        let route = safe_route(url);
+        tracing::info!(target: "teaching_ta", route=%route, status=response.status, "教学网响应");
+        let login_redirect = (300..400).contains(&response.status)
             && response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|v| v.to_str().ok())
+                .location
+                .as_deref()
                 .is_some_and(|s| s.contains("iaaa.pku.edu.cn") || s.contains("/webapps/login"));
-        if response.status() == 401
-            || login_redirect
-            || response.url().path().contains("/webapps/login")
-        {
+        if response.status == 401 || login_redirect || url.path().contains("/webapps/login") {
             if let Some(login) = &self.login {
                 login.invalidate();
             }
             return Err("教学网登录已失效，请刷新重试；将复用现有登录逻辑".into());
         }
-        if response.status() == 403 {
+        if response.status == 403 {
             return Err("教学网拒绝访问：当前账号没有此项助教权限".into());
         }
-        if !response.status().is_success() {
-            return Err(format!(
-                "教学网请求失败（HTTP {}）",
-                response.status().as_u16()
-            ));
+        if !(200..300).contains(&response.status) {
+            return Err(format!("教学网请求失败（HTTP {}）", response.status));
         }
-        if response
-            .content_length()
-            .is_some_and(|n| n > MAX_BODY as u64)
-        {
-            return Err("教学网响应超过 32 MiB，请直接在教学网下载大附件".into());
-        }
-        let mut result = Vec::new();
-        let mut stream = response.bytes_stream();
-        use futures_util::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| transport_error("读取响应", &route, error))?;
-            if result.len() + chunk.len() > MAX_BODY {
-                return Err("教学网响应超过 32 MiB".into());
-            }
-            result.extend_from_slice(&chunk);
-        }
+        let result = response.body;
         // A successful HTTP status can still carry a login page.
         if let Ok(text) = std::str::from_utf8(&result) {
             if text.trim_start().starts_with('<') {
@@ -194,17 +144,45 @@ impl Blackboard {
         Ok(result)
     }
 
-    async fn get(&self, path: &str) -> Result<Vec<u8>, String> {
-        let url = self.url(path)?;
-        let route = safe_route(&url);
-        tracing::info!(target: "teaching_ta", method="GET", route=%route, "请求教学网");
-        let response = self
-            .http
-            .get(url)
-            .send()
+    async fn request(
+        &self,
+        path: &str,
+        headers: Vec<(String, String)>,
+        form: Option<String>,
+    ) -> Result<Vec<u8>, String> {
+        let mut url = self.url(path)?;
+        let login = self.login.as_ref().ok_or("教学网缓存不可用")?.clone();
+        for _ in 0..8 {
+            let route = safe_route(&url);
+            tracing::info!(target: "teaching_ta", method=if form.is_some() { "POST" } else { "GET" }, route=%route, "请求教学网");
+            let (session, target, headers, body) = (
+                login.clone(),
+                url.to_string(),
+                headers.clone(),
+                form.clone(),
+            );
+            let response = tokio::task::spawn_blocking(move || {
+                super::pkulogin::request_in_session(&session, &target, &headers, body.as_deref())
+            })
             .await
-            .map_err(|error| transport_error("连接教学网", &route, error))?;
-        self.bytes(response).await
+            .map_err(|_| "教学网请求任务失败")?
+            .map_err(|error| transport_error("连接教学网", &route, &error))?;
+            // Only same-origin GET redirects may be followed. Never replay a grade POST.
+            if form.is_none() && (300..400).contains(&response.status) {
+                if let Some(location) = &response.location {
+                    let next = url.join(location).map_err(|_| "教学网重定向地址无效")?;
+                    if same_origin(&self.base, &next) && !next.path().contains("/webapps/login") {
+                        url = self.url(next.as_str())?;
+                        continue;
+                    }
+                }
+            }
+            return self.bytes(response, &url).await;
+        }
+        Err("教学网重定向过多".into())
+    }
+    async fn get(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.request(path, Vec::new(), None).await
     }
     async fn json(&self, path: &str) -> Result<Value, String> {
         let route = safe_route(&self.url(path)?);
@@ -460,39 +438,52 @@ impl Blackboard {
             .await?;
         let nonce = parse_nonce(&String::from_utf8_lossy(&page))?;
         let route = "/webapps/gradebook/controller/saveReconcileGrade";
-        tracing::info!(target: "teaching_ta", method="POST", route, "发送教学网登分请求");
-        let response = self
-            .http
-            .post(self.url("/webapps/gradebook/controller/saveReconcileGrade")?)
-            .header("Origin", self.base.as_str().trim_end_matches('/'))
-            .header(
-                "Referer",
+        let fields = [
+            ("attemptId", attempt.id.clone()),
+            ("gradableItemId", column.into()),
+            ("score", format!("{score:.2}")),
+            ("course_id", course.into()),
+            ("hasFeedback", "true".into()),
+            ("myfeedbacktext", feedback.into()),
+            ("showStagedFeedbackToStu", "true".into()),
+            ("isDetailPage", "false".into()),
+            ("reconcileMode", "A".into()),
+            ("blackboard.platform.security.NonceUtil.nonce.ajax", nonce),
+        ];
+        let form = fields
+            .iter()
+            .map(|(key, value)| {
+                format!(
+                    "{}={}",
+                    urlencoding::encode(key),
+                    urlencoding::encode(value)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        let headers = vec![
+            (
+                "Origin".into(),
+                self.base.as_str().trim_end_matches('/').into(),
+            ),
+            (
+                "Referer".into(),
                 format!(
                     "{}webapps/gradebook/controller/reconcileGrades?course_id={course}&id={column}",
                     self.base
                 ),
-            )
-            .header("X-Requested-With", "XMLHttpRequest")
-            .header("X-Prototype-Version", "1.7")
-            .form(&[
-                ("attemptId", attempt.id.clone()),
-                ("gradableItemId", column.into()),
-                ("score", format!("{score:.2}")),
-                ("course_id", course.into()),
-                ("hasFeedback", "true".into()),
-                ("myfeedbacktext", feedback.into()),
-                ("showStagedFeedbackToStu", "true".into()),
-                ("isDetailPage", "false".into()),
-                ("reconcileMode", "A".into()),
-                ("blackboard.platform.security.NonceUtil.nonce.ajax", nonce),
-            ])
-            .send()
+            ),
+            (
+                "Content-Type".into(),
+                "application/x-www-form-urlencoded".into(),
+            ),
+            ("X-Requested-With".into(), "XMLHttpRequest".into()),
+            ("X-Prototype-Version".into(), "1.7".into()),
+        ];
+        let body = self
+            .request(route, headers, Some(form))
             .await
-            .map_err(|error| {
-                let diagnostic = transport_error("发送评分", route, error);
-                format!("{diagnostic}；登分结果尚未确认，请先核对成绩，勿直接重试")
-            })?;
-        let body = self.bytes(response).await?;
+            .map_err(|error| format!("{error}；登分结果尚未确认，请先核对成绩，勿直接重试"))?;
         if let Ok(v) = serde_json::from_slice::<Value>(&body) {
             if v.get("success").and_then(Value::as_bool) == Some(false)
                 || v.get("error").is_some_and(|e| !e.is_null() && e != false)
@@ -518,12 +509,6 @@ impl Blackboard {
             Err("评分请求已发送，但回读未确认目标分数；请在教学网核对后再操作".into())
         }
     }
-}
-
-fn teaching_client_builder() -> reqwest::ClientBuilder {
-    // Blackboard rejects the Rustls handshake before HTTP/authentication. Native TLS
-    // preserves certificate and hostname verification and does not change the login flow.
-    reqwest::Client::builder().use_native_tls()
 }
 
 /// Log route templates, never query strings, signed attachment paths or student IDs.
@@ -556,36 +541,10 @@ fn safe_route(url: &Url) -> String {
     "/[attachment-or-redirect]".into()
 }
 
-fn transport_error(stage: &str, route: &str, error: reqwest::Error) -> String {
-    let timeout = error.is_timeout();
-    let connect = error.is_connect();
-    let status = error.status().map(|s| s.as_u16());
-    let error = error.without_url();
-    let detail = redact_transport_detail(&format!("{error:?}"));
-    // Display source messages instead of Rust type names: `rustls` occurs in
-    // Debug output even for an ordinary refused TCP connection.
-    let mut messages = Vec::new();
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
-    while let Some(current) = source {
-        messages.push(current.to_string());
-        source = current.source();
-    }
-    let lower = messages.join("; ").to_ascii_lowercase();
-    let reason = if timeout {
-        "请求超时"
-    } else if lower.contains("handshake")
-        || lower.contains("tls")
-        || lower.contains("ssl")
-        || lower.contains("certificate")
-    {
-        "TLS 连接失败"
-    } else if connect {
-        "网络连接失败（DNS、TCP 或代理）"
-    } else {
-        "HTTP 请求失败"
-    };
-    tracing::warn!(target: "teaching_ta", stage, route, timeout, connect, status, cause=%detail, "助教教学网请求失败");
-    format!("{stage}失败：{reason}，请查看后台 teaching_ta 日志")
+fn transport_error(stage: &str, route: &str, error: &str) -> String {
+    let detail = redact_transport_detail(error);
+    tracing::warn!(target: "teaching_ta", stage, route, cause=%detail, "助教教学网 curl 请求失败");
+    format!("{stage}失败：{detail}，请查看后台 teaching_ta 日志")
 }
 
 fn redact_transport_detail(detail: &str) -> String {
@@ -617,52 +576,6 @@ fn string<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-fn import_cookies(jar: &Jar, content: &str, now: i64) -> Result<(), String> {
-    let mut count = 0;
-    for line in content.lines() {
-        let line = line.strip_prefix("#HttpOnly_").unwrap_or(line);
-        if line.starts_with('#') || line.trim().is_empty() {
-            continue;
-        }
-        let fields: Vec<_> = line.split('\t').collect();
-        if fields.len() != 7 {
-            continue;
-        }
-        let domain = fields[0].trim_start_matches('.');
-        if domain != "course.pku.edu.cn" && domain != "pku.edu.cn" {
-            continue;
-        }
-        let expires: i64 = fields[4].parse().unwrap_or(-1);
-        if expires < 0 || (expires != 0 && expires <= now) {
-            continue;
-        }
-        if [fields[2], fields[5], fields[6]]
-            .iter()
-            .any(|s| s.contains(['\r', '\n', ';']))
-        {
-            continue;
-        }
-        let mut cookie = format!("{}={}; Path={}", fields[5], fields[6], fields[2]);
-        if fields[1].eq_ignore_ascii_case("TRUE") {
-            cookie.push_str(&format!("; Domain={}", fields[0]));
-        }
-        if fields[3].eq_ignore_ascii_case("TRUE") {
-            cookie.push_str("; Secure");
-        }
-        if expires > 0 {
-            cookie.push_str(&format!("; Max-Age={}", expires - now));
-        }
-        if let Ok(url) = Url::parse(&format!("https://{domain}{}", fields[2])) {
-            jar.add_cookie_str(&cookie, &url);
-            count += 1;
-        }
-    }
-    if count == 0 {
-        Err("教学网缓存中没有有效 Cookie，请刷新课程或检查用户中心绑定".into())
-    } else {
-        Ok(())
-    }
-}
 fn parse_nonce(html: &str) -> Result<String, String> {
     let dom = scraper::Html::parse_document(html);
     let selector =
@@ -721,7 +634,93 @@ pub fn latest_attempts(attempts: &[Attempt]) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::cookie::CookieStore;
+
+    #[tokio::test]
+    async fn curl_reuses_cookie_jar_and_never_replays_post_or_external_redirect() {
+        use axum::{
+            extract::State,
+            http::{HeaderMap, StatusCode},
+            routing::get,
+            Router,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let reads = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/start",
+                get(|| async {
+                    (
+                        StatusCode::FOUND,
+                        [
+                            ("location", "/end"),
+                            ("set-cookie", "ta_session=shared; Path=/; HttpOnly"),
+                        ],
+                    )
+                }),
+            )
+            .route(
+                "/end",
+                get(
+                    |State(reads): State<Arc<AtomicUsize>>, headers: HeaderMap| async move {
+                        assert!(headers["cookie"]
+                            .to_str()
+                            .unwrap()
+                            .contains("ta_session=shared"));
+                        assert_eq!(headers["user-agent"], "Windows TA-test");
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        "ok"
+                    },
+                ),
+            )
+            .route(
+                "/post",
+                axum::routing::post(|| async {
+                    (StatusCode::TEMPORARY_REDIRECT, [("location", "/end")])
+                }),
+            )
+            .route(
+                "/external",
+                get(|| async {
+                    (
+                        StatusCode::FOUND,
+                        [("location", "https://external.invalid/secret")],
+                    )
+                }),
+            )
+            .route("/denied", get(|| async { StatusCode::FORBIDDEN }))
+            .route("/expired", get(|| async { StatusCode::UNAUTHORIZED }))
+            .with_state(reads.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Blackboard::test_client(&format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(client.get("/start").await.unwrap(), b"ok");
+        assert!(
+            std::fs::read_to_string(&client.login.as_ref().unwrap().cookie_file)
+                .unwrap()
+                .contains("ta_session")
+        );
+        assert!(client
+            .request("/post", Vec::new(), Some("score=10".into()))
+            .await
+            .unwrap_err()
+            .contains("307"));
+        assert!(client.get("/external").await.unwrap_err().contains("302"));
+        assert!(client
+            .get("/denied")
+            .await
+            .unwrap_err()
+            .contains("助教权限"));
+        assert!(client
+            .get("/expired")
+            .await
+            .unwrap_err()
+            .contains("登录已失效"));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
 
     #[test]
     fn diagnostics_hide_query_strings_and_dynamic_paths() {
@@ -739,94 +738,25 @@ mod tests {
         assert!(!detail.contains("password") && !detail.contains("secret"));
     }
 
-    /// Public, unauthenticated connectivity check; never run as part of offline tests.
+    /// Uses the same curl runner as replay, without credentials or grade writes.
     #[tokio::test]
     #[ignore]
-    async fn teaching_tls_smoke_test() {
-        let response = teaching_client_builder()
-            .timeout(Duration::from_secs(20))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap()
-            .get(format!("{BASE}/learn/api/public/v1/users/me"))
-            .send()
-            .await
-            .map_err(|error| {
-                transport_error("公开接口连接诊断", "/learn/api/public/v1/users/me", error)
-            })
-            .unwrap();
-        println!(
-            "Native TLS: teaching API returned HTTP {} (no credentials sent)",
-            response.status()
-        );
-        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn connection_failure_is_visible_at_info_level_without_leaking_url() {
-        use std::io::Write;
-        #[derive(Clone)]
-        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
-        impl Write for Capture {
-            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(data);
-                Ok(data.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!(
-            "http://{}/secret-file?token=secret",
-            listener.local_addr().unwrap()
-        );
-        drop(listener);
-        let error = crate::services::http_client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap()
-            .get(url)
-            .send()
-            .await
-            .unwrap_err();
-        let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let capture = Capture(bytes.clone());
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_ansi(false)
-            .without_time()
-            .with_writer(move || capture.clone())
-            .finish();
-        let message = tracing::subscriber::with_default(subscriber, || {
-            tracing::callsite::rebuild_interest_cache();
-            transport_error("连接教学网", "/[attachment-or-redirect]", error)
-        });
-        let log = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
-        assert!(
-            log.contains("WARN") && log.contains("teaching_ta") && log.contains("cause="),
-            "{log}"
-        );
-        assert!(!log.contains("secret-file") && !log.contains("token=secret"));
-        // Windows can time out before reporting a refused local TCP connection.
-        assert!(
-            message.contains("网络连接失败") || message.contains("请求超时"),
-            "{message}; {log}"
-        );
-    }
-    #[test]
-    fn imports_scoped_http_only_cookies_and_rejects_expired_or_foreign() {
-        let jar = Jar::default();
-        import_cookies(&jar, "#HttpOnly_course.pku.edu.cn\tFALSE\t/\tTRUE\t0\tJSESSIONID\tsecret\n.pku.edu.cn\tTRUE\t/\tTRUE\t200\twide\tyes\ncourse.pku.edu.cn\tFALSE\t/private\tTRUE\t0\tprivate\tvalue\ncourse.pku.edu.cn\tFALSE\t/\tTRUE\t99\told\tno\niaaa.pku.edu.cn\tFALSE\t/\tTRUE\t0\tiaaa\tno\n",100).unwrap();
-        let value = jar
-            .cookies(&Url::parse(BASE).unwrap())
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        assert!(value.contains("JSESSIONID=secret") && value.contains("wide=yes"));
-        assert!(!value.contains("old=") && !value.contains("iaaa=") && !value.contains("private="));
+    async fn teaching_curl_smoke_test() {
+        let client = Blackboard::test_client(BASE);
+        let login = client.login.unwrap();
+        let response = tokio::task::spawn_blocking(move || {
+            super::super::pkulogin::request_in_session(
+                &login,
+                &format!("{BASE}/learn/api/public/v1/users/me"),
+                &[],
+                None,
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status, 401);
+        println!("Replay curl: HTTP 401 (no credentials sent)");
     }
     #[test]
     fn rejects_invalid_scores_and_ids() {

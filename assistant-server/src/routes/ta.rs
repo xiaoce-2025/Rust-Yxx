@@ -726,7 +726,7 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let response = crate::services::http_client::builder()
+        let response = reqwest::Client::builder()
             .no_proxy()
             .build()
             .unwrap()

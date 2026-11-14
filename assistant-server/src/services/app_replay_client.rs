@@ -92,7 +92,7 @@ impl AppReplayClient {
 
     fn with_user_agent(user_agent: String) -> Result<Self, String> {
         let auth = AppAuth::new(&user_agent)?;
-        let api_client = crate::services::http_client::builder()
+        let api_client = reqwest::Client::builder()
             .user_agent(&user_agent)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(25))

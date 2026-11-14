@@ -18,7 +18,7 @@
 - `src/routes/ta.rs`：页面路由、会话获取、按账号隔离的持久草稿、批量操作和附件代理。
 - `src/routes/ta_view.rs`：Rust 生成的 HTML、CSS 和表单。复用现有公共样式及资源，无新的前端构建、脚本或外部进程。
 
-优先从 `AppState.login_cache` 获取已有教学网会话；缺少缓存时调用现有 `pkulogin::login_iaaa_and_get_cookies_with_cache`。从现有 Netscape Cookie 文件导入有效的域、路径、安全标记和有效期；模块本身不调用 curl、Python 或 pku3b，不新增登录组件。原有登录实现保持不变。
+优先从 `AppState.login_cache` 获取已有教学网会话；缺少缓存时调用现有 `pkulogin::login_iaaa_and_get_cookies_with_cache`。直接将现有 Netscape Cookie 文件交给回放共用的 curl 执行器读写，不再导入另一套 Cookie jar；业务逻辑全部用 Rust，不调用 Python 或 pku3b，不新增登录组件。原有登录实现保持不变。
 
 页面只用 GET 浏览和 POST 表单进行修改。修改请求校验当前登录会话派生的 CSRF 凭据，并在服务端重新校验助教身份、作业、提交记录、分数范围和提交版本。草稿通过现有 FileStore sidecar 接口存入 SQLite，键按用户 UUID、课程和作业隔离；登分前持久化操作标记，避免服务中断后未经核对地重复登分。
 
@@ -26,14 +26,14 @@
 
 ## 验证与范围
 
-助教 HTTP 客户端使用原生 TLS（Windows 为 Schannel，Linux 为 OpenSSL），保持证书与主机名校验，以兼容教学网的 TLS 握手。其他 HTTP 客户端显式保留原有 Rustls 行为。Linux/musl 构建使用 vendored OpenSSL，需要相应的 C 编译工具和 Perl。
+助教 HTTP 请求与教学网回放共用 `pkulogin::run_curl_bytes`，复用缓存 Cookie 文件、文件锁和 User-Agent，并沿用回放的 curl 参数与超时设置。评分表单写入临时文件后提交，不自动重发 POST。无需新增 Rust TLS 后端、OpenSSL 库或构建工具。
 
-后台 `teaching_ta` 日志在 info 级别记录请求和响应状态，在 warn 级别记录经过脱敏的底层连接错误。日志不输出 Cookie、nonce、请求体、查询参数或学生标识。TLS 连接失败与登录过期、权限拒绝会分别显示。
+后台 `teaching_ta` 日志在 info 级别记录请求和响应状态，在 warn 级别记录经过脱敏的底层连接错误。日志不输出 Cookie、nonce、请求体、查询参数或学生标识。curl 连接错误、HTTP 登录过期和权限拒绝会分别显示。
 
 可手动检查公开接口连通性，此测试不携带账号、密码或 Cookie，也不会登分：
 
 ```text
-cargo test --offline teaching_tls_smoke_test -- --ignored --nocapture
+cargo test --offline teaching_curl_smoke_test -- --ignored --nocapture
 ```
 
 ```text

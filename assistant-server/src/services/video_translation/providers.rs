@@ -144,7 +144,7 @@ impl Client {
     }
     pub async fn new(state: &AppState, id: Uuid) -> Result<Self, String> {
         Ok(Self {
-            http: crate::services::http_client::builder()
+            http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(20))
                 .timeout(Duration::from_secs(180))
                 .build()
@@ -715,7 +715,7 @@ mod tests {
             .await
             .unwrap();
         let client = Client {
-            http: crate::services::http_client::client(),
+            http: reqwest::Client::new(),
             keys: Credentials {
                 user_id: Uuid::new_v4(),
                 model: "test".into(),

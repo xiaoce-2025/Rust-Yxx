@@ -598,6 +598,72 @@ pub(crate) fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+pub(crate) struct TeachingResponse {
+    pub status: u16,
+    pub location: Option<String>,
+    pub body: Vec<u8>,
+}
+
+/// Structured Blackboard requests use the replay's curl runner, UA and locked
+/// cookie jar. Redirects are left to the caller so grading credentials never
+/// follow an external redirect and a POST is never implicitly replayed.
+pub(crate) fn request_in_session(
+    login: &PkuLoginResult,
+    url: &str,
+    headers: &[(String, String)],
+    form: Option<&str>,
+) -> Result<TeachingResponse, String> {
+    use std::io::Read;
+    let _guard = login.lock_cookie();
+    let dir = tempdir::TempDir::new("teaching-request")
+        .map_err(|_| "无法创建教学网请求临时目录")?;
+    let body_path = dir.path().join("body");
+    let header_path = dir.path().join("headers");
+    let cookie = login.cookie_file.to_string_lossy().to_string();
+    let mut args = vec![
+        "-sS".into(), "-k".into(), "--no-fail".into(),
+        "-A".into(), login.user_agent.clone(),
+        "-b".into(), cookie.clone(), "-c".into(), cookie,
+        "--max-filesize".into(), (32 * 1024 * 1024).to_string(),
+        "--output".into(), body_path.to_string_lossy().into_owned(),
+        "--dump-header".into(), header_path.to_string_lossy().into_owned(),
+        "--write-out".into(), "%{http_code}".into(),
+    ];
+    #[cfg(test)]
+    if reqwest::Url::parse(url).ok().is_some_and(|u| matches!(u.host_str(), Some("127.0.0.1" | "localhost"))) {
+        args.extend(["--noproxy".into(), "*".into()]);
+    }
+    for (name, value) in headers {
+        args.extend(["-H".into(), format!("{name}: {value}")]);
+    }
+    if let Some(form) = form {
+        let path = dir.path().join("form");
+        std::fs::write(&path, form).map_err(|_| "无法准备教学网评分请求")?;
+        // Keep feedback and nonce out of the process command line.
+        args.extend(["--data-binary".into(), format!("@{}", path.display())]);
+    }
+    args.push(url.into());
+    let metadata = run_curl_bytes(&args)?;
+    let status = std::str::from_utf8(&metadata).ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .filter(|s| (100..600).contains(s))
+        .ok_or("无法识别教学网 HTTP 状态")?;
+    let headers = std::fs::read_to_string(header_path).map_err(|_| "无法读取教学网响应头")?;
+    // Ignore proxy CONNECT and interim response headers.
+    let final_headers = headers.rsplit("HTTP/").next().unwrap_or_default();
+    let location = final_headers.lines().filter_map(|l| l.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+        .map(|(_, value)| value.trim().to_owned());
+    let mut body = Vec::new();
+    std::fs::File::open(body_path).map_err(|_| "无法读取教学网响应")?
+        .take(32 * 1024 * 1024 + 1).read_to_end(&mut body)
+        .map_err(|_| "读取教学网响应失败")?;
+    if body.len() > 32 * 1024 * 1024 {
+        return Err("教学网响应超过 32 MiB，请直接在教学网下载大附件".into());
+    }
+    Ok(TeachingResponse { status, location, body })
+}
+
 pub fn random_user_agent(gz_file: &str) -> Result<String, String> {
     super::user_agents::choose(gz_file)
 }

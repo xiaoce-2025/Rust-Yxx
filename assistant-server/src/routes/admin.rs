@@ -153,7 +153,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}",listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener,crate::routes::router(state)).await.unwrap(); });
-        let client = crate::services::http_client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
         assert_eq!(client.get(format!("{base}/admin")).send().await.unwrap().status(),303);
         assert_eq!(client.get(format!("{base}/api/admin/data")).send().await.unwrap().status(),401);
         for path in ["/admin","/api/admin/data"] {

@@ -1,6 +1,5 @@
 pub mod course_parser;
 pub mod ta;
-pub mod http_client;
 pub mod app_replay;
 mod app_replay_auth;
 mod app_replay_client;
