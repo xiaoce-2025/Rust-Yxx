@@ -7,6 +7,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+#[path = "store_operations.rs"]
+mod operations;
+pub use operations::{SiteFeatures, FEATURES_PATH};
 
 
 
@@ -289,6 +292,7 @@ impl FileStore {
             db: db.clone(),
         };
         tx.commit().await?;
+        store.init_operations().await?;
         store.load_whitelist().await?;
         Ok(store)
     }
@@ -557,9 +561,7 @@ impl FileStore {
     }
 
     pub async fn insert_session(&self, session: FileUserSession) -> Result<(), StoreError> {
-        self.update_collection("sessions", &self.sessions, |records| {
-            records.insert(session.session_id, session);
-        }).await
+        self.insert_session_record(session).await
     }
 
     pub async fn delete_session(&self, session_id: Uuid) -> Result<(), StoreError> {

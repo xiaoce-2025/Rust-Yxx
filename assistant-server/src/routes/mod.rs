@@ -1,6 +1,7 @@
 pub mod sso;
 pub mod ta;
 pub mod admin;
+pub mod operations;
 pub mod auth;
 pub mod batch_guard;
 pub mod manual_lessons;
@@ -47,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .merge(ui::routes(state.clone()))
         .merge(auth::routes())
         .merge(admin::routes(state.clone()))
+        .merge(operations::routes())
         .merge(sso::routes())
         .merge(conversations::routes())
         .merge(pkuvideo::routes())
@@ -59,6 +61,7 @@ pub fn router(state: AppState) -> Router {
         .merge(wechat::routes())
         .merge(user_api_config::routes())
         .layer(axum::middleware::from_fn_with_state(state.clone(), batch_guard::guard))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), operations::audit))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)

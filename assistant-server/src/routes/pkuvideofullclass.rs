@@ -598,7 +598,7 @@ async fn get_process_status(
     Ok(Json(serde_json::json!({"status":if lesson.is_processed {"completed"} else {"idle"}})))
 }
 
-async fn download_lesson_pdf(
+pub(super) async fn download_lesson_pdf(
     State(state): State<AppState>,
     axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
@@ -1060,6 +1060,9 @@ async fn reprocess_lesson(
     axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if !state.store.site_features().await.map_err(ApiError::Internal)?.show_reprocess {
+        return Err(ApiError::Forbidden("管理员已关闭课节重新处理功能".into()));
+    }
     let lesson_mutex = state.lesson_mutation(current_user.id).await;
     let _guard = lesson_mutex.lock().await;
     if state.course_busy(current_user.id, &course_id).await {

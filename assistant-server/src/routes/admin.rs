@@ -13,6 +13,10 @@ use uuid::Uuid;
 use crate::{app_state::AppState, auth::CurrentUser, error::ApiError};
 #[path = "admin_ta_ai.rs"]
 mod ta_ai;
+#[path = "admin_operations.rs"]
+mod operations;
+#[path = "admin_operations_view.rs"]
+mod operations_view;
 
 pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
@@ -23,6 +27,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/admin/users/:id/revoke-sessions", post(revoke_sessions))
         .route("/api/admin/whitelist", post(save_whitelist))
         .route("/api/admin/ta-ai", get(ta_ai::get).post(ta_ai::save))
+        .route("/api/admin/records", get(operations::records))
+        .route("/api/admin/records/:id", get(operations::ai_record))
+        .route("/api/admin/notes", get(operations::notes))
+        .route("/api/admin/note", get(operations::note))
+        .route("/api/admin/features", get(operations::features).post(operations::save_features))
         .route_layer(middleware::from_fn_with_state(state, require_admin))
 }
 
@@ -52,25 +61,27 @@ async fn require_admin(State(state): State<AppState>, request: Request, next: Ne
     response
 }
 
-async fn page() -> Html<String> { Html(ta_ai::page()) }
+async fn page() -> Html<String> { Html(operations_view::page(ta_ai::page())) }
 
-async fn management_data(State(state): State<AppState>, current: CurrentUser) -> Json<Value> {
+async fn management_data(State(state): State<AppState>, current: CurrentUser) -> Result<Json<Value>,ApiError> {
+    let last_logins=state.store.last_logins().await.map_err(|e|ApiError::Internal(e.to_string()))?;
     let counts = state.store.admin_session_counts().await;
     let mut users = state.store.admin_users().await;
     users.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
     let users: Vec<Value> = users.into_iter().map(|user| json!({
         "id": user.id, "username": user.username, "email": user.email,
         "is_active": user.is_active, "created_at": user.created_at,
+        "last_login_at": last_logins.get(&user.id.to_string()),"updated_at":user.updated_at,
         "storage_quota": user.storage_quota, "processing_quota": user.processing_quota,
         "processing_priority": user.processing_priority, "sessions": counts.get(&user.id).copied().unwrap_or(0),
         "is_admin": state.settings.admin.user_ids.contains(&user.id)
     })).collect();
     // Deliberately project only operational metadata: no credentials, URLs or file paths.
     let mut jobs = Vec::new();
-    for job in state.pkuvideo_jobs.read().await.values() {
+    for job in state.store.get_all_pkuvideo_jobs().await.values() {
         jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"notes","status":job.status,"created_at":job.created_at,"updated_at":job.updated_at}));
     }
-    for job in state.pkuvideo_fw_jobs.read().await.values() {
+    for job in state.store.get_all_pkuvideo_fw_jobs().await.values() {
         jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"replay","status":job.status,"created_at":job.created_at,"updated_at":job.updated_at}));
     }
     let entries: Vec<_> = state.video_translations.entries.lock().await.values().cloned().collect();
@@ -79,8 +90,8 @@ async fn management_data(State(state): State<AppState>, current: CurrentUser) ->
         jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"translation","status":job.status,"updated_at":job.updated_at}));
     }
     jobs.sort_by(|a, b| b["updated_at"].as_str().cmp(&a["updated_at"].as_str()));
-    Json(json!({"current_user_id":current.id,"username":current.username,"users":users,"jobs":jobs,
-        "whitelist":state.store.admin_whitelist().await}))
+    Ok(Json(json!({"current_user_id":current.id,"username":current.username,"users":users,"jobs":jobs,
+        "whitelist":state.store.admin_whitelist().await})))
 }
 
 #[derive(Deserialize)]
@@ -139,11 +150,14 @@ mod tests {
             "audioapi_paraformer":{},"llm_deepseek":{}
         })).unwrap();
         let store = Arc::new(FileStore::new(temp.path().into()).await.unwrap());
+        std::fs::create_dir_all("./course_data").unwrap();
+        let note_dir=tempdir::TempDir::new_in("./course_data","admin-notes").unwrap();
+        let note_username=note_dir.path().file_name().unwrap().to_str().unwrap().to_owned();
         let state = AppState::new(settings, store.clone());
         let mut tokens = Vec::new();
         for id in [admin, member] {
             store.insert_user(FileUser {
-                id, username: id.to_string(), email: format!("{id}@example.com"), password_hash:"SECRET_HASH".into(),
+                id, username: id.to_string(), email: format!("{}@example.com",if id==member{note_username.clone()}else{id.to_string()}), password_hash:"SECRET_HASH".into(),
                 is_active:true, created_at:Utc::now(), updated_at:Utc::now(), processing_priority:5,
                 storage_quota:3, processing_quota:1, iaaa_encrypted_password:Some("SECRET_IAAA".into()), iaaa_public_key:None,
             }).await.unwrap();
@@ -157,6 +171,32 @@ mod tests {
         let base = format!("http://{}",listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener,crate::routes::router(state)).await.unwrap(); });
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let flags_url=format!("{base}/api/admin/features");
+        assert_eq!(client.get(&flags_url).send().await.unwrap().status(),401);
+        assert_eq!(client.get(&flags_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
+        assert_eq!(client.post(&flags_url).bearer_auth(tokens[0]).json(&json!({"show_reprocess":false})).send().await.unwrap().status(),403);
+        assert_eq!(client.post(&flags_url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&json!({"show_reprocess":false})).send().await.unwrap().status(),200);
+        let flags:Value=client.get(format!("{base}/api/site/features")).bearer_auth(tokens[1]).send().await.unwrap().json().await.unwrap();assert_eq!(flags["show_reprocess"],false);
+        // Disabling the control also blocks a direct request, before touching teaching data.
+        assert_eq!(client.post(format!("{base}/api/pkuvideofullclass/courses/_c/videos/_v/reprocess")).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
+        let course="_admin_course";
+        std::fs::create_dir_all(note_dir.path().join(course)).unwrap();
+        std::fs::write(note_dir.path().join(course).join("lesson.tex"),"PRIVATE_NOTE_BODY").unwrap();
+        let lesson=crate::services::lesson_storage::LessonInfo{enc_key:None,id:"_l_1".into(),video_url:"SECRET_VIDEO_URL".into(),play_url:String::new(),date:"2026-11-14".into(),time:String::new(),day_of_week:String::new(),is_processed:true,tex_filename:Some("lesson.tex".into()),manual_replay:None};
+        crate::services::lesson_storage::save_lessons(&store,&note_username,course,&[lesson]).await.unwrap();
+        let inventory_url=format!("{base}/api/admin/notes?user={member}");
+        assert_eq!(client.get(&inventory_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
+        let inventory:Value=client.get(&inventory_url).bearer_auth(tokens[0]).send().await.unwrap().json().await.unwrap();assert_eq!(inventory["total"],1);
+        assert!(!inventory.to_string().contains("PRIVATE_NOTE_BODY")&&!inventory.to_string().contains("SECRET_VIDEO_URL"));
+        let note_url=format!("{base}/api/admin/note?owner={member}&course={course}&lesson=_l_1&format=tex");
+        assert_eq!(client.get(&note_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
+        let note=client.get(&note_url).bearer_auth(tokens[0]).send().await.unwrap();assert_eq!(note.headers()["cache-control"],"no-store");assert_eq!(note.text().await.unwrap(),"PRIVATE_NOTE_BODY");
+        assert_eq!(client.get(format!("{base}/api/admin/note?owner={member}&course=..&lesson=_l_1&format=tex")).bearer_auth(tokens[0]).send().await.unwrap().status(),400);
+        let audit_url=format!("{base}/api/admin/records?kind=activity&q=note.read");
+        assert_eq!(client.get(&audit_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
+        let reads:Value=client.get(&audit_url).bearer_auth(tokens[0]).send().await.unwrap().json().await.unwrap();
+        assert!(reads["records"].as_array().unwrap().iter().any(|r|r["user_id"]==admin.to_string()&&r["status"]==200));
+        assert!(!reads.to_string().contains("PRIVATE_NOTE_BODY")&&!reads.to_string().contains(&tokens[0].to_string()));
         assert_eq!(client.get(format!("{base}/admin")).send().await.unwrap().status(),303);
         assert_eq!(client.get(format!("{base}/api/admin/data")).send().await.unwrap().status(),401);
         for path in ["/admin","/api/admin/data"] {
@@ -192,6 +232,8 @@ mod tests {
         assert_eq!(client.post(format!("{url}/revoke-sessions")).bearer_auth(tokens[0]).header("x-admin-request","1").json(&json!({})).send().await.unwrap().status(),200);
         assert!(store.get_session(tokens[1]).await.is_none());
         let restored = FileStore::new(temp.path().into()).await.unwrap();
+        assert!(!restored.site_features().await.unwrap().show_reprocess);
+        assert!(restored.last_logins().await.unwrap().contains_key(&member.to_string()));
         assert_eq!(restored.load_sidecar::<crate::services::ta_ai::Annotation>(std::path::Path::new(crate::services::ta_ai::ANNOTATION_PATH)).await.unwrap().unwrap().format,"AI: {model} / {mode}");
         let user = restored.get_user(member).await.unwrap();
         assert_eq!((user.storage_quota,user.processing_quota,user.processing_priority),(9,8,2));

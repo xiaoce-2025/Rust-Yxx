@@ -14,6 +14,7 @@ pub(super) async fn get(State(state): State<AppState>) -> Result<Json<Annotation
 }
 pub(super) async fn save(
     State(state): State<AppState>,
+    user: CurrentUser,
     Json(config): Json<Annotation>,
 ) -> Result<Json<Value>, ApiError> {
     config.validate().map_err(ApiError::BadRequest)?;
@@ -21,7 +22,7 @@ pub(super) async fn save(
         .map_err(|_| ApiError::Internal("无法保存 AI 标记设置".into()))?;
     state
         .store
-        .save_sidecar(std::path::Path::new(ANNOTATION_PATH), &data)
+        .save_admin_setting(user.id,std::path::Path::new(ANNOTATION_PATH), &data)
         .await
         .map_err(ApiError::Internal)?;
     Ok(Json(json!({"success":true})))

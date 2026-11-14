@@ -17,9 +17,9 @@ fn path(user: Uuid, course: &str, column: &str) -> Result<PathBuf, String> {
 async fn save(state: &AppState, user: Uuid, job: &Job) -> Result<(), String> {
     state
         .store
-        .save_sidecar(
+        .save_ta_ai_job(user,
             &path(user, &job.course, &job.column)?,
-            &serde_json::to_string(job).map_err(|_| "无法保存 AI 批改进度")?,
+            job,
         )
         .await
 }
@@ -142,6 +142,7 @@ pub(super) async fn start(
                 .flatten()
                 .unwrap_or(outer_job.clone());
             failed.status = "failed".into();
+            failed.updated_at = chrono::Utc::now().to_rfc3339();
             failed.message = "后台任务异常中断，已生成的草稿保留".into();
             let _ = save(&outer_state, user_id, &failed).await;
         }

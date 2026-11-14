@@ -330,6 +330,11 @@
     let selectedCourse = null;
     let selectedCourseName = null;
     let allCourses = [];
+    let showReprocess = false;
+    async function loadFeatures() {
+      try { const flags = await api('/api/site/features'); showReprocess = flags.show_reprocess === true; }
+      catch { showReprocess = false; }
+    }
     let currentLessons = [];
     let currentManualAttempts = [];
     let appLoginResolve = null;
@@ -799,7 +804,7 @@
               <div class="lesson-actions">
                 <button class="ghost small" onclick="handleWatchReplay('${lesson.id}')" ${canWatchReplay(lesson) ? '' : 'disabled title="暂无回放地址"'}><svg class="icon" aria-hidden="true"><use href="#replay-icon-play"/></svg>观看回放</button>
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && !lesson.tex_filename ? '<button class="ghost small" onclick="handleProcessLesson(\'' + lesson.id + '\')"><svg class="icon" aria-hidden="true"><use href="#replay-icon-file"/></svg>提交处理</button>' : ''}
-                ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleReprocessLesson(\'' + lesson.id + '\')"><svg class="icon" aria-hidden="true"><use href="#replay-icon-refresh"/></svg>重新处理</button>' : ''}
+                ${showReprocess && !isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleReprocessLesson(\'' + lesson.id + '\')"><svg class="icon" aria-hidden="true"><use href="#replay-icon-refresh"/></svg>重新处理</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.tex_filename ? '<button class="ghost small" onclick="handleDownloadPdf(\'' + lesson.id + '\')"><svg class="icon" aria-hidden="true"><use href="#replay-icon-download"/></svg>下载PDF</button>' : ''}
                 ${!isProcessingThisLesson && !isDownloadingThisLesson && lesson.manual_replay ? '<button class="ghost small" onclick="handleDeleteManualLesson(\'' + lesson.id + '\')">删除课节</button>' : ''}
               </div>
@@ -1193,7 +1198,7 @@
 
     checkLogin();
     checkBinding();
-    loadCourseList();
+    loadFeatures().then(loadCourseList);
   </script>
 </body>
 </html>
