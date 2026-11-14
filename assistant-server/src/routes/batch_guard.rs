@@ -156,6 +156,7 @@ mod tests {
             "/api/user/api-config",
             "/api/pkuvideofullclass/courses",
             "/api/pkuvideo/jobs",
+            "/api/ta/workspace",
             "/ta/attachment?course=_c_1&column=_h_1&attempt=_a_1&file=_f_1",
         ] {
             let response = client

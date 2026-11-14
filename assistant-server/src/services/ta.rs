@@ -42,6 +42,36 @@ pub struct Attempt {
     pub revision: String,
     pub exempt: bool,
 }
+
+/// Blackboard may return a placeholder score of 0 before manual grading.
+/// Its explicit attempt status takes precedence over the numeric score.
+pub fn attempt_is_graded(status: &str, score: Option<f64>) -> bool {
+    let status = status
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match status.as_str() {
+        "completed" | "graded" => true,
+        "needsgrading" | "needsgradingagain" | "needsmanualgrading" | "notattempted"
+        | "inprogress" | "inprogressagain" | "suspended" | "abandoned" | "submitted"
+        | "ungraded" | "pending" => false,
+        // Unknown/missing status + zero is ambiguous, not proof of a grade.
+        _ => score.is_some_and(|score| score.is_finite() && score != 0.0),
+    }
+}
+
+fn attempt_score(value: &Value) -> Option<f64> {
+    let score = value
+        .get("score")
+        .and_then(Value::as_f64)
+        .or_else(|| value.pointer("/grade/score").and_then(Value::as_f64));
+    if attempt_is_graded(string(value, "status"), score) {
+        score
+    } else {
+        None
+    }
+}
 #[derive(Clone, Debug)]
 pub struct Attachment {
     pub id: String,
@@ -371,11 +401,12 @@ impl Blackboard {
         valid_id(column)?;
         self.list(&format!("/learn/api/public/v2/courses/{course}/gradebook/columns/{column}/attempts?limit=100")).await?
             .into_iter().map(|v| {
-                let score = v.get("score").and_then(Value::as_f64).or_else(||v.pointer("/grade/score").and_then(Value::as_f64));
+                let score = attempt_score(&v);
                 let status = string(&v,"status").to_string();
                 let date = string(&v,"attemptDate").to_string();
                 let revision = format!("{:x}", Sha256::digest(serde_json::to_vec(&serde_json::json!({
-                    "id":v["id"],"userId":v["userId"],"date":date,"status":status,"score":score,"exempt":v["exempt"]
+                    "id":v["id"],"userId":v["userId"],"date":date,"status":status,
+                    "score":v["score"],"gradeScore":v.pointer("/grade/score"),"exempt":v["exempt"]
                 })).unwrap()));
                 Ok(Attempt { id: valid_id(string(&v,"id"))?.into(), user_id: valid_id(string(&v,"userId"))?.into(),
                     date, status, score, revision, exempt: v.get("exempt").and_then(Value::as_bool).unwrap_or(false) })
@@ -634,6 +665,37 @@ pub fn latest_attempts(attempts: &[Attempt]) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placeholder_zero_is_not_a_grade_but_completed_zero_is() {
+        for status in [
+            "NeedsGrading",
+            "Needs Grading",
+            "InProgress",
+            "Submitted",
+            "",
+        ] {
+            let value = serde_json::json!({"status":status,"score":0});
+            assert_eq!(attempt_score(&value), None, "{status}");
+            assert!(!attempt_is_graded(status, Some(0.0)), "{status}");
+        }
+        for status in ["Completed", "Graded"] {
+            assert_eq!(
+                attempt_score(&serde_json::json!({"status":status,"score":0})),
+                Some(0.0)
+            );
+            assert!(attempt_is_graded(status, Some(0.0)));
+        }
+        assert_eq!(
+            attempt_score(&serde_json::json!({"status":"NeedsGrading","grade":{"score":0}})),
+            None
+        );
+        assert_eq!(
+            attempt_score(&serde_json::json!({"status":"Completed","grade":{"score":85}})),
+            Some(85.0)
+        );
+        assert!(!attempt_is_graded("NeedsGrading", Some(85.0)));
+    }
 
     #[tokio::test]
     async fn curl_reuses_cookie_jar_and_never_replays_post_or_external_redirect() {

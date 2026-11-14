@@ -220,9 +220,10 @@ mod tests {
         let state = AppState::new(settings, Arc::new(FileStore::new(temp.path().into()).await.unwrap()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let app = routes(state.clone()).with_state(state.clone());
+        let app = routes(state.clone()).merge(super::super::ta::routes()).with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        assert_eq!(client.get(format!("{base}/api/ta/workspace")).send().await.unwrap().status(), 401);
         assert_eq!(client.get(format!("{base}/app")).send().await.unwrap().status(), 404);
         for path in ["/", "/chat", "/user-center", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence", "/ta"] {
             let response = client.get(format!("{base}{path}")).send().await.unwrap();
@@ -275,9 +276,27 @@ mod tests {
                     .header("cookie", format!("assistant_token={token}")).send().await.unwrap();
                 assert_eq!(ta.status(),200);
                 let ta = ta.text().await.unwrap();
-                assert!(ta.contains("助教作业批改") && ta.contains("尚未绑定教学网"));
+                assert!(ta.contains("助教作业批改") && ta.contains("正在加载助教工作台"));
+                assert!(ta.contains("data-loading=\"true\"") && !ta.contains("尚未绑定教学网"));
                 assert!(ta.contains("href=\"/ta\" aria-current=\"page\""));
                 assert!(!ta.contains("type=\"password\""));
+                let data = client.get(format!("{base}/api/ta/workspace"))
+                    .header("cookie", format!("assistant_token={token}")).send().await.unwrap();
+                assert_eq!(data.headers()["cache-control"], "no-store");
+                let data: serde_json::Value = data.json().await.unwrap();
+                let fragment = data["html"].as_str().unwrap();
+                assert!(fragment.contains("尚未绑定教学网"));
+                assert!(!fragment.contains("<html") && !fragment.contains("<script"));
+                let csrf = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(format!("ta-action-v1:{id}:{token}")));
+                let failed_action = client.post(format!("{base}/ta/action"))
+                    .header("cookie", format!("assistant_token={token}"))
+                    .header("x-ta-partial", "1")
+                    .form(&[("csrf", csrf.as_str()), ("action", "save_bulk")])
+                    .send().await.unwrap();
+                assert_eq!(failed_action.status(), 400);
+                let failure: serde_json::Value = failed_action.json().await.unwrap();
+                assert!(failure["html"].as_str().unwrap().contains("尚未绑定教学网"));
+                assert_eq!(failure["url"], "/ta");
 
                 let submitter = Arc::new(HeldSubmission(tokio::sync::Notify::new()));
                 state.batch_submissions.start(

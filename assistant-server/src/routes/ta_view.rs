@@ -59,9 +59,19 @@ fn date(value: &str) -> String {
         .unwrap_or(value.into())
 }
 pub(super) fn render(s: &Selection, w: &Workspace, csrf: &str) -> String {
+    wrap(&fragment(s, w, csrf), false)
+}
+pub(super) fn shell() -> String {
+    wrap(
+        r#"<div class="ta-workspace"><aside class="course-panel"><h2>我的助教课程</h2><p class="muted">沿用已绑定的教学网账号</p><div class="ta-skeleton"></div><div class="ta-skeleton"></div></aside><section class="ta-content"><div class="card ta-loading"><h2>正在加载助教工作台</h2><p>正在后台获取课程和作业，请稍候……</p><div class="ta-skeleton"></div><div class="ta-skeleton"></div></div></section></div>"#,
+        true,
+    )
+}
+fn wrap(content: &str, loading: bool) -> String {
     let mut html = String::from("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>「严小希」小助手-助教批改</title><style>");
     html.push_str(include_str!("../../templates/replay-hero.css"));
     html.push_str(CSS);
+    html.push_str(ASYNC_CSS);
     html.push_str("</style></head><body><main>");
     html.push_str(
         &include_str!("../../templates/replay-hero.html")
@@ -71,6 +81,15 @@ pub(super) fn render(s: &Selection, w: &Workspace, csrf: &str) -> String {
                 "按作业整理学生提交，专注逐份批改，也能快速完成整组评分。",
             ),
     );
+    html.push_str("<div id=\"ta-load-status\" class=\"ta-load-status\" role=\"status\" aria-live=\"polite\"></div>");
+    let _ = write!(html, "<div id=\"ta-workspace-region\" data-loading=\"{loading}\" aria-busy=\"{loading}\">{content}</div>");
+    html.push_str("<noscript>请启用 JavaScript，以在页面内加载课程和批改作业。</noscript></main>");
+    html.push_str(SCRIPT);
+    html.push_str("<!-- site-footer --></body></html>");
+    html
+}
+pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
+    let mut html = String::new();
     html.push_str("<div class=\"ta-workspace\"><aside class=\"course-panel\"><div class=\"panel-heading\"><h2>我的助教课程</h2><a class=\"text-link\" href=\"/ta\">刷新</a></div><p class=\"muted\">沿用已绑定的教学网账号</p><nav class=\"course-list\" aria-label=\"助教课程\">");
     for c in &w.courses {
         let target = Selection {
@@ -145,7 +164,7 @@ pub(super) fn render(s: &Selection, w: &Workspace, csrf: &str) -> String {
             }
         }
     }
-    html.push_str("</section></div></main><!-- site-footer --></body></html>");
+    html.push_str("</section></div>");
     html
 }
 
@@ -333,6 +352,93 @@ fn review_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
     html.push_str("</tbody></table></div><label class=\"check confirm-check\"><input type=\"checkbox\" name=\"confirmed\" value=\"yes\">我已核对选中的分数、评语和提交记录，确认写入教学网</label><div class=\"form-bottom\"><button class=\"ghost\" name=\"action\" value=\"discard\" formnovalidate>丢弃选中草稿</button><button name=\"action\" value=\"commit\">确认同步选中评分</button></div><p class=\"muted\">同步后会回读核验。遇到提交变更或未确认结果时停止，已保存的草稿会保留。曾登分但结果未确认的记录，请先在教学网核对。</p></form></section>");
 }
 
+const ASYNC_CSS: &str = r#"
+.ta-load-status{min-height:24px;margin:12px 0;color:#64748b;font-size:14px}.ta-load-status.error{color:#b91c1c}.ta-load-status button{margin-left:12px}.ta-loading{padding:28px}.ta-skeleton{height:22px;border-radius:8px;margin:18px 0;background:#e9eef5;animation:ta-pulse 1.5s ease-in-out infinite}.ta-skeleton:nth-child(even){width:72%}#ta-workspace-region[aria-busy=true]{opacity:.65;transition:opacity .15s}@keyframes ta-pulse{50%{opacity:.4}}@media(prefers-reduced-motion:reduce){.ta-skeleton{animation:none}}
+"#;
+
+// Small browser bridge only; workspace rendering, authentication and grading stay in Rust.
+const SCRIPT: &str = r#"<script>
+(() => {
+  const region = document.getElementById('ta-workspace-region');
+  const status = document.getElementById('ta-load-status');
+  if (!region || !status) return;
+  let generation = 0, controller = null, writing = false, reading = false;
+  function message(text, error = false) {
+    status.classList.toggle('error', error);
+    status.textContent = text;
+  }
+  async function load(target, mode = 'push', form = null) {
+    if (writing) { message('操作正在处理，请等待结果，勿重复提交。'); return; }
+    const url = new URL(target, location.href);
+    if (url.origin !== location.origin || url.pathname !== '/ta') return;
+    if (controller) controller.abort();
+    controller = new AbortController();
+    const current = ++generation;
+    writing = !!form; reading = !form;
+    region.inert = writing;
+    region.setAttribute('aria-busy', 'true');
+    message(form ? '正在处理，请稍候；请勿重复提交……' : '正在后台加载课程和作业……');
+    try {
+      const options = {credentials:'same-origin', cache:'no-store', signal:controller.signal,
+        headers:{'Accept':'application/json', 'X-TA-Partial':'1'}};
+      if (form) { options.method = 'POST'; options.body = form; }
+      const response = await fetch(form ? '/ta/action' : '/api/ta/workspace' + url.search, options);
+      if (response.status === 401) {
+        location.assign('/auth?next=' + encodeURIComponent(url.pathname + url.search)); return;
+      }
+      const payload = await response.json();
+      if (current !== generation) return;
+      if (typeof payload.html !== 'string' || typeof payload.url !== 'string') {
+        throw new Error(payload.error || '加载失败（HTTP ' + response.status + '）');
+      }
+      const destination = new URL(payload.url, location.origin);
+      if (destination.origin !== location.origin || destination.pathname !== '/ta') throw new Error('页面地址无效');
+      region.innerHTML = payload.html;
+      region.dataset.loading = 'false';
+      if (mode === 'push') history.pushState(null, '', destination.pathname + destination.search);
+      else history.replaceState(null, '', destination.pathname + destination.search);
+      message(response.ok ? '' : '操作未完成，请查看下方提示并核对输入。', !response.ok);
+    } catch (error) {
+      if (error.name === 'AbortError' || current !== generation) return;
+      // Keep the existing form and feedback on network failures. Never retry a POST.
+      message(form ? '未能确认操作结果，请先刷新并核对草稿或教学网成绩，勿重复提交。' : (error.message || '加载失败，请稍后重试。'), true);
+      const retry = document.createElement('button'); retry.type = 'button';
+      retry.textContent = form ? '刷新核对结果' : '重新加载';
+      retry.addEventListener('click', () => load(url.href, 'replace'));
+      status.append(retry);
+    } finally {
+      if (current === generation) {
+        writing = false; reading = false; region.inert = false; region.setAttribute('aria-busy', 'false');
+      }
+    }
+  }
+  region.addEventListener('click', event => {
+    const link = event.target.closest('a[href]');
+    if (!link || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || link.target || link.hasAttribute('download')) return;
+    const url = new URL(link.href, location.href);
+    if (url.origin === location.origin && url.pathname === '/ta') {
+      event.preventDefault(); load(url.href);
+    }
+  });
+  region.addEventListener('submit', event => {
+    // Buttons named "action" shadow HTMLFormElement.action; read the attribute.
+    const form = event.target, url = new URL(form.getAttribute('action') || location.href, location.href);
+    if (url.origin !== location.origin || !['/ta', '/ta/action'].includes(url.pathname)) return;
+    event.preventDefault();
+    if (writing || (reading && form.method.toLowerCase() === 'post')) {
+      message('数据正在更新，请等待完成后再操作。'); return;
+    }
+    const data = new FormData(form);
+    if (event.submitter && event.submitter.name) data.append(event.submitter.name, event.submitter.value);
+    if (form.method.toLowerCase() === 'post') load(location.href, 'push', new URLSearchParams(data));
+    else { url.search = new URLSearchParams(data).toString(); load(url.href); }
+  });
+  window.addEventListener('popstate', () => load(location.href, 'replace'));
+  window.addEventListener('beforeunload', event => { if (writing) { event.preventDefault(); event.returnValue = ''; } });
+  if (region.dataset.loading === 'true') load(location.href, 'replace');
+})();
+</script>"#;
+
 const CSS: &str = r#"
 button,.button{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid transparent;border-radius:10px;padding:10px 14px;background:var(--accent);color:white;font:inherit;text-decoration:none;cursor:pointer;font-weight:600}button:hover,.button:hover{filter:brightness(.94)}button:disabled{opacity:.45;cursor:not-allowed}.ghost{background:#fffafa;color:var(--ink);border-color:var(--line)}.small{padding:6px 10px;font-size:13px}a{color:inherit}.text-link{color:var(--accent);text-decoration:none;font-weight:600}.text-link:hover{text-decoration:underline}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}h2,h3,h4,p{margin-top:0}h2{font-size:21px;margin-bottom:0}h3{font-size:17px;margin-bottom:10px}h4{font-size:15px;margin-bottom:10px}.muted,small{color:var(--muted);font-size:13px}.ta-workspace{display:grid;grid-template-columns:minmax(220px,23%) minmax(0,1fr);gap:clamp(12px,1.6vw,28px);padding:16px var(--replay-gutter) 40px}.course-panel{background:linear-gradient(150deg,#fcf5f5,#fcf0f0);border-radius:12px;padding:20px 18px;min-width:0;align-self:start}.panel-heading,.section-header,.reviewer-heading,.form-bottom,.list-heading,.score-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}.panel-heading h2{font-size:18px}.course-panel>.muted{margin:10px 0 18px}.course-list{display:grid;gap:6px}.course-item{display:flex;align-items:flex-start;gap:10px;padding:13px 10px;border-radius:10px;text-decoration:none;overflow-wrap:anywhere}.course-item.active,.course-item:hover{background:#fce5e5;color:var(--accent)}.course-item strong{display:block;font-size:14px}.course-item small{display:block;margin-top:5px}.course-symbol{font-size:22px;line-height:1.2;color:var(--accent)}.sidebar-note{border-top:1px solid var(--line);margin-top:28px;padding-top:18px;font-size:13px}.sidebar-note p{color:var(--muted);margin:9px 0 14px}.ta-content{min-width:0}.section-header{padding:12px 0 18px;border-bottom:1px solid var(--line);margin-bottom:16px}.section-header h2{margin-top:5px}.card{background:#fffdfd;border:1px solid var(--line);border-radius:12px}.filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end;padding:16px;margin-bottom:16px}label{display:grid;gap:6px;font-size:13px;font-weight:600}input,select,textarea{font:inherit;color:var(--ink);border:1px solid #ddc8ca;background:white;border-radius:8px;padding:9px 10px;max-width:100%}select{min-width:130px}input[type=number]{width:145px}textarea{width:100%;resize:vertical}input[type=checkbox]{width:17px;height:17px;accent-color:var(--accent);flex:none;margin:0}.check{display:flex;gap:8px;align-items:center;font-weight:400;line-height:1.5}.filters .check{padding:10px 0}.filters .search{flex:1;min-width:140px}.filters input:not([type=checkbox]){width:100%;min-width:0}.stats{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:12px;background:linear-gradient(120deg,#fffafa,#fdf1f1);padding:18px 0;margin:16px 0}.stats>div{display:grid;gap:2px;padding:0 20px;border-right:1px solid var(--line)}.stats>div:last-child{border:0}.stats strong{font-size:26px;color:var(--accent);font-weight:600}.stats span{font-size:13px;color:var(--muted)}.workspace-tabs{display:flex;gap:24px;border-bottom:1px solid var(--line);margin:22px 0 18px}.workspace-tabs a{padding:10px 0;text-decoration:none;color:var(--muted);font-weight:600}.workspace-tabs a[aria-current=page]{color:var(--accent);border-bottom:2px solid var(--accent)}.badge{display:inline-block;padding:3px 8px;border-radius:6px;background:#f8e8e8;color:#963b42;font-size:12px;white-space:nowrap;font-weight:500}.badge.done{background:#edf4ee;color:#386b43}.quick{padding:16px 18px;margin-bottom:18px}.quick summary{cursor:pointer;color:var(--accent)}.quick summary span{font-size:13px;color:var(--muted);margin-left:12px}.quick form{margin-top:18px}.quick-fields{display:grid;grid-template-columns:160px minmax(0,1fr);gap:16px;margin-bottom:14px}.quick p,.score-form>p{margin:12px 0 0}.grading-layout{display:grid;grid-template-columns:minmax(215px,30%) minmax(0,1fr);gap:16px;align-items:start}.submission-list{overflow:hidden}.list-heading{padding:16px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:4px}.list-heading h3{margin:0}.list-heading span{font-size:12px}.student-scroll{max-height:780px;overflow-y:auto}.student-row{display:flex;align-items:center;gap:10px;padding:14px 12px;border-bottom:1px solid #f1e5e5}.student-row:last-child{border-bottom:0}.student-row.active{background:#fbeaea;box-shadow:inset 3px 0 var(--accent)}.student-row>a{flex:1;text-decoration:none;min-width:0}.student-row small{display:block;font-size:12px;margin-top:5px;overflow-wrap:anywhere}.row-title{display:flex;gap:6px;justify-content:space-between;align-items:center;flex-wrap:wrap}.reviewer{padding:22px;min-width:0}.reviewer-heading{align-items:start}.reviewer-heading p{margin-bottom:0}.reviewer-heading h3 .muted{margin-left:6px;font-weight:400}.attempt-nav{display:flex;justify-content:space-between;gap:8px;margin:16px 0 22px}.attachment{display:flex;justify-content:space-between;gap:14px;padding:12px;background:#fcf4f4;border-radius:8px;margin-bottom:8px;overflow-wrap:anywhere}.attachment-list{margin-bottom:12px}.submission-text{white-space:pre-wrap;overflow-wrap:anywhere;background:#fcf6f6;padding:14px;border-radius:8px;font:inherit;max-height:400px;overflow:auto}.source-link{display:inline-block;margin-bottom:20px;font-size:13px}.pdf-details{margin:8px 0 18px}.pdf-details summary{cursor:pointer;color:var(--accent);font-size:13px;padding:5px 0}.pdf-details iframe{width:100%;height:620px;border:1px solid var(--line);border-radius:8px;margin:10px 0}.score-form{border-top:1px solid var(--line);padding-top:20px;display:grid;gap:16px}.score-heading h4{margin:0}.form-bottom{justify-content:flex-end;flex-wrap:wrap}.form-bottom>.check{margin-right:auto}.alert{padding:13px 16px;border-radius:10px;margin-bottom:16px;overflow-wrap:anywhere}.alert a{font-weight:600}.error{background:#fff0ed;border:1px solid #ebc0b8;color:#9b302b}.success{background:#eff6ef;border:1px solid #c7ddc8;color:#386b43}.empty{text-align:center;padding:45px 24px;color:var(--muted)}.empty h2,.empty h3{color:var(--ink);margin-bottom:10px}.empty p{max-width:500px;margin:0 auto 20px}.empty.compact{padding:24px 8px}.welcome{margin-top:12px;min-height:330px;display:flex;flex-direction:column;align-items:center;justify-content:center}.empty-mark{font-size:38px;color:var(--accent);margin-bottom:16px}.sync-panel{padding:22px}.table-scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;text-align:left;margin:16px 0}th{font-size:12px;color:var(--muted);background:#fcf3f3}th,td{padding:13px 12px;border-bottom:1px solid var(--line);vertical-align:top}td small{display:block;margin-top:5px}.score-number{font-size:18px;font-weight:600;color:var(--accent)}.feedback-cell{white-space:pre-wrap;overflow-wrap:anywhere;min-width:160px;max-width:350px;font-size:13px}.error-text{max-width:220px;color:#9b302b;white-space:normal}.confirm-check{padding:16px 0}.sync-panel>form>p{margin:14px 0 0}@media(min-width:1600px){.grading-layout{grid-template-columns:300px minmax(0,1fr)}.reviewer{padding:28px}}@media(max-width:1100px){.ta-workspace{grid-template-columns:210px minmax(0,1fr)}.grading-layout{grid-template-columns:1fr}.student-scroll{max-height:300px}.quick-fields{grid-template-columns:1fr}.quick summary span{display:block;margin:5px 0 0}}@media(max-width:720px){.ta-workspace{grid-template-columns:1fr;padding-top:12px}.course-panel{padding:16px}.course-list{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}.sidebar-note{display:none}.course-panel>.muted{margin-bottom:8px}.filters label{flex:1;min-width:130px}.filters select{width:100%}.stats>div{padding:0 10px}.stats strong{font-size:22px}.stats span{font-size:12px}.reviewer{padding:16px}.reviewer-heading{flex-wrap:wrap}.section-header{align-items:flex-start}.workspace-tabs{gap:16px}.pdf-details iframe{height:450px}.hero-copy{max-width:85%}}
 "#;
@@ -419,7 +525,9 @@ mod tests {
     #[ignore]
     async fn ta_visual_preview() {
         use axum::{extract::Query, routing::get, Router};
-        let app=Router::new().route("/ta",get(|Query(mut s):Query<Selection>|async move {
+        let app=Router::new().route("/ta",get(||async { super::super::super::ui::site_page(&shell(),"/ta") }))
+            .route("/api/ta/workspace",get(|Query(mut s):Query<Selection>|async move {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             let (initial,mut w)=fixture();
             if s.course.is_empty(){s.course=initial.course;}
             if s.column.is_empty(){s.column=initial.column;}
@@ -433,8 +541,13 @@ mod tests {
                 w.attempts.push(Attempt{id:format!("_a_{i}"),user_id:id,date:"2026-11-13T14:15:00Z".into(),status:if i>8{"Completed"}else{"NeedsGrading"}.into(),score:if i>8{Some(95.0)}else{None},revision:"abc".into(),exempt:false});
             }
             for i in 1..=3 {w.drafts.push(Draft{attempt_id:format!("_a_{i}"),student_id:format!("_s_{i}"),score:90.0,feedback:"思路正确，请补充边界条件说明。".into(),revision:"abc".into(),updated_at:String::new(),synced:false,error:None});}
-            let html=super::super::super::ui::site_page(&render(&s,&w,"preview-only"),"/ta");
-            html
+            axum::Json(serde_json::json!({"html":fragment(&s,&w,"preview-only"),"url":s.url()}))
+        })).route("/ta/action",axum::routing::post(|axum::Form(form):axum::Form<Vec<(String,String)>>|async move {
+            let (mut s,mut w)=fixture();
+            s.notice="预览：草稿已保存".into();
+            w.drafts.push(Draft{attempt_id:s.attempt.clone(),student_id:"_s_1".into(),score:super::super::field(&form,"score").parse().unwrap_or(100.0),feedback:super::super::field(&form,"feedback").into(),revision:"abc".into(),updated_at:String::new(),synced:false,error:None});
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            axum::Json(serde_json::json!({"html":fragment(&s,&w,"preview-only"),"url":s.url()}))
         })).route("/course-replay-hero-v3.webp",get(||async {
             ([(axum::http::header::CONTENT_TYPE,"image/webp")],include_bytes!("../../assest/course-replay-hero-v3.webp").as_slice())
         })).route("/api/auth/me",get(||async {axum::Json(serde_json::json!({"username":"助教预览"}))}));

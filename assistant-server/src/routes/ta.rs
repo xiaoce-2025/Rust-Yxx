@@ -13,7 +13,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
-    Form, Router,
+    Form, Json, Router,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -83,6 +83,7 @@ pub(super) struct Workspace {
 }
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/api/ta/workspace", get(workspace))
         .route("/ta/action", post(action))
         .route("/ta/attachment", get(attachment))
 }
@@ -107,7 +108,19 @@ async fn client(state: &AppState, user: &CurrentUser) -> Result<Blackboard, Stri
     Blackboard::from_session(login)
 }
 
-pub(super) async fn page(
+pub(super) async fn page(_user: CurrentUser) -> Response {
+    let Html(html) = super::ui::site_page(&view::shell(), "/ta");
+    (
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::REFERRER_POLICY, "same-origin"),
+        ],
+        Html(html),
+    )
+        .into_response()
+}
+
+async fn workspace(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,
@@ -119,14 +132,22 @@ pub(super) async fn page(
         workspace.error = Some(error);
     }
     let csrf = csrf_token(&headers, user.id).unwrap_or_default();
-    let html = view::render(&selection, &workspace, &csrf);
-    let Html(html) = super::ui::site_page(&html, "/ta");
+    workspace_response(&selection, &workspace, &csrf, StatusCode::OK)
+}
+
+fn workspace_response(
+    selection: &Selection,
+    workspace: &Workspace,
+    csrf: &str,
+    status: StatusCode,
+) -> Response {
     (
+        status,
         [
             (header::CACHE_CONTROL, "no-store"),
             (header::REFERRER_POLICY, "same-origin"),
         ],
-        Html(html),
+        Json(serde_json::json!({"html":view::fragment(selection, workspace, csrf), "url":selection.url()})),
     )
         .into_response()
 }
@@ -243,11 +264,7 @@ pub(super) fn visible_attempts<'a>(
         .collect()
 }
 pub(super) fn is_graded(attempt: &ta::Attempt) -> bool {
-    attempt.score.is_some()
-        || matches!(
-            attempt.status.to_ascii_lowercase().as_str(),
-            "completed" | "graded"
-        )
+    ta::attempt_is_graded(&attempt.status, attempt.score)
 }
 pub(super) fn can_grade(attempt: &ta::Attempt) -> bool {
     !attempt.exempt && !attempt.status.eq_ignore_ascii_case("InProgress")
@@ -332,7 +349,22 @@ async fn action(
     match result {
         Ok(message) => {
             selection.notice = message;
-            Redirect::to(&selection.url()).into_response()
+            if headers.get("x-ta-partial").is_some_and(|v| v == "1") {
+                let mut workspace = Workspace::default();
+                if let Err(error) =
+                    load_workspace(&state, &user, &mut selection, &mut workspace).await
+                {
+                    workspace.error = Some(format!("操作已完成，但刷新数据失败：{error}"));
+                }
+                workspace_response(
+                    &selection,
+                    &workspace,
+                    expected.as_deref().unwrap_or(""),
+                    StatusCode::OK,
+                )
+            } else {
+                Redirect::to(&selection.url()).into_response()
+            }
         }
         Err(error) => {
             // Preserve editable inputs on failures, and never put feedback/credentials in the URL.
@@ -361,6 +393,14 @@ async fn action(
                 }
             }
             workspace.error = Some(error);
+            if headers.get("x-ta-partial").is_some_and(|v| v == "1") {
+                return workspace_response(
+                    &selection,
+                    &workspace,
+                    expected.as_deref().unwrap_or(""),
+                    StatusCode::BAD_REQUEST,
+                );
+            }
             let Html(html) = super::ui::site_page(
                 &view::render(&selection, &workspace, expected.as_deref().unwrap_or("")),
                 "/ta",
@@ -690,7 +730,10 @@ async fn attachment(
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
             // CSP sandbox blocks Chromium's built-in PDF viewer. Restrict framing while
             // keeping PDFs viewable; every non-PDF remains an octet-stream attachment.
-            (header::CONTENT_SECURITY_POLICY, "frame-ancestors 'self'".into()),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "frame-ancestors 'self'".into(),
+            ),
         ],
         bytes,
     )
