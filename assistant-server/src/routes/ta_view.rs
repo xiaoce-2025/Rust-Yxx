@@ -134,6 +134,7 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
             .unwrap_or("课程");
         let _ = write!(html,"<div class=\"section-header\"><div><div class=\"eyebrow\">作业批改工作台</div><h2>{}</h2></div><a class=\"button ghost\" href=\"{}\">刷新提交</a></div>",e(name),e(&Selection {notice:String::new(),..s.clone()}.url()));
         filters(&mut html, s, w);
+        if w.assignments.iter().any(|a| a.id == s.column) { ai_panel(&mut html, s, w, csrf); }
         if w.assignments.is_empty() {
             html.push_str("<div class=\"empty card\"><h3>暂无可批改作业</h3><p>教学网还没有返回这门课程的作业成绩列。</p></div>");
         } else if w.error.is_none() || !w.attempts.is_empty() {
@@ -168,6 +169,39 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
     html
 }
 
+pub(super) fn ai_status(job: Option<&crate::services::ta_ai::Job>, s: &Selection) -> String {
+    let Some(job)=job else { return "<p class=\"muted\">尚未开始 AI 批改。</p>".into(); };
+    let state=match job.status.as_str() { "queued"=>"排队中", "running"=>"批改中", "completed"=>"已完成", "cancelled"=>"已取消", "interrupted"=>"已中断", _=>"失败" };
+    let mut review=s.clone();review.review="1".into();review.notice.clear();
+    let mut html=format!("<div data-job-id=\"{}\"><p><strong>{} · {state}</strong>　已处理 {}/{}，草稿 {}，跳过 {}，失败 {}</p><p class=\"muted\">{}</p><a class=\"text-link\" href=\"{}\">刷新并核对评分草稿</a>",job.id,e(job.mode.label()),job.processed,job.total,job.drafted,job.skipped,job.failures.len(),e(&job.message),e(&review.url()));
+    if !job.failures.is_empty() {
+        html.push_str("<details><summary>查看需人工处理的提交</summary><ul>");
+        for failure in &job.failures { let _=write!(html,"<li>{}：{}</li>",e(&failure.label),e(&failure.message)); }
+        html.push_str("</ul></details>");
+    }
+    html.push_str("</div>");html
+}
+fn ai_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
+    let job=w.ai_job.as_ref(); let active=job.is_some_and(|j|j.active());
+    let question=job.map(|j|j.question.as_str()).unwrap_or("");
+    let rubric=job.map(|j|j.rubric.as_str()).unwrap_or("");
+    let symbolic=job.is_some_and(|j|j.mode==crate::services::ta_ai::Mode::Symbolic);
+    if let Some(assignment)=w.assignments.iter().find(|a|a.id==s.column) {
+        let _=write!(html,"<p class=\"muted\">本作业满分：{:.2}（来自教学网）；象征性模式每处扣 {:.2}，最低 {:.2}。</p>",assignment.possible,assignment.possible*0.01,assignment.possible*0.9);
+    }
+    let _=write!(html,r#"<details class="quick card" id="ta-ai-panel" {}><summary>AI 自动批改 <span>DeepSeek · 支持带图 PDF · 先生成草稿</span></summary>
+<p class="muted">将本作业每位学生最新一次提交的正文和附件发送至已配置的 DeepSeek API，产生 API 用量。范围为整份作业，不受当前分组、搜索或筛选影响。已有草稿、免评及正在作答的提交会跳过。请核对后手动同步成绩。</p>
+<form action="/ta/action" method="post">{}
+<label>题目（必填）<textarea name="question" rows="4" required maxlength="30000" placeholder="请键入本次作业的完整题目">{}</textarea></label>
+<label style="margin-top:12px">评分标准（可选）<textarea name="rubric" rows="2" maxlength="10000" placeholder="可补充参考答案、各题分值与扣分要求">{}</textarea></label>
+<label style="margin-top:12px">评分模式<select name="ai_mode"><option value="strict"{}>严格评分</option><option value="symbolic"{}>象征性评分</option></select></label>
+<p class="muted">严格：按正确性和评分标准打分。象征性：有实质作答即给分，每处错误扣满分的 1%，最低保留 90%（10 分制：错一处扣 0.1，最低 9 分）。空白、无关或无法读取的提交需人工处理。两种模式的评语均为简洁、具体的 2—4 句。</p>
+<label class="check"><input type="checkbox" name="include_graded" value="1"{}>也为教学网已评分提交生成新草稿（已有草稿仍跳过）</label>
+<div class="form-bottom" style="margin-top:14px"><button name="action" value="ai_start" data-ai-start{}>开始批改整份作业</button></div></form>
+<div id="ta-ai-status" role="status" aria-live="polite" data-course="{}" data-column="{}" data-active="{}" style="margin-top:16px">{}</div>
+<form action="/ta/action" method="post" data-ai-cancel {}>{}<input type="hidden" name="job_id" value="{}"><button class="ghost small" name="action" value="ai_cancel">取消后台批改</button></form>
+</details>"#,if active{"open"}else{""},context(s,csrf),e(question),e(rubric),if symbolic{""}else{" selected"},if symbolic{" selected"}else{""},if job.is_some_and(|j|j.include_graded){" checked"}else{""},if active{" disabled"}else{""},e(&s.course),e(&s.column),active,ai_status(job,s),if active{""}else{"hidden"},context(s,csrf),job.map(|j|j.id.to_string()).unwrap_or_default());
+}
 fn filters(html: &mut String, s: &Selection, w: &Workspace) {
     let _ = write!(html,"<form class=\"filters card\" method=\"get\" action=\"/ta\">{}<label>作业<select name=\"column\">",hidden("course",&s.course));
     for a in &w.assignments {
@@ -363,6 +397,31 @@ const SCRIPT: &str = r#"<script>
   const status = document.getElementById('ta-load-status');
   if (!region || !status) return;
   let generation = 0, controller = null, writing = false, reading = false;
+  let aiTimer = null;
+  function aiUpdate(payload) {
+    const box = region.querySelector('#ta-ai-status'); if (!box) return;
+    box.innerHTML = payload.html; box.dataset.active = String(payload.active);
+    const button = region.querySelector('[data-ai-start]'); if (button) button.disabled = payload.active;
+    const cancel = region.querySelector('[data-ai-cancel]');
+    if (cancel) { cancel.hidden = !payload.active; cancel.elements.job_id.value = box.querySelector('[data-job-id]')?.dataset.jobId || ''; }
+  }
+  function aiPoll() {
+    clearTimeout(aiTimer);
+    const box = region.querySelector('#ta-ai-status');
+    if (!box || box.dataset.active !== 'true') return;
+    aiTimer = setTimeout(async () => {
+      if (reading || writing) { aiPoll(); return; }
+      const current = generation;
+      try {
+        const query = new URLSearchParams({course:box.dataset.course,column:box.dataset.column});
+        const response = await fetch('/api/ta/ai/status?' + query, {credentials:'same-origin',cache:'no-store'});
+        if (!response.ok) throw new Error('AI 进度暂时无法获取，请刷新查看。');
+        const payload = await response.json();
+        if (current === generation && region.contains(box) && !reading && !writing) aiUpdate(payload);
+      } catch (error) { if (current === generation) message(error.message, true); }
+      aiPoll();
+    }, 2500);
+  }
   function message(text, error = false) {
     status.classList.toggle('error', error);
     status.textContent = text;
@@ -388,13 +447,16 @@ const SCRIPT: &str = r#"<script>
       }
       const payload = await response.json();
       if (current !== generation) return;
+      if (payload.ai === true) { aiUpdate(payload); message(payload.message || ''); aiPoll(); return; }
       if (typeof payload.html !== 'string' || typeof payload.url !== 'string') {
+        if (form) { message(payload.error || '操作未完成，请检查输入。', true); return; }
         throw new Error(payload.error || '加载失败（HTTP ' + response.status + '）');
       }
       const destination = new URL(payload.url, location.origin);
       if (destination.origin !== location.origin || destination.pathname !== '/ta') throw new Error('页面地址无效');
       region.innerHTML = payload.html;
       region.dataset.loading = 'false';
+      aiPoll();
       if (mode === 'push') history.pushState(null, '', destination.pathname + destination.search);
       else history.replaceState(null, '', destination.pathname + destination.search);
       message(response.ok ? '' : '操作未完成，请查看下方提示并核对输入。', !response.ok);
@@ -436,6 +498,7 @@ const SCRIPT: &str = r#"<script>
   window.addEventListener('popstate', () => load(location.href, 'replace'));
   window.addEventListener('beforeunload', event => { if (writing) { event.preventDefault(); event.returnValue = ''; } });
   if (region.dataset.loading === 'true') load(location.href, 'replace');
+  else aiPoll();
 })();
 </script>"#;
 
@@ -499,6 +562,9 @@ mod tests {
         assert!(html.contains("&lt;script&gt;") && !html.contains("<script>alert"));
         assert!(html.contains("form=\"bulk-form\"") && html.contains("name=\"revision\""));
         assert!(html.contains("/ta/action") && !html.contains("type=\"password\""));
+        assert!(html.contains("value=\"strict\"") && html.contains("value=\"symbolic\""));
+        assert!(html.contains("本作业满分：100.00") && html.contains("name=\"question\""));
+        assert!(html.contains("data-ai-start") && html.contains("/api/ta/ai/status"));
     }
     #[test]
     fn review_displays_exact_attempt_and_requires_confirmation() {

@@ -24,6 +24,8 @@ use std::{
 
 #[path = "ta_view.rs"]
 mod view;
+#[path = "ta_ai.rs"]
+mod ai;
 
 #[derive(Default, Deserialize, Clone)]
 pub(super) struct Selection {
@@ -72,6 +74,7 @@ impl Selection {
 }
 #[derive(Default)]
 pub(super) struct Workspace {
+    pub ai_job: Option<crate::services::ta_ai::Job>,
     pub courses: Vec<ta::Course>,
     pub assignments: Vec<ta::Assignment>,
     pub groups: Vec<ta::Group>,
@@ -84,6 +87,7 @@ pub(super) struct Workspace {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/ta/workspace", get(workspace))
+        .route("/api/ta/ai/status", get(ai::status))
         .route("/ta/action", post(action))
         .route("/ta/attachment", get(attachment))
 }
@@ -192,6 +196,7 @@ async fn load_workspace(
     {
         return Err("未找到所选作业".into());
     }
+    workspace.ai_job = ai::snapshot(state, user.id, &selection.course, &selection.column).await?;
     workspace.students = bb.students(&selection.course).await?;
     workspace.attempts = bb.attempts(&selection.course, &selection.column).await?;
     workspace.drafts = load_drafts(state, user.id, &selection.course, &selection.column).await?;
@@ -267,7 +272,7 @@ pub(super) fn is_graded(attempt: &ta::Attempt) -> bool {
     ta::attempt_is_graded(&attempt.status, attempt.score)
 }
 pub(super) fn can_grade(attempt: &ta::Attempt) -> bool {
-    !attempt.exempt && !attempt.status.eq_ignore_ascii_case("InProgress")
+    !attempt.exempt && !matches!(attempt.status.to_ascii_lowercase().as_str(), "inprogress" | "inprogressagain")
 }
 
 fn draft_path(user: uuid::Uuid, course: &str, column: &str) -> Result<PathBuf, String> {
@@ -346,6 +351,15 @@ async fn action(
     let lock = state.ta_mutation(user.id).await;
     let _guard = lock.lock().await;
     let result = mutate(&state, &user, &form, &mut selection).await;
+    if matches!(field(&form,"action"), "ai_start" | "ai_cancel") && headers.get("x-ta-partial").is_some_and(|v|v=="1") {
+        return match result {
+            Ok(message) => {
+                let job=ai::snapshot(&state,user.id,&selection.course,&selection.column).await.ok().flatten();
+                ([(header::CACHE_CONTROL,"no-store")],Json(serde_json::json!({"ai":true,"html":view::ai_status(job.as_ref(),&selection),"active":job.as_ref().is_some_and(|j|j.active()),"message":message}))).into_response()
+            },
+            Err(error)=>(StatusCode::BAD_REQUEST,[(header::CACHE_CONTROL,"no-store")],Json(serde_json::json!({"error":error}))).into_response()
+        };
+    }
     match result {
         Ok(message) => {
             selection.notice = message;
@@ -421,6 +435,11 @@ async fn mutate(
     form: &[(String, String)],
     selection: &mut Selection,
 ) -> Result<String, String> {
+    match field(form,"action") {
+        "ai_start" => return ai::start(state,user,form,selection).await,
+        "ai_cancel" => return ai::cancel(state,user,form,selection).await,
+        _ => {}
+    }
     let bb = client(state, user).await?;
     mutate_with_client(state, user, form, selection, &bb).await
 }

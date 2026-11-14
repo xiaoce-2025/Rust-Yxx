@@ -29,3 +29,4 @@ pub mod batch_submission;
 pub mod lesson_submission;
 
 pub mod user_agents;
+pub mod ta_ai;

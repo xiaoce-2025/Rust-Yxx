@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{app_state::AppState, auth::CurrentUser, error::ApiError};
+#[path = "admin_ta_ai.rs"]
+mod ta_ai;
 
 pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
@@ -20,6 +22,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/admin/users/:id", post(update_user))
         .route("/api/admin/users/:id/revoke-sessions", post(revoke_sessions))
         .route("/api/admin/whitelist", post(save_whitelist))
+        .route("/api/admin/ta-ai", get(ta_ai::get).post(ta_ai::save))
         .route_layer(middleware::from_fn_with_state(state, require_admin))
 }
 
@@ -49,7 +52,7 @@ async fn require_admin(State(state): State<AppState>, request: Request, next: Ne
     response
 }
 
-async fn page() -> Html<&'static str> { Html(include_str!("../../templates/admin.html")) }
+async fn page() -> Html<String> { Html(ta_ai::page()) }
 
 async fn management_data(State(state): State<AppState>, current: CurrentUser) -> Json<Value> {
     let counts = state.store.admin_session_counts().await;
@@ -174,6 +177,14 @@ mod tests {
         invalid = update.clone(); invalid["is_active"] = json!(false);
         assert_eq!(client.post(format!("{base}/api/admin/users/{admin}")).bearer_auth(tokens[0]).header("x-admin-request","1").json(&invalid).send().await.unwrap().status(),400);
         let whitelist_url = format!("{base}/api/admin/whitelist");
+        let ai_url=format!("{base}/api/admin/ta-ai");
+        let ai_config=json!({"enabled":true,"format":"AI: {model} / {mode}"});
+        assert_eq!(client.get(&ai_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
+        assert_eq!(client.post(&ai_url).bearer_auth(tokens[0]).json(&ai_config).send().await.unwrap().status(),403);
+        assert_eq!(client.post(&ai_url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&json!({"enabled":true,"format":" "})).send().await.unwrap().status(),400);
+        assert_eq!(client.post(&ai_url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&ai_config).send().await.unwrap().status(),200);
+        let saved:Value=client.get(&ai_url).bearer_auth(tokens[0]).send().await.unwrap().json().await.unwrap();
+        assert_eq!(saved,ai_config);
         assert_eq!(client.post(&whitelist_url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&json!({"emails":["invalid"]})).send().await.unwrap().status(),400);
         assert_eq!(client.post(&whitelist_url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&json!({"emails":[" first@example.com ","first@example.com"]})).send().await.unwrap().status(),200);
         // Replacing an existing file must also work on Windows.
@@ -181,6 +192,7 @@ mod tests {
         assert_eq!(client.post(format!("{url}/revoke-sessions")).bearer_auth(tokens[0]).header("x-admin-request","1").json(&json!({})).send().await.unwrap().status(),200);
         assert!(store.get_session(tokens[1]).await.is_none());
         let restored = FileStore::new(temp.path().into()).await.unwrap();
+        assert_eq!(restored.load_sidecar::<crate::services::ta_ai::Annotation>(std::path::Path::new(crate::services::ta_ai::ANNOTATION_PATH)).await.unwrap().unwrap().format,"AI: {model} / {mode}");
         let user = restored.get_user(member).await.unwrap();
         assert_eq!((user.storage_quota,user.processing_quota,user.processing_priority),(9,8,2));
         assert_eq!(restored.admin_whitelist().await,vec!["second@example.com"]);
