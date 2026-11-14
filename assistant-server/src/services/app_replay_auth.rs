@@ -61,7 +61,7 @@ fn safe_route(url: &Url) -> String {
 
 impl AppAuth {
     pub fn new(user_agent: &str) -> Result<Self, String> {
-        let client = Client::builder()
+        let client = crate::services::http_client::builder()
             .user_agent(user_agent)
             .cookie_provider(Arc::new(Jar::default()))
             .redirect(Policy::none())

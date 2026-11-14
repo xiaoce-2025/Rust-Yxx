@@ -222,7 +222,7 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let app = routes(state.clone()).with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let client = crate::services::http_client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
         assert_eq!(client.get(format!("{base}/app")).send().await.unwrap().status(), 404);
         for path in ["/", "/chat", "/user-center", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence", "/ta"] {
             let response = client.get(format!("{base}{path}")).send().await.unwrap();

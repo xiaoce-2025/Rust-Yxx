@@ -644,7 +644,7 @@ async fn upload_file_to_oss(api_key: &str, file_path: &Path, model: &str, upload
     // 获取上传凭证的URL
     let get_policy_url = upload_url;
 
-    let client = reqwest::Client::new();
+    let client = crate::services::http_client::client();
 
     eprintln!("获取上传凭证: {}", get_policy_url);
     let policy_response = client
@@ -753,7 +753,7 @@ async fn submit_transcription_task(api_key: &str, file_url: &str, model: &str, t
     // 使用从配置文件传递过来的转写URL
     let submit_url = transcription_url;
 
-    let client = reqwest::Client::new();
+    let client = crate::services::http_client::client();
 
     let request_body = serde_json::json!({
         "model": model,
@@ -803,7 +803,7 @@ async fn wait_for_transcription_complete(api_key: &str, task_id: &str, task_quer
     // 使用从配置文件传递过来的任务查询URL
     let query_url = format!("{}/{}", task_query_url, task_id);
 
-    let client = reqwest::Client::new();
+    let client = crate::services::http_client::client();
 
     let retry_interval_secs = 5;
 
@@ -861,7 +861,7 @@ async fn wait_for_transcription_complete(api_key: &str, task_id: &str, task_quer
 }
 
 async fn download_transcription_result(api_key: &str, transcription_url: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = crate::services::http_client::client();
 
     let response = client
         .get(transcription_url)
@@ -929,7 +929,7 @@ pub async fn extract_notes(transcript_path: &Path, notes_path: &Path, settings: 
     eprintln!("转写文本长度: {}字符", transcript.len());
 
     // 构建请求
-    let client = reqwest::Client::new();
+    let client = crate::services::http_client::client();
 
     let request_body = serde_json::json!({
         "model": model,

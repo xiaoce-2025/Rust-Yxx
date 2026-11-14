@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
                 .add_directive("app_replay_download=info".parse()?)
+                .add_directive("teaching_ta=info".parse()?)
                 .add_directive("video_translation=info".parse()?),
         )
         .init();

@@ -101,7 +101,7 @@ impl Blackboard {
             }
         }
         let allowed = base.clone();
-        let http = reqwest::Client::builder()
+        let http = teaching_client_builder()
             .cookie_provider(jar)
             .user_agent(&login.user_agent)
             .connect_timeout(Duration::from_secs(15))
@@ -117,7 +117,8 @@ impl Blackboard {
                 }
             }))
             .build()
-            .map_err(|_| "无法创建教学网请求客户端".to_string())?;
+            .map_err(|error| transport_error("初始化客户端", "client", error))?;
+        tracing::info!(target: "teaching_ta", tls_backend="native-tls", "助教客户端复用教学网缓存会话");
         Ok(Self {
             http,
             base,
@@ -135,6 +136,8 @@ impl Blackboard {
     }
 
     async fn bytes(&self, response: reqwest::Response) -> Result<Vec<u8>, String> {
+        let route = safe_route(response.url());
+        tracing::info!(target: "teaching_ta", route=%route, status=response.status().as_u16(), "教学网响应");
         let login_redirect = response.status().is_redirection()
             && response
                 .headers()
@@ -169,7 +172,7 @@ impl Blackboard {
         let mut stream = response.bytes_stream();
         use futures_util::StreamExt;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| "读取教学网响应失败")?;
+            let chunk = chunk.map_err(|error| transport_error("读取响应", &route, error))?;
             if result.len() + chunk.len() > MAX_BODY {
                 return Err("教学网响应超过 32 MiB".into());
             }
@@ -192,17 +195,23 @@ impl Blackboard {
     }
 
     async fn get(&self, path: &str) -> Result<Vec<u8>, String> {
+        let url = self.url(path)?;
+        let route = safe_route(&url);
+        tracing::info!(target: "teaching_ta", method="GET", route=%route, "请求教学网");
         let response = self
             .http
-            .get(self.url(path)?)
+            .get(url)
             .send()
             .await
-            .map_err(|_| "无法连接教学网，请稍后重试".to_string())?;
+            .map_err(|error| transport_error("连接教学网", &route, error))?;
         self.bytes(response).await
     }
     async fn json(&self, path: &str) -> Result<Value, String> {
-        serde_json::from_slice(&self.get(path).await?)
-            .map_err(|_| "教学网返回了无法识别的数据，请刷新重试".into())
+        let route = safe_route(&self.url(path)?);
+        serde_json::from_slice(&self.get(path).await?).map_err(|error| {
+            tracing::warn!(target: "teaching_ta", route=%route, line=error.line(), column=error.column(), "教学网响应不是可识别的 JSON");
+            "教学网返回了无法识别的数据，请刷新重试".into()
+        })
     }
     async fn list(&self, path: &str) -> Result<Vec<Value>, String> {
         let mut next = path.to_string();
@@ -450,6 +459,8 @@ impl Blackboard {
             ))
             .await?;
         let nonce = parse_nonce(&String::from_utf8_lossy(&page))?;
+        let route = "/webapps/gradebook/controller/saveReconcileGrade";
+        tracing::info!(target: "teaching_ta", method="POST", route, "发送教学网登分请求");
         let response = self
             .http
             .post(self.url("/webapps/gradebook/controller/saveReconcileGrade")?)
@@ -477,7 +488,10 @@ impl Blackboard {
             ])
             .send()
             .await
-            .map_err(|_| "登分请求未获得响应，请先刷新核对成绩，勿直接重试".to_string())?;
+            .map_err(|error| {
+                let diagnostic = transport_error("发送评分", route, error);
+                format!("{diagnostic}；登分结果尚未确认，请先核对成绩，勿直接重试")
+            })?;
         let body = self.bytes(response).await?;
         if let Ok(v) = serde_json::from_slice::<Value>(&body) {
             if v.get("success").and_then(Value::as_bool) == Some(false)
@@ -504,6 +518,82 @@ impl Blackboard {
             Err("评分请求已发送，但回读未确认目标分数；请在教学网核对后再操作".into())
         }
     }
+}
+
+fn teaching_client_builder() -> reqwest::ClientBuilder {
+    // Blackboard rejects the Rustls handshake before HTTP/authentication. Native TLS
+    // preserves certificate and hostname verification and does not change the login flow.
+    reqwest::Client::builder().use_native_tls()
+}
+
+/// Log route templates, never query strings, signed attachment paths or student IDs.
+fn safe_route(url: &Url) -> String {
+    let path = url.path();
+    if path.starts_with("/learn/api/public/") {
+        return path
+            .split('/')
+            .map(|part| {
+                if part.starts_with('_')
+                    || part.bytes().any(|c| c.is_ascii_digit())
+                        && !matches!(part, "v1" | "v2" | "v3")
+                {
+                    ":id"
+                } else {
+                    part
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+    }
+    if path.starts_with("/webapps/gradebook/controller/")
+        || matches!(
+            path,
+            "/webapps/assignment/gradeAssignmentRedirector" | "/webapps/assignment/inlineView"
+        )
+    {
+        return path.into();
+    }
+    "/[attachment-or-redirect]".into()
+}
+
+fn transport_error(stage: &str, route: &str, error: reqwest::Error) -> String {
+    let timeout = error.is_timeout();
+    let connect = error.is_connect();
+    let status = error.status().map(|s| s.as_u16());
+    let error = error.without_url();
+    let detail = redact_transport_detail(&format!("{error:?}"));
+    // Display source messages instead of Rust type names: `rustls` occurs in
+    // Debug output even for an ordinary refused TCP connection.
+    let mut messages = Vec::new();
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(current) = source {
+        messages.push(current.to_string());
+        source = current.source();
+    }
+    let lower = messages.join("; ").to_ascii_lowercase();
+    let reason = if timeout {
+        "请求超时"
+    } else if lower.contains("handshake")
+        || lower.contains("tls")
+        || lower.contains("ssl")
+        || lower.contains("certificate")
+    {
+        "TLS 连接失败"
+    } else if connect {
+        "网络连接失败（DNS、TCP 或代理）"
+    } else {
+        "HTTP 请求失败"
+    };
+    tracing::warn!(target: "teaching_ta", stage, route, timeout, connect, status, cause=%detail, "助教教学网请求失败");
+    format!("{stage}失败：{reason}，请查看后台 teaching_ta 日志")
+}
+
+fn redact_transport_detail(detail: &str) -> String {
+    // Defensive redaction for nested transport errors that might carry a proxy/redirect URL.
+    regex::Regex::new(r#"https?://[^\s\"<>]+"#)
+        .unwrap()
+        .replace_all(detail, "[URL已隐藏]")
+        .into_owned()
 }
 
 fn same_origin(base: &Url, url: &Url) -> bool {
@@ -632,6 +722,99 @@ pub fn latest_attempts(attempts: &[Attempt]) -> HashSet<String> {
 mod tests {
     use super::*;
     use reqwest::cookie::CookieStore;
+
+    #[test]
+    fn diagnostics_hide_query_strings_and_dynamic_paths() {
+        let url = Url::parse("https://course.pku.edu.cn/learn/api/public/v1/courses/_123_1/users/_456_1?token=secret").unwrap();
+        let route = safe_route(&url);
+        assert_eq!(route, "/learn/api/public/v1/courses/:id/users/:id");
+        assert!(!route.contains("secret"));
+        let file =
+            Url::parse("https://course.pku.edu.cn/bbcswebdav/student-name.pdf?signature=secret")
+                .unwrap();
+        assert_eq!(safe_route(&file), "/[attachment-or-redirect]");
+        let detail = redact_transport_detail(
+            "Connect failed: https://user:password@proxy.test/path?token=secret",
+        );
+        assert!(!detail.contains("password") && !detail.contains("secret"));
+    }
+
+    /// Public, unauthenticated connectivity check; never run as part of offline tests.
+    #[tokio::test]
+    #[ignore]
+    async fn teaching_tls_smoke_test() {
+        let response = teaching_client_builder()
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(format!("{BASE}/learn/api/public/v1/users/me"))
+            .send()
+            .await
+            .map_err(|error| {
+                transport_error("公开接口连接诊断", "/learn/api/public/v1/users/me", error)
+            })
+            .unwrap();
+        println!(
+            "Native TLS: teaching API returned HTTP {} (no credentials sent)",
+            response.status()
+        );
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn connection_failure_is_visible_at_info_level_without_leaking_url() {
+        use std::io::Write;
+        #[derive(Clone)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/secret-file?token=secret",
+            listener.local_addr().unwrap()
+        );
+        drop(listener);
+        let error = crate::services::http_client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap_err();
+        let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = Capture(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || capture.clone())
+            .finish();
+        let message = tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            transport_error("连接教学网", "/[attachment-or-redirect]", error)
+        });
+        let log = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("WARN") && log.contains("teaching_ta") && log.contains("cause="),
+            "{log}"
+        );
+        assert!(!log.contains("secret-file") && !log.contains("token=secret"));
+        // Windows can time out before reporting a refused local TCP connection.
+        assert!(
+            message.contains("网络连接失败") || message.contains("请求超时"),
+            "{message}; {log}"
+        );
+    }
     #[test]
     fn imports_scoped_http_only_cookies_and_rejects_expired_or_foreign() {
         let jar = Jar::default();

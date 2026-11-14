@@ -1,5 +1,5 @@
 //! Fresh IAAA verification for signing in to the assistant. Never follows the teaching callback.
-use reqwest::{redirect::Policy, Client};
+use reqwest::redirect::Policy;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ const REDIRECT: &str = "http://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/
 pub async fn verify(username: &str, password: &str) -> Result<(), ApiError> {
     // An isolated cookie jar and a fresh request are essential: cached teaching sessions
     // must never be accepted as proof that the submitted password is correct.
-    let client = Client::builder()
+    let client = crate::services::http_client::builder()
         .cookie_store(true)
         .redirect(Policy::none())
         .timeout(Duration::from_secs(15))

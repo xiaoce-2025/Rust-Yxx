@@ -237,7 +237,7 @@ async fn upstream(
         let addresses = validated_addresses(&url).await?;
         let host = url.host_str().unwrap();
         // Pin the addresses checked above, instead of resolving again after validation.
-        let client = reqwest::Client::builder()
+        let client = crate::services::http_client::builder()
             .user_agent(&state.user_agent)
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(30))
@@ -680,7 +680,7 @@ mod tests {
             segments: Mutex::new(HashMap::new()),
             mp4_bytes: Mutex::new((Vec::new(), 0)),
         };
-        let client = reqwest::Client::new();
+        let client = crate::services::http_client::client();
         let range = reqwest::header::HeaderValue::from_static("bytes=0-1023");
         let url = Url::parse("https://media.example/lecture.mp4").unwrap();
         let request = media_request(&client, &state, url.clone(), true, Some(&range))

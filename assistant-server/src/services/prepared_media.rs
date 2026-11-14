@@ -36,7 +36,7 @@ pub fn decode_key(key: &str) -> Result<Vec<u8>, String> {
 }
 
 pub async fn public_bytes(url: &str, seconds: u64) -> Result<Vec<u8>, String> {
-    reqwest::Client::builder()
+    crate::services::http_client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(seconds.max(1)))
         .build()

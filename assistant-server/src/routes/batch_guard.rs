@@ -137,7 +137,7 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let client = reqwest::Client::new();
+        let client = crate::services::http_client::client();
         let cookie = format!("assistant_token={session}");
         for _ in 0..2 {
             let response = client

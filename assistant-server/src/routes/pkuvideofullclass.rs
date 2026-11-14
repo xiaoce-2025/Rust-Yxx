@@ -95,7 +95,7 @@ pub fn routes() -> Router<AppState> {
 async fn get_current_iaaa_key(
     _current_user: CurrentUser,
 ) -> Result<Json<IaaaPublicKeyResponse>, ApiError> {
-    let client = reqwest::Client::new();
+    let client = crate::services::http_client::client();
     let resp = client
         .get(IAAA_PUBLIC_KEY_URL)
         .timeout(std::time::Duration::from_secs(10))
@@ -127,7 +127,7 @@ async fn get_binding_status(
     let mut current_iaaa_key: Option<String> = None;
 
     if is_bound {
-        let client = reqwest::Client::new();
+        let client = crate::services::http_client::client();
         match client
             .get(IAAA_PUBLIC_KEY_URL)
             .timeout(std::time::Duration::from_secs(10))
@@ -166,7 +166,7 @@ async fn bind(
     Json(mut req): Json<BindRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if let Some(password) = req.password.as_ref() {
-        let response = reqwest::Client::new().get(IAAA_PUBLIC_KEY_URL)
+        let response = crate::services::http_client::client().get(IAAA_PUBLIC_KEY_URL)
             .timeout(std::time::Duration::from_secs(10)).send().await?;
         let key: IaaaPublicKeyResponse = response.error_for_status()?.json().await?;
         req.iaaa_public_key = key.key.filter(|_|key.success).ok_or_else(||ApiError::BadRequest("无法获取当前 IAAA 公钥".into()))?;

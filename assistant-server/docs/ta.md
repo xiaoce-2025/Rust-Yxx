@@ -26,6 +26,16 @@
 
 ## 验证与范围
 
+助教 HTTP 客户端使用原生 TLS（Windows 为 Schannel，Linux 为 OpenSSL），保持证书与主机名校验，以兼容教学网的 TLS 握手。其他 HTTP 客户端显式保留原有 Rustls 行为。Linux/musl 构建使用 vendored OpenSSL，需要相应的 C 编译工具和 Perl。
+
+后台 `teaching_ta` 日志在 info 级别记录请求和响应状态，在 warn 级别记录经过脱敏的底层连接错误。日志不输出 Cookie、nonce、请求体、查询参数或学生标识。TLS 连接失败与登录过期、权限拒绝会分别显示。
+
+可手动检查公开接口连通性，此测试不携带账号、密码或 Cookie，也不会登分：
+
+```text
+cargo test --offline teaching_tls_smoke_test -- --ignored --nocapture
+```
+
 ```text
 cargo test --offline '::ta::'
 cargo test --offline protected_html_requires_valid_session_before_rendering

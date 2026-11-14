@@ -24,7 +24,7 @@ impl WeChatService {
             redirect_uri: cfg.redirect_uri,
             api_base_url: cfg.api_base_url.trim_end_matches('/').to_string(),
             qr_bot_type: cfg.qr_bot_type,
-            http_client: reqwest::Client::new(),
+            http_client: crate::services::http_client::client(),
         }
     }
 

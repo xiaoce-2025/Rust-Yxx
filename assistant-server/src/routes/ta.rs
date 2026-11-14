@@ -115,6 +115,7 @@ pub(super) async fn page(
 ) -> Response {
     let mut workspace = Workspace::default();
     if let Err(error) = load_workspace(&state, &user, &mut selection, &mut workspace).await {
+        tracing::warn!(target: "teaching_ta", error=%error, "加载助教工作台失败");
         workspace.error = Some(error);
     }
     let csrf = csrf_token(&headers, user.id).unwrap_or_default();
@@ -725,7 +726,7 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let response = reqwest::Client::builder()
+        let response = crate::services::http_client::builder()
             .no_proxy()
             .build()
             .unwrap()

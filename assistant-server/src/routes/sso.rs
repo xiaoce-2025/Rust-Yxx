@@ -111,7 +111,7 @@ fn validate(config: &SsoConfig) -> Result<(), ApiError> {
     Ok(())
 }
 fn client() -> Result<reqwest::Client, ApiError> {
-    Ok(reqwest::Client::builder()
+    Ok(crate::services::http_client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
         .build()?)
