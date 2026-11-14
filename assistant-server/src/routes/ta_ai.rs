@@ -95,6 +95,7 @@ pub(super) async fn start(
         drafted: 0,
         skipped: 0,
         failures: vec![],
+        reviews: vec![],
         updated_at: chrono::Utc::now().to_rfc3339(),
     };
     let cancel = state.ta_ai.reserve(user.id, job.id).await?;
@@ -219,16 +220,13 @@ async fn assess(
     let submission = bb
         .submission(&job.course, &job.column, attempt, student)
         .await?;
-    if submission.files.len() > 20 {
-        return Err("附件超过 20 个，需人工处理；未截断提交内容".into());
-    }
-    // Validate every attachment before uploading any, so unsupported files are never silently omitted.
-    if submission.files.iter().any(|f| {
+    if submission.files.iter().filter(|f| {
         let ext = extension(&f.name);
-        !text_file(&ext) && !document(&ext)
-    }) {
-        return Err("含不支持的附件类型，需人工处理（支持 PDF、Word、图片及文本代码）".into());
+        text_file(&ext) || document(&ext)
+    }).count() > 20 {
+        return Err("支持的附件超过 20 个，需人工处理；未截断提交内容".into());
     }
+    let mut skipped_files = vec![];
     let mut ids = vec![];
     let result = async {
         let mut text = submission.text;
@@ -237,6 +235,10 @@ async fn assess(
                 return Err("任务已取消".into());
             }
             let ext = extension(&file.name);
+            if !text_file(&ext) && !document(&ext) {
+                skipped_files.push(file.name.clone());
+                continue;
+            }
             let bytes = bb.download(file).await?;
             if text_file(&ext) {
                 if bytes.len() > 1024 * 1024 {
@@ -255,12 +257,18 @@ async fn assess(
             return Err("提交正文过大，需人工处理；未截断内容".into());
         }
         if text.trim().is_empty() && ids.is_empty() {
-            return Err("空白提交，需人工处理".into());
+            return Err(if skipped_files.is_empty() {
+                "空白提交，需人工处理".into()
+            } else {
+                format!("跳过不支持的附件后无可批改内容，需人工处理：{}", skipped_files.join("、"))
+            });
         }
         if cancel.load(Ordering::Relaxed) {
             return Err("任务已取消".into());
         }
-        provider.assess(job, maximum, &text, &ids).await
+        let mut assessment = provider.assess(job, maximum, &text, &ids).await?;
+        assessment.skipped_files = skipped_files;
+        Ok(assessment)
     }
     .await;
     provider.cleanup(&ids).await;
@@ -341,6 +349,17 @@ async fn run_with_client(
                     cancel,
                 )
                 .await?;
+                if let Some(reason) = assessment.review_reason() {
+                    job.reviews.push(crate::services::ta_ai::Review {
+                        attempt: attempt.id.clone(),
+                        revision: attempt.revision.clone(),
+                        label: format!("{} {}", student.number, student.name),
+                        score: assessment.reference_score(assignment.possible),
+                        feedback: assessment.feedback.clone(),
+                        reason,
+                    });
+                    return Ok(false);
+                }
                 let score = assessment.grade(assignment.possible, job.mode)?;
                 let lock = state.ta_mutation(user.id).await;
                 let _guard = lock.lock().await;
@@ -386,7 +405,9 @@ async fn run_with_client(
                     consecutive_failures = 0;
                 }
                 Ok(false) => {
-                    job.skipped += 1;
+                    if !job.reviews.iter().any(|r| r.attempt == attempt.id) {
+                        job.skipped += 1;
+                    }
                     consecutive_failures = 0;
                 }
                 Err(error) => {
@@ -434,6 +455,7 @@ mod tests {
         change: bool,
         changed: bool,
         bad_output: bool,
+        review: bool,
     }
     fn job() -> Job {
         Job {
@@ -451,6 +473,7 @@ mod tests {
             drafted: 0,
             skipped: 0,
             failures: vec![],
+            reviews: vec![],
             updated_at: String::new(),
         }
     }
@@ -468,11 +491,13 @@ mod tests {
                 values.push(json!({"id":"_a_old","userId":"_s_1","attemptDate":"2026-11-01T00:00:00Z","status":"NeedsGrading"}));
                 Json(json!({"results":values}))
             }))
-            .route("/webapps/assignment/gradeAssignmentRedirector",get(|Query(q):Query<HashMap<String,String>>|async move{
+            .route("/webapps/assignment/gradeAssignmentRedirector",get(|State(r):State<Arc<Mutex<Remote>>>,Query(q):Query<HashMap<String,String>>|async move{
                 assert_eq!(q["attempt_id"],"_a_1");
-                Html("<div id='submissionText'>第一题：计算答案。第二题：证明。</div><a onclick=\"inlineView(event, '_f_1')\">附件</a>")
+                let mut html = "<div id='submissionText'>第一题：计算答案。第二题：证明。</div><a onclick=\"inlineView(event, '_f_1')\">附件</a>".to_string();
+                if r.lock().unwrap().review { html.push_str("<a onclick=\"inlineView(event, '_f_2')\">其他附件</a>"); }
+                Html(html)
             }))
-            .route("/webapps/assignment/inlineView",get(||async{Json(json!({"fileName":"PRIVATE-STUDENT.pdf","downloadUrl":"/submission.pdf"}))}))
+            .route("/webapps/assignment/inlineView",get(|Query(q):Query<HashMap<String,String>>|async move{Json(if q["file_id"]=="_f_2" {json!({"fileName":"extra.zip","downloadUrl":"/must-not-download"})} else {json!({"fileName":"PRIVATE-STUDENT.pdf","downloadUrl":"/submission.pdf"})})}))
             .route("/submission.pdf",get(||async{b"%PDF-test with diagrams".as_slice()}))
             .route("/files",post(|State(r):State<Arc<Mutex<Remote>>>, headers:HeaderMap, body:Bytes|async move{
                 assert_eq!(headers["authorization"],"Bearer TEST_KEY");assert!(!headers.contains_key("cookie"));
@@ -490,7 +515,7 @@ mod tests {
                 assert!(prompt.contains("第一题")&&prompt.contains("第二题")&&prompt.contains("满分：50"));
                 assert!(!prompt.contains("260001")&&!prompt.contains("TEST_KEY"));
                 let mut r=r.lock().unwrap();r.chats+=1;if r.change{r.changed=true;}
-                Json(json!({"choices":[{"finish_reason":if r.bad_output{"length"}else{"stop"},"message":{"content":json!({"score":0,"feedback":"第一题计算有误，第二题缺少关键论证。请复核符号并补充推导。","needs_review":false,"has_work":true,"error_count":2}).to_string()}}]}))
+                Json(json!({"choices":[{"finish_reason":if r.bad_output{"length"}else{"stop"},"message":{"content":json!({"score":0,"feedback":"第一题计算有误，第二题缺少关键论证。请复核符号并补充推导。","needs_review":r.review,"has_work":true,"error_count":2}).to_string()}}]}))
             }))
             .route("/files/file-api-test",delete(|State(r):State<Arc<Mutex<Remote>>>|async move{r.lock().unwrap().deletes+=1;Json(json!({"deleted":true}))}))
             .fallback(|method:axum::http::Method|async move{assert_eq!(method,axum::http::Method::GET,"AI must never publish a grade");StatusCode::NOT_FOUND})
@@ -603,9 +628,26 @@ mod tests {
             },
             (2, 2, 2)
         );
+        // Review preserves the actual model score and feedback, skips ZIP before download,
+        // cleans PDF uploads, and never manufactures a symbolic minimum score.
+        {
+            let mut r = remote.lock().unwrap();
+            r.bad_output = false;
+            r.review = true;
+        }
+        let mut j = job();
+        run_with_client(&state, &user, &mut j, &provider, &Annotation::default(), &cancel, &bb).await.unwrap();
+        assert_eq!((j.drafted, j.skipped, j.failures.len(), j.reviews.len()), (0, 5, 0, 1));
+        assert_eq!(j.reviews[0].score, Some(0.0));
+        assert!(j.reviews[0].reason.contains("extra.zip"));
+        assert!(j.reviews[0].feedback.contains("第二题"));
+        let html = view::ai_status(Some(&j), &Selection::default());
+        assert!(html.contains("AI 参考分数：0") && html.contains("第一题计算有误"));
+        assert_eq!({let r=remote.lock().unwrap(); (r.uploads,r.chats,r.deletes)}, (3,3,3));
         // A remote edit while AI is thinking invalidates the result.
         {
             let mut r = remote.lock().unwrap();
+            r.review = false;
             r.bad_output = false;
             r.change = true;
         }
@@ -637,7 +679,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(remote.lock().unwrap().chats, 3);
+        assert_eq!(remote.lock().unwrap().chats, 4);
         // Per-user reservation, scoped status and restart detection.
         let mut j = job();
         save(&state, user.id, &j).await.unwrap();

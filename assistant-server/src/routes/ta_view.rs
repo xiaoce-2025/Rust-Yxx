@@ -174,6 +174,19 @@ pub(super) fn ai_status(job: Option<&crate::services::ta_ai::Job>, s: &Selection
     let state=match job.status.as_str() { "queued"=>"排队中", "running"=>"批改中", "completed"=>"已完成", "cancelled"=>"已取消", "interrupted"=>"已中断", _=>"失败" };
     let mut review=s.clone();review.review="1".into();review.notice.clear();
     let mut html=format!("<div data-job-id=\"{}\"><p><strong>{} · {state}</strong>　已处理 {}/{}，草稿 {}，跳过 {}，失败 {}</p><p class=\"muted\">{}</p><a class=\"text-link\" href=\"{}\">刷新并核对评分草稿</a>",job.id,e(job.mode.label()),job.processed,job.total,job.drafted,job.skipped,job.failures.len(),e(&job.message),e(&review.url()));
+    if !job.reviews.is_empty() {
+        let _ = write!(html, "<details open><summary>待人工复核 {} 份：AI 参考结果</summary><ul>", job.reviews.len());
+        for result in &job.reviews {
+            let mut target = s.clone();
+            target.attempt = result.attempt.clone();
+            target.review.clear();
+            target.history = "1".into();
+            target.notice.clear();
+            let score = result.score.map(|v| v.to_string()).unwrap_or_else(|| "未提供有效分数".into());
+            let _ = write!(html, "<li><a class=\"text-link\" href=\"{}\">{}</a><p>需要人工复核：{}</p><p>AI 参考分数：{}</p><p>AI 参考评语：{}</p></li>", e(&target.url()), e(&result.label), e(&result.reason), e(&score), e(&result.feedback));
+        }
+        html.push_str("</ul><p class=\"muted\">参考结果尚未保存为评分草稿，请查看原始提交，核对后保存。</p></details>");
+    }
     if !job.failures.is_empty() {
         html.push_str("<details><summary>查看需人工处理的提交</summary><ul>");
         for failure in &job.failures { let _=write!(html,"<li>{}：{}</li>",e(&failure.label),e(&failure.message)); }
@@ -280,6 +293,10 @@ fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
         let a = visible[index];
         let student = &w.students[&a.user_id];
         let draft = draft_for(w, a);
+        let ai_review = w.ai_job.as_ref().and_then(|job| job.reviews.iter().find(|r| r.attempt == a.id && r.revision == a.revision));
+        if let Some(result) = ai_review {
+            let _ = write!(html, "<div class=\"alert\">需要人工复核：{}。以下为 AI 参考结果，请核对后保存。</div>", e(&result.reason));
+        }
         let _ = write!(html,"<div class=\"reviewer-heading\"><div><h3>{} <span class=\"muted\">{}</span></h3><p class=\"muted\">提交于 {} · 第 {} / {} 份</p></div><span class=\"badge\">{}</span></div><nav class=\"attempt-nav\" aria-label=\"切换学生\">",e(&student.name),e(&student.number),e(&date(&a.date)),index+1,visible.len(),status(a));
         for (label, position) in [
             ("← 上一份", index.checked_sub(1)),
@@ -343,10 +360,11 @@ fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
         if can_grade(a) {
             let score = draft
                 .map(|d| d.score)
+                .or_else(|| ai_review.and_then(|r| r.score))
                 .or(a.score)
                 .map(|v| v.to_string())
                 .unwrap_or_default();
-            let feedback = draft.map(|d| d.feedback.as_str()).unwrap_or("");
+            let feedback = draft.map(|d| d.feedback.as_str()).or_else(|| ai_review.map(|r| r.feedback.as_str())).unwrap_or("");
             let next = visible.get(index + 1).map(|a| a.id.as_str()).unwrap_or("");
             let _=write!(html,"<form class=\"score-form\" method=\"post\" action=\"/ta/action\">{}{}{}{}<div class=\"score-heading\"><h4>评分与反馈</h4><span class=\"muted\">{}</span></div><label>得分 <span class=\"muted\">/ {possible}</span><input type=\"number\" name=\"score\" value=\"{}\" min=\"0\" max=\"{possible}\" step=\"0.01\" required></label><label>给学生的评语<textarea name=\"feedback\" rows=\"5\" maxlength=\"10000\" placeholder=\"写下扣分理由、改进建议或鼓励…\">{}</textarea></label>",context(s,csrf),hidden("attempt",&a.id),hidden("revision",&a.revision),hidden("next",next),if draft.is_some(){"已载入本地草稿"}else{"保存后可在确认页同步"},e(&score),e(feedback));
             if is_graded(a) {
