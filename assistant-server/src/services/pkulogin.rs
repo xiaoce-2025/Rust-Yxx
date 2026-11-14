@@ -141,13 +141,8 @@ where F:FnOnce()->Fut, Fut:std::future::Future<Output=Result<PkuLoginResult,Stri
     let lock=cache.login_lock(username).await;
     let _guard=lock.lock().await;
     if let Some(entry)=cache.get(username).await {
-        if !super::user_agents::is_windows(&entry.user_agent) {
-            tracing::warn!(user_agent=%entry.user_agent,"缓存会话的 User-Agent 不是 Windows 设备，重新登录");
-            entry.invalidate();
-        } else {
-            tracing::info!(user_agent=%entry.user_agent,"复用教学网缓存会话，使用 User-Agent（完整值）");
-            return Ok(entry);
-        }
+        tracing::info!(user_agent=%entry.user_agent,"复用教学网缓存会话，使用 User-Agent（完整值）");
+        return Ok(entry);
     }
     let session=login().await?;
     Ok(cache.insert(username,session).await)
@@ -157,37 +152,10 @@ pub async fn login_iaaa_and_get_cookies(username: &str, password: &str) -> Resul
     // The curl transaction is blocking; do not stall the async page/API executor.
     let (username, password) = (username.to_owned(), password.to_owned());
     tokio::task::spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(login_with_ua_retries(
-            &super::user_agents::TeachingUaPool::default(),
-            |ua| login_with_user_agent(&username, &password, ua),
-        ))
+        let ua = super::user_agents::choose("./user_agents.txt.gz")?;
+        // IAAA is rate limited: submit credentials once and return any failure directly.
+        tokio::runtime::Handle::current().block_on(login_with_user_agent(&username, &password, ua))
     }).await.map_err(|_| "教学网登录任务失败".to_string())?
-}
-
-async fn login_with_ua_retries<F, Fut>(pool: &super::user_agents::TeachingUaPool, mut login: F) -> Result<PkuLoginResult, String>
-where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Result<PkuLoginResult, String>> {
-    let mut last_error = "原始 UA 池已没有可用的非空 Windows UA".to_string();
-    for attempt in 1..=3 {
-        let ua = if attempt <= 2 {
-            pool.take_candidate()?
-        } else {
-            match pool.choose_successful()? { Some(ua) => Some(ua), None => pool.take_candidate()? }
-        };
-        let Some(ua) = ua else {
-            tracing::warn!(attempt, "原始 UA 池已耗尽，本轮没有发起登录请求");
-            continue;
-        };
-        tracing::info!(attempt,user_agent=%ua,"教学网登录尝试（完整 User-Agent）");
-        // Every attempt starts a new IAAA transaction and new cookie jar; no token reuse.
-        match login(ua.clone()).await {
-            Ok(session) => { pool.record_success(&ua)?; return Ok(session); }
-            Err(error) => {
-                tracing::warn!(attempt,user_agent=%ua,"本次教学网登录失败");
-                last_error = error;
-            }
-        }
-    }
-    Err(format!("教学网登录失败（最多尝试 3 次）：{last_error}"))
 }
 
 async fn login_with_user_agent(username: &str, password: &str, user_agent: String) -> Result<PkuLoginResult, String> {
@@ -371,61 +339,6 @@ mod session_tests {
     use std::net::TcpListener;
     use std::time::Duration;
 
-    #[tokio::test]
-    async fn ua_retries_explore_twice_then_use_success_or_third_candidate() {
-        for (has_success, successful_attempt) in [(false, 1), (false, 2), (true, 3), (false, 3), (true, 0), (false, 0)] {
-            let dir = tempdir::TempDir::new("ua-retry").unwrap();
-            let pool = super::super::user_agents::TeachingUaPool {
-                plain: dir.path().join("ua.txt"), gzip: dir.path().join("missing.gz"), successful: dir.path().join("success.txt"),
-            };
-            std::fs::write(&pool.plain, "\nWindows candidate-A\nWindows candidate-B\nWindows candidate-C\n").unwrap();
-            if has_success { pool.record_success("Windows known-good").unwrap(); }
-            let mut seen = Vec::new();
-            let result = login_with_ua_retries(&pool, |ua| {
-                seen.push(ua.clone());
-                std::future::ready(if seen.len() == successful_attempt {
-                    Ok(PkuLoginResult::new(dir.path().join("cookie"), ua))
-                } else { Err("mock portal validation failed".into()) })
-            }).await;
-            assert_eq!(result.is_ok(), successful_attempt > 0);
-            assert_eq!(seen.len(), if successful_attempt > 0 { successful_attempt } else { 3 });
-            assert_ne!(seen.get(0), seen.get(1));
-            let remaining = std::fs::read_to_string(&pool.plain).unwrap();
-            for ua in seen.iter().filter(|ua| ua.contains("candidate")) { assert!(!remaining.contains(ua)); }
-            if seen.len() == 3 {
-                if has_success { assert_eq!(seen[2], "Windows known-good"); assert_eq!(remaining.lines().filter(|l| !l.trim().is_empty()).count(), 1); }
-                else { assert_eq!(seen.iter().collect::<std::collections::HashSet<_>>().len(), 3); }
-            }
-            if let Ok(session) = result {
-                let successful = std::fs::read_to_string(&pool.successful).unwrap();
-                assert!(successful.lines().any(|ua| ua == session.user_agent));
-            } else if has_success {
-                assert_eq!(std::fs::read_to_string(&pool.successful).unwrap(), "Windows known-good\n");
-            } else { assert!(!pool.successful.exists()); }
-        }
-    }
-
-    #[tokio::test]
-    async fn depleted_candidate_pool_never_submits_an_empty_ua() {
-        for has_success in [false, true] {
-            let dir = tempdir::TempDir::new("ua-depleted").unwrap();
-            let pool = super::super::user_agents::TeachingUaPool {
-                plain: dir.path().join("ua.txt"), gzip: dir.path().join("absent.gz"), successful: dir.path().join("success.txt"),
-            };
-            std::fs::write(&pool.plain, "\n \nAndroid\n").unwrap();
-            if has_success { pool.record_success("Windows known-good").unwrap(); }
-            let mut calls = 0;
-            let result = login_with_ua_retries(&pool, |ua| {
-                calls += 1;
-                assert_eq!(ua, "Windows known-good");
-                std::future::ready(Ok(PkuLoginResult::new(dir.path().join("cookie"), ua)))
-            }).await;
-            assert_eq!(result.is_ok(), has_success);
-            assert_eq!(calls, usize::from(has_success));
-            if !has_success { assert!(result.unwrap_err().contains("没有可用的非空 Windows UA")); }
-        }
-    }
-
     fn test_session() -> PkuLoginResult {
         let path = std::env::temp_dir().join(format!("pku-auth-test-{}.txt", uuid::Uuid::new_v4()));
         std::fs::write(&path, "cookies").unwrap();
@@ -441,6 +354,7 @@ mod session_tests {
             async {Err("IAAA已成功，但教学网回调失败".into())}
         }).await;
         assert!(first.is_err());
+        assert_eq!(iaaa_calls, 1);
         assert!(cache.get("ticket-test").await.is_none());
         let dir=tempdir::TempDir::new("teaching-cache").unwrap();
         let cookie=dir.path().join("cookies.txt");
@@ -459,20 +373,17 @@ mod session_tests {
     }
 
     #[tokio::test]
-    async fn non_windows_cached_user_agent_requires_a_fresh_login() {
-        let cache=LoginCache::new(60);
-        let dir=tempdir::TempDir::new("ua-cache").unwrap();
-        let old=dir.path().join("old.txt");let fresh=dir.path().join("new.txt");
-        std::fs::write(&old,"old cookie").unwrap();std::fs::write(&fresh,"new cookie").unwrap();
-        let failed_ua=format!("failed-cached-ua-{}",uuid::Uuid::new_v4());
-        cache.insert("ua-test",PkuLoginResult::new(old.clone(),failed_ua.clone())).await;
-        let expected=fresh.clone();
-        let entry=cached_teaching_login("ua-test",&cache,||async {
-            Ok(PkuLoginResult::new(fresh,format!("Windows fresh-ua-{}",uuid::Uuid::new_v4())))
+    async fn cached_session_is_reused_regardless_of_ua_platform() {
+        let cache = LoginCache::new(60);
+        let dir = tempdir::TempDir::new("ua-cache").unwrap();
+        let cookie = dir.path().join("cookies.txt");
+        std::fs::write(&cookie, "teaching-cookie").unwrap();
+        cache.insert("ua-test", PkuLoginResult::new(cookie.clone(), "Android mobile".into())).await;
+        let entry = cached_teaching_login("ua-test", &cache, || async {
+            panic!("UA platform must not trigger another IAAA login")
         }).await.unwrap();
-        assert_eq!(entry.cookie_file,expected);
-        assert_ne!(entry.user_agent,failed_ua);
-        assert!(!old.exists());
+        assert_eq!(entry.cookie_file, cookie);
+        assert_eq!(entry.user_agent, "Android mobile");
     }
 
     #[test]
@@ -665,7 +576,9 @@ fn curl_user_agent(args: &[String]) -> Option<&str> {
 
 pub(crate) fn run_curl_bytes(args: &[String]) -> Result<Vec<u8>, String> {
     if let Some(ua)=curl_user_agent(args) {
-        super::user_agents::ensure_teaching(ua).map_err(|error|format!("{AUTH_EXPIRED}：{error}"))?;
+        if !super::user_agents::valid_header(ua) {
+            return Err("无效的 User-Agent".into());
+        }
     }
     let curl_cmd = if cfg!(windows) { "curl.exe" } else { "curl" };
     let output = Command::new(curl_cmd)
