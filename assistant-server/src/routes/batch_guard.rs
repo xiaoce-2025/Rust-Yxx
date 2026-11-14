@@ -14,7 +14,7 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
     let path = request.uri().path();
     let method = request.method();
     // Status and authentication are local bookkeeping; the start route takes its own exclusive gate.
-    if !path.starts_with("/api/")
+    if !(path.starts_with("/api/") || matches!(path, "/ta/action" | "/ta/attachment"))
         || (method == Method::GET && matches!(path, STATUS_PATH | "/api/auth/me"))
         || (method == Method::POST
             && matches!(
@@ -156,6 +156,7 @@ mod tests {
             "/api/user/api-config",
             "/api/pkuvideofullclass/courses",
             "/api/pkuvideo/jobs",
+            "/ta/attachment?course=_c_1&column=_h_1&attempt=_a_1&file=_f_1",
         ] {
             let response = client
                 .get(format!("{base}{path}"))
@@ -175,6 +176,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(write.status(), StatusCode::LOCKED);
+        let ta_write = client.post(format!("{base}/ta/action"))
+            .header("Cookie", &cookie).form(&[("action", "commit")]).send().await.unwrap();
+        assert_eq!(ta_write.status(), StatusCode::LOCKED);
         assert!(state.store.get_config(owner).await.is_none());
         let password_api=client.post(format!("{base}/api/pkuvideo/submit")).json(&json!({
             "platform_email":email,"platform_password":"test-password","pku_auth_one":email.split('@').next().unwrap(),
@@ -222,10 +226,10 @@ mod tests {
                 .unwrap();
             assert!(html.contains("globalBatchSubmissionOverlay"));
             assert!(html.contains("任务正在提交中，请不要离开本页面"));
-            assert!(
-                html.find("window.BatchSubmission=").unwrap()
-                    < html.find("async function api(").unwrap()
-            );
+            // Active batches render the dedicated waiting page before the page handler runs.
+            assert!(html.contains("data-batch-waiting"));
+            assert!(html.contains("window.BatchSubmission="));
+            assert!(!html.contains("async function api("));
         }
         blocked.0.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {

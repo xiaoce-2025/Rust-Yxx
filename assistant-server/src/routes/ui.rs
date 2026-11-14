@@ -60,6 +60,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/pkuvideo_fullclass", get(pkuvideofullclass_page))
         .route("/pkuvideo_fw", get(pkuvideo_fw_page))
         .route("/pkuvideo_sequence", get(pkuvideo_sequence_page))
+        .route("/ta", get(super::ta::page))
         .route("/settings", get(settings_page))
         .route("/user-center", get(user_center_page))
         .route_layer(middleware::from_fn_with_state(state, require_login))
@@ -169,7 +170,7 @@ fn guarded_page(source: &'static str) -> Html<String> {
     site_page(source, "")
 }
 
-fn site_page(source: &str, active_path: &str) -> Html<String> {
+pub(crate) fn site_page(source: &str, active_path: &str) -> Html<String> {
     let css = include_str!("../../templates/site-header.css");
     let footer_css = include_str!("../../templates/site-footer.css");
     let footer = include_str!("../../templates/site-footer.html");
@@ -223,7 +224,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
         assert_eq!(client.get(format!("{base}/app")).send().await.unwrap().status(), 404);
-        for path in ["/", "/chat", "/user-center", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence"] {
+        for path in ["/", "/chat", "/user-center", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence", "/ta"] {
             let response = client.get(format!("{base}{path}")).send().await.unwrap();
             assert_eq!(response.status(), 303);
             assert_eq!(response.headers()["location"], format!("/auth?next={}", urlencoding::encode(path)));
@@ -269,6 +270,14 @@ mod tests {
                 assert!(html.contains("<h1>用户中心</h1>"));
                 assert!(html.contains("href=\"/user-center\" aria-current=\"page\""));
                 assert!(!html.contains("<html lang=\"zh-CN\" data-batch-waiting>"));
+
+                let ta = client.get(format!("{base}/ta"))
+                    .header("cookie", format!("assistant_token={token}")).send().await.unwrap();
+                assert_eq!(ta.status(),200);
+                let ta = ta.text().await.unwrap();
+                assert!(ta.contains("助教作业批改") && ta.contains("尚未绑定教学网"));
+                assert!(ta.contains("href=\"/ta\" aria-current=\"page\""));
+                assert!(!ta.contains("type=\"password\""));
 
                 let submitter = Arc::new(HeldSubmission(tokio::sync::Notify::new()));
                 state.batch_submissions.start(

@@ -1,4 +1,5 @@
 pub mod sso;
+pub mod ta;
 pub mod admin;
 pub mod auth;
 pub mod batch_guard;
@@ -52,6 +53,7 @@ pub fn router(state: AppState) -> Router {
         .merge(pkuvideo_fw::routes())
         .merge(pkuvideo_fw_translation::routes())
         .merge(pkuvideofullclass::routes())
+        .merge(ta::routes())
         .merge(manual_lessons::routes())
         .merge(settings::routes())
         .merge(wechat::routes())

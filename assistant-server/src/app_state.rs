@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub ta_mutations: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
     pub sso_transactions: Arc<tokio::sync::Mutex<HashMap<String, crate::routes::sso::Transaction>>>,
     pub batch_submissions: Arc<crate::services::batch_submission::BatchSubmissionManager>,
     pub video_queue: Arc<crate::services::video_queue::VideoQueue>,
@@ -41,6 +42,10 @@ pub struct RuntimeWechatSession {
 
 
 impl AppState {
+    pub async fn ta_mutation(&self, user_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        self.ta_mutations.lock().await.entry(user_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
+    }
     pub async fn course_busy(&self, user_id: Uuid, course: &str) -> bool {
         self.pkuvideo_jobs.read().await.values().any(|j|j.user_id == user_id
             && j.course_id.as_deref() == Some(course) && matches!(j.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running))
@@ -74,6 +79,7 @@ impl AppState {
 
 
         let state = Self {
+            ta_mutations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             sso_transactions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             batch_submissions: Arc::new(crate::services::batch_submission::BatchSubmissionManager::new()),
             video_queue: crate::services::video_queue::VideoQueue::new(settings.pkuvideo.processing_concurrency),
