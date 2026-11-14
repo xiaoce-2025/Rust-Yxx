@@ -41,9 +41,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::io::Error::other(format!("无法锁定服务数据目录 {}: {error}", data_dir.display()))
     })?;
 
+    let login_cache = Arc::new(services::login_cache::LoginCache::persistent(
+        60, data_dir.join("teaching_sessions"),
+    )?);
     let store = Arc::new(store::FileStore::new(data_dir).await?);
 
-    let app_state = AppState::new(settings, store);
+    let app_state = AppState::with_login_cache(settings, store, login_cache);
     let cache = app_state.login_cache.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));

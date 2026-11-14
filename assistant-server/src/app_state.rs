@@ -71,12 +71,14 @@ impl AppState {
         Ok(client)
     }
     pub fn new(settings: Settings, store: Arc<FileStore>) -> Self {
+        Self::with_login_cache(settings, store, Arc::new(LoginCache::new(60)))
+    }
+    pub fn with_login_cache(settings: Settings, store: Arc<FileStore>, login_cache: Arc<LoginCache>) -> Self {
         let wechat_service = WeChatService::new(settings.wechat.clone());
 
         let pkuvideo_jobs = Arc::new(RwLock::new(HashMap::new()));
         let pkuvideo_fw_jobs = Arc::new(RwLock::new(HashMap::new()));
 
-        let login_cache = Arc::new(LoginCache::new(60)); // 仅在操作开始时检查 1 小时有效期
 
 
         let state = Self {
