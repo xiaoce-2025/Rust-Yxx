@@ -3,159 +3,57 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>「严小希」小助手-工作台</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
+  <title>「严小希」小助手-课堂笔记生成</title>
   <style>
-    :root {
-      --ink: #13241d;
-      --line: rgba(19,36,29,.18);
-      --accent: #0c7a57;
-      --warn: #982a3d;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      font-family: "Manrope", "Segoe UI", sans-serif;
-      background:
-        radial-gradient(50rem 20rem at -10% -10%, rgba(181,91,35,.2), transparent 60%),
-        radial-gradient(60rem 26rem at 110% 110%, rgba(12,122,87,.2), transparent 60%),
-        #edf3ed;
-      min-height: 100vh;
-      --site-page-inset: 20px;
-      padding: 0 var(--site-page-inset) var(--site-page-inset);
-    }
-    .wrap {
-      max-width: 960px;
-      margin: 0 auto;
-      border-radius: 20px;
+    /* replay-hero */
+    .workspace { padding: 16px var(--replay-gutter) 40px; }
+    .panel {
+      min-width: 0;
+      padding: clamp(16px, 1.5vw, 24px);
       border: 1px solid var(--line);
-      background: rgba(255,255,255,.82);
-      backdrop-filter: blur(8px);
-      box-shadow: 0 18px 38px rgba(0,0,0,.1);
-      padding: 20px;
+      border-radius: 16px;
+      background: #fffafa;
+      box-shadow: 0 5px 14px #4d17140b;
     }
-    h1 {
-      margin: 0;
-      font-family: "Noto Serif SC", serif;
-      font-size: 30px;
+    .panel-heading {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      margin-bottom: 14px;
     }
-    .sub { margin-top: 6px; color: #4f645b; font-size: 13px; }
-    .toolbar { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
-    button {
-      border: 0;
-      border-radius: 12px;
-      padding: 10px 14px;
-      cursor: pointer;
-      font-weight: 700;
-      background: var(--accent);
-      color: #fff;
-    }
-    button.ghost {
-      color: var(--ink);
-      background: rgba(255,255,255,.8);
-      border: 1px solid var(--line);
-    }
-    .grid {
-      margin-top: 14px;
-      display: grid;
+    .panel-heading h2, .panel-heading h3 {
+      display: flex;
+      align-items: center;
       gap: 10px;
-      grid-template-columns: 1fr 1fr;
+      margin: 0;
+      font-size: clamp(17px, 1.35vw, 21px);
+      font-weight: 600;
     }
-    .field label { font-size: 12px; display: block; margin-bottom: 4px; color: #4f635b; }
+    .panel-heading .icon, .file-row .icon { color: var(--accent); }
+    .input-panel { max-width: 760px; margin-inline: auto; }
+    .input-panel .sub { margin-bottom: 14px; }
+    .grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+    .field label { display: block; margin-bottom: 4px; color: var(--muted); }
     .field input {
       width: 100%;
-      border-radius: 10px;
+      padding: 9px 10px;
       border: 1px solid var(--line);
-      padding: 10px;
-      font: inherit;
+      border-radius: 9px;
       background: #fff;
-    }
-    .full { grid-column: 1 / -1; }
-    .status { margin-top: 10px; color: var(--warn); min-height: 18px; font-size: 12px; }
-    .card {
-      margin-top: 16px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: rgba(255,255,255,.7);
-      padding: 12px;
-    }
-    .steps { display: grid; gap: 8px; margin-top: 8px; }
-    .step {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 8px;
-      font-size: 13px;
-      background: #fff;
-    }
-    .history-item {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 12px;
-      font-size: 13px;
-      background: #fff;
-      margin-top: 10px;
-    }
-    .history-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-    }
-    .history-info {
-      font-size: 12px;
-      line-height: 1.4;
-    }
-    .status-succeeded {
-      color: var(--accent);
-      font-weight: 600;
-    }
-    .status-failed {
-      color: var(--warn);
-      font-weight: 600;
-    }
-    .status-running {
-      color: #f59e0b;
-      font-weight: 600;
-    }
-    .status-pending {
-      color: #6b7280;
-      font-weight: 600;
-    }
-    .history-actions {
-      margin-top: 10px;
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .action-btn {
-      padding: 6px 10px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgba(255,255,255,.8);
       color: var(--ink);
-      font-size: 11px;
-      cursor: pointer;
-      font-weight: normal;
+      font: inherit;
     }
-    .action-btn:hover {
-      background: var(--accent);
-      color: #fff;
-    }
-    .action-btn.delete {
-      border-color: var(--warn);
-      color: var(--warn);
-    }
-    .action-btn.delete:hover {
-      background: var(--warn);
-      color: #fff;
-    }
-    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
-    @media (max-width: 760px) {
-      .grid { grid-template-columns: 1fr; }
-    }
+    .field small { display: block; margin-top: 4px; color: var(--muted); }
+    .field a { color: var(--accent); }
+    .full { grid-column: 1 / -1; }
+    .toolbar { margin-top: 16px; }
+    button { border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer; font: inherit; background: var(--accent); color: white; }
+    button.ghost { color: var(--ink); background: #fffafa; border: 1px solid var(--line); }
+    button:disabled { opacity: .5; cursor: default; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .status { margin: 0 0 12px; color: var(--muted); }
+    .status:empty { display: none; }
     .modal-overlay {
       display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
       background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center;
@@ -163,8 +61,9 @@
     .modal-dialog {
       background: #fff; border-radius: 16px; padding: 24px; max-width: 520px; width: 90%;
       box-shadow: 0 20px 60px rgba(0,0,0,.3);
+      max-height: 90vh; overflow-y: auto;
     }
-    .modal-dialog h3 { margin: 0 0 8px; font-family: "Noto Serif SC", serif; }
+    .modal-dialog h3 { margin: 0 0 8px; }
     .modal-dialog p { font-size: 13px; color: #6b7280; margin: 0 0 12px; }
     .key-url-box { background: #f3f4f6; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
     .key-url-box a { font-size: 12px; word-break: break-all; color: var(--accent); }
@@ -178,58 +77,72 @@
       text-align: center; color: #9ca3af; font-size: 13px; margin-bottom: 12px;
       transition: border-color .2s, background .2s; cursor: pointer;
     }
-    .drop-zone.drag-over { border-color: var(--accent); background: rgba(12,122,87,.06); }
-    .drop-zone.loaded { border-color: var(--accent); border-style: solid; background: rgba(12,122,87,.04); }
+    .drop-zone.drag-over { border-color: var(--accent); background: #fce5e5; }
+    .drop-zone.loaded { border-color: var(--accent); border-style: solid; background: #fdf3f3; }
     .drop-zone.loaded .drop-icon { color: var(--accent); }
     .key-hint { font-size: 12px; min-height: 18px; margin: -8px 0 8px; }
     .key-hint.ok { color: var(--accent); }
     .key-hint.err { color: var(--warn); }
+    .notes-layout { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, 1fr); gap: 16px; max-width: 1200px; margin: 0 auto; align-items: start; }
+    .notes-layout .input-panel { width: 100%; max-width: none; margin: 0; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .card { min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 16px; background: #fffafa; box-shadow: 0 5px 14px #4d17140b; }
+    .card h2 { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
+    .notes-sidebar { display: grid; gap: 16px; }
+    .steps { display: grid; gap: 8px; margin-top: 12px; }
+    .step, .history-item { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: #fff; overflow-wrap: anywhere; }
+    .history-item { margin-top: 12px; }
+    .history-header { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+    .history-info { font-size: 13px; overflow-wrap: anywhere; }
+    .history-actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .action-btn { padding: 7px 12px; border: 1px solid var(--line); background: #fffafa; color: var(--ink); font-size: 13px; }
+    .action-btn:hover { background: #fce5e5; }
+    .action-btn.delete { color: var(--warn); }
+    .mono { font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+    #historySection { grid-column: 1 / -1; }
+    #status { max-width: 1200px; margin: 0 auto 12px; }
+    @media (max-width: 760px) { .notes-layout, .grid { grid-template-columns: minmax(0, 1fr); } }
   </style>
 </head>
 <body>
-  <main class="wrap">
-    <h1>PKU Video 工作台</h1>
-    <div class="sub">在下方输入课程回放的下载链接和你的门户账密，让严小希来帮你上课记笔记！（IAAA账密用于教学网登陆鉴权，你的账密会被直接发送至北大IAAA验证服务器，我们不会储存您的账密）</div>
-
-    <div class="toolbar">
-      <button id="goAppBtn" class="ghost">返回首页</button>
-      <button id="submitBtn">提交处理任务</button>
-      <button id="historyBtn">查看历史记录</button>
+  <main>
+    <!-- replay-hero -->
+    <div class="workspace">
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+      <div class="notes-layout">
+        <section class="panel input-panel" aria-labelledby="inputTitle">
+          <div class="panel-heading"><h2 id="inputTitle">生成课堂笔记</h2></div>
+          <p class="sub">输入课程回放下载链接，让严小希帮你记笔记。无需门户 IAAA 账号和密码；加密 m3u8 需按提示提供解密密钥。</p>
+          <div class="grid">
+            <div class="field full">
+              <label for="videoUrl">视频下载链接</label>
+              <input id="videoUrl" type="url" placeholder="https://..." />
+              <small>如何获取课程回放下载链接？<a href="https://www.cxxdgc.cn/blog/project/videodownload2025autumn_addition" target="_blank" rel="noopener">点此查看</a></small>
+            </div>
+          </div>
+          <div class="toolbar">
+            <button id="submitBtn">提交处理任务</button>
+            <button id="historyBtn" class="ghost">查看历史记录</button>
+            <button id="goAppBtn" class="ghost">返回首页</button>
+          </div>
+        </section>
+        <div class="notes-sidebar">
+          <section class="card" aria-labelledby="quotaTitle">
+            <h2 id="quotaTitle">资源限额</h2>
+            <div id="quotaInfo" class="mono">加载中...</div>
+          </section>
+          <section class="card" aria-labelledby="jobTitle">
+            <h2 id="jobTitle">任务状态</h2>
+            <div class="mono" id="jobMeta" role="status">尚未提交任务</div>
+            <div class="steps" id="steps" aria-live="polite"></div>
+          </section>
+        </div>
+        <section class="card" id="historySection" style="display: none;" aria-labelledby="historyTitle">
+          <h2 id="historyTitle">历史任务记录</h2>
+          <div id="historyList"></div>
+        </section>
+      </div>
     </div>
-
-    <section class="grid">
-      <div class="field full">
-        <label for="videoUrl">视频下载链接</label>
-        <input id="videoUrl" placeholder="https://..." />
-        <div style="font-size: 12px; margin-top: 4px; color: #6b7280;">如何获取课程回放下载链接？<a href="https://www.cxxdgc.cn/blog/project/videodownload2025autumn_addition" target="_blank" style="color: #0c7a57;">点此查看</a></div>
-      </div>
-      <div class="field">
-        <label for="pkuAuthOne">IAAA账号</label>
-        <input id="pkuAuthOne" placeholder="2x000xxxxx" />
-      </div>
-      <div class="field">
-        <label for="pkuAuthTwo">IAAA密码</label>
-        <input id="pkuAuthTwo" type="password" placeholder="xxxxx" />
-      </div>
-    </section>
-
-    <div class="card" style="margin-top: 16px;">
-      <strong>资源限额</strong>
-      <div id="quotaInfo" class="mono">加载中...</div>
-    </div>
-
-    <div id="status" class="status"></div>
-
-    <section class="card">
-      <strong>任务状态</strong>
-      <div class="mono" id="jobMeta">尚未提交任务</div>
-      <div class="steps" id="steps"></div>
-    </section>
-
-    <section class="card" id="historySection" style="display: none;">
-      <strong>历史任务记录</strong>
-      <div id="historyList"></div>
-    </section>
   <div class="modal-overlay" id="keyModal">
       <div class="modal-dialog">
         <h3>需要解密密钥</h3>
@@ -249,6 +162,7 @@
       </div>
     </div>
   </main>
+  <!-- site-footer -->
 
   <script>
     const statusEl = document.getElementById("status");
@@ -322,9 +236,7 @@
 
       statusEl.textContent = "提交中...";
       const body = {
-        video_url: document.getElementById("videoUrl").value.trim(),
-        pku_auth_one: document.getElementById("pkuAuthOne").value.trim(),
-        pku_auth_two: document.getElementById("pkuAuthTwo").value.trim()
+        video_url: document.getElementById("videoUrl").value.trim()
       };
       if (manualKey) body.manual_key = manualKey;
 
@@ -349,10 +261,9 @@
       statusEl.textContent = "正在检测视频加密信息...";
       try {
         const resp = await api("/api/pkuvideo/check-m3u8", "POST", {
-          video_url: url,
-          pku_auth_one: document.getElementById("pkuAuthOne").value.trim(),
-          pku_auth_two: document.getElementById("pkuAuthTwo").value.trim()
+          video_url: url
         });
+        if (resp.error) throw new Error(resp.error);
         if (resp.is_m3u8 && resp.key_uri) {
           document.getElementById("keyUrl").href = resp.key_uri;
           document.getElementById("keyUrl").textContent = resp.key_uri;

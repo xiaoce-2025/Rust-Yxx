@@ -123,7 +123,12 @@ async fn home_page() -> Html<String> {
 }
 
 async fn pkuvideo_page() -> Html<String> {
-    site_page(include_str!("../../templates/pkuvideo.html"), "/pkuvideo")
+    replay_page(
+        include_str!("../../templates/pkuvideo.html"),
+        "/pkuvideo",
+        "课堂笔记生成",
+        "提交课程回放链接，自动生成可下载的课堂笔记。",
+    )
 }
 
 async fn pkuvideofullclass_page() -> Html<String> {

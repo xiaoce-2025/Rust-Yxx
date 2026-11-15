@@ -24,7 +24,9 @@ use crate::{
 
 #[derive(Debug, Deserialize)]
 struct SubmitRequest {
+    #[serde(default)]
     pku_auth_one: String,
+    #[serde(default)]
     pku_auth_two: String,
     video_url: String,
     manual_key: Option<String>,
@@ -33,7 +35,9 @@ struct SubmitRequest {
 #[derive(Debug, Deserialize)]
 struct CheckM3u8Request {
     video_url: String,
+    #[serde(default)]
     pku_auth_one: String,
+    #[serde(default)]
     pku_auth_two: String,
 }
 
@@ -104,7 +108,7 @@ async fn submit(
 ) -> Result<Json<SubmitResponse>, ApiError> {
     let slot = state.fw_slot(current_user.id).await;
     let _guard = slot.lock().await;
-    validate_input(&req.video_url, &req.pku_auth_one, &req.pku_auth_two)?;
+    validate_input(&req.video_url)?;
 
     // 检查用户是否已有任务（每个用户只有一个槽位）
     {
@@ -124,7 +128,7 @@ async fn submit(
         .await
         .ok_or(ApiError::Unauthorized)?;
     let email_student_id = user.email.split('@').next().unwrap_or("").trim();
-    if email_student_id != req.pku_auth_one.trim() {
+    if !req.pku_auth_one.trim().is_empty() && email_student_id != req.pku_auth_one.trim() {
         return Err(ApiError::BadRequest(
             "IAAA账号与注册邮箱学号不匹配，请检查".to_string(),
         ));
@@ -329,7 +333,7 @@ async fn check_m3u8(
     current_user: CurrentUser,
     Json(req): Json<CheckM3u8Request>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_input(&req.video_url, &req.pku_auth_one, &req.pku_auth_two)?;
+    validate_input(&req.video_url)?;
 
     if !req.video_url.contains(".m3u8") {
         return Ok(Json(serde_json::json!({"is_m3u8": false})));
@@ -457,14 +461,9 @@ async fn remove_job_files(root: &std::path::Path, id: Uuid) -> Result<(), ApiErr
     }
     Ok(())
 }
-fn validate_input(video_url: &str, pku_auth_one: &str, pku_auth_two: &str) -> Result<(), ApiError> {
-    if video_url.trim().is_empty()
-        || pku_auth_one.trim().is_empty()
-        || pku_auth_two.trim().is_empty()
-    {
-        return Err(ApiError::BadRequest(
-            "video_url 和两条 pku 认证信息不能为空".to_string(),
-        ));
+fn validate_input(video_url: &str) -> Result<(), ApiError> {
+    if video_url.trim().is_empty() {
+        return Err(ApiError::BadRequest("video_url 不能为空".to_string()));
     }
     if !(video_url.starts_with("http://") || video_url.starts_with("https://")) {
         return Err(ApiError::BadRequest(
@@ -713,5 +712,26 @@ mod replay_view_tests {
             .join("video.mp4")
             .exists());
         assert!(dir.path().join("unrelated").exists());
+    }
+}
+
+#[cfg(test)]
+mod credential_optional_tests {
+    use super::*;
+
+    #[test]
+    fn manual_submission_and_detection_accept_no_iaaa_fields() {
+        let payload = serde_json::json!({
+            "video_url": "https://example.invalid/playlist.m3u8",
+            "manual_key": "0123456789abcdef"
+        });
+        let submit: SubmitRequest = serde_json::from_value(payload.clone()).unwrap();
+        assert!(submit.pku_auth_one.is_empty());
+        assert!(submit.pku_auth_two.is_empty());
+        assert!(validate_input(&submit.video_url).is_ok());
+        let check: CheckM3u8Request = serde_json::from_value(payload).unwrap();
+        assert!(validate_input(&check.video_url).is_ok());
+        assert!(validate_input("").is_err());
+        assert!(validate_input("file:///tmp/video.m3u8").is_err());
     }
 }

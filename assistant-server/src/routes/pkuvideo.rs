@@ -20,7 +20,9 @@ use crate::{
 struct SubmitApiRequest {
     platform_email: String,
     platform_password: String,
+    #[serde(default)]
     pku_auth_one: String,
+    #[serde(default)]
     pku_auth_two: String,
     video_url: String,
     manual_key: Option<String>,
@@ -28,7 +30,9 @@ struct SubmitApiRequest {
 
 #[derive(Debug, Deserialize)]
 struct SubmitWebRequest {
+    #[serde(default)]
     pku_auth_one: String,
+    #[serde(default)]
     pku_auth_two: String,
     video_url: String,
     manual_key: Option<String>,
@@ -37,7 +41,9 @@ struct SubmitWebRequest {
 #[derive(Debug, Deserialize)]
 struct CheckM3u8Request {
     video_url: String,
+    #[serde(default)]
     pku_auth_one: String,
+    #[serde(default)]
     pku_auth_two: String,
 }
 
@@ -64,7 +70,7 @@ async fn submit_api(
     State(state): State<AppState>,
     Json(req): Json<SubmitApiRequest>,
 ) -> Result<Json<SubmitResponse>, ApiError> {
-    validate_input(&req.video_url, &req.pku_auth_one, &req.pku_auth_two)?;
+    validate_input(&req.video_url)?;
 
     let user = state
         .store
@@ -105,7 +111,7 @@ async fn submit_web(
     current_user: CurrentUser,
     Json(req): Json<SubmitWebRequest>,
 ) -> Result<Json<SubmitResponse>, ApiError> {
-    validate_input(&req.video_url, &req.pku_auth_one, &req.pku_auth_two)?;
+    validate_input(&req.video_url)?;
 
     let job_id = enqueue_job(
         state,
@@ -129,7 +135,7 @@ async fn check_m3u8(
     current_user: CurrentUser,
     Json(req): Json<CheckM3u8Request>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    validate_input(&req.video_url, &req.pku_auth_one, &req.pku_auth_two)?;
+    validate_input(&req.video_url)?;
 
     if !req.video_url.contains(".m3u8") {
         return Ok(Json(serde_json::json!({"is_m3u8": false})));
@@ -372,9 +378,9 @@ async fn delete_job(
     })))
 }
 
-fn validate_input(video_url: &str, pku_auth_one: &str, pku_auth_two: &str) -> Result<(), ApiError> {
-    if video_url.trim().is_empty() || pku_auth_one.trim().is_empty() || pku_auth_two.trim().is_empty() {
-        return Err(ApiError::BadRequest("video_url 和两条 pku 认证信息不能为空".to_string()));
+fn validate_input(video_url: &str) -> Result<(), ApiError> {
+    if video_url.trim().is_empty() {
+        return Err(ApiError::BadRequest("video_url 不能为空".to_string()));
     }
     if !(video_url.starts_with("http://") || video_url.starts_with("https://")) {
         return Err(ApiError::BadRequest("video_url 必须是 http/https 链接".to_string()));
@@ -397,7 +403,7 @@ async fn enqueue_job(
     let email_student_id = user.email.split('@').next().unwrap_or("").trim();
     
     // 校验 IAAA 账号与邮箱学号是否匹配
-    if email_student_id != pku_auth_one.trim() {
+    if !pku_auth_one.trim().is_empty() && email_student_id != pku_auth_one.trim() {
         return Err(ApiError::BadRequest("IAAA账号与注册邮箱学号不匹配，请检查".to_string()));
     }
     
@@ -559,4 +565,25 @@ async fn download_pdf(
         .map_err(|_| ApiError::Internal("构建响应失败".to_string()))?;
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod credential_optional_tests {
+    use super::*;
+
+    #[test]
+    fn manual_submission_and_detection_accept_no_iaaa_fields() {
+        let payload = serde_json::json!({
+            "video_url": "https://example.invalid/playlist.m3u8",
+            "manual_key": "0123456789abcdef"
+        });
+        let submit: SubmitWebRequest = serde_json::from_value(payload.clone()).unwrap();
+        assert!(submit.pku_auth_one.is_empty());
+        assert!(submit.pku_auth_two.is_empty());
+        assert!(validate_input(&submit.video_url).is_ok());
+        let check: CheckM3u8Request = serde_json::from_value(payload).unwrap();
+        assert!(validate_input(&check.video_url).is_ok());
+        assert!(validate_input("").is_err());
+        assert!(validate_input("file:///tmp/video.m3u8").is_err());
+    }
 }

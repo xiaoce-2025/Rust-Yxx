@@ -127,6 +127,9 @@ pub async fn prepare_teaching(
         decode_key(key)?;
         key.to_string()
     } else {
+        if username.trim().is_empty() || password.is_empty() {
+            return Err("请提供 m3u8 解密密钥，无需填写门户 IAAA 凭证".into());
+        }
         let mut session =
             pkulogin::login_iaaa_and_get_cookies_with_cache(username, password, cache).await?;
         pkulogin::session_operation(&mut session, username, password, cache, |login| {
@@ -164,6 +167,10 @@ mod tests {
         .await
         .unwrap();
         assert!(media.enc_key.is_some());
+        let error = prepare_teaching(
+            "https://invalid.example/video.m3u8", "", "", &LoginCache::new(60), None,
+        ).await.err().unwrap();
+        assert!(error.contains("请提供 m3u8 解密密钥"));
     }
 
     #[tokio::test]

@@ -167,20 +167,12 @@
 
       <section class="panel input-panel" id="inputSection" hidden aria-labelledby="inputTitle">
         <div class="panel-heading"><h2 id="inputTitle"><svg class="icon" aria-hidden="true"><use href="#fw-icon-download"/></svg>提交下载任务</h2></div>
-        <p class="sub">每个用户同时只能处理一个视频。IAAA 账号和密码用于教学网登录鉴权，会直接发送至北大 IAAA 验证服务器，本站不会储存。</p>
+        <p class="sub">每个用户同时只能处理一个视频。提交下载链接无需门户 IAAA 账号和密码；加密 m3u8 需按提示提供解密密钥。</p>
         <div class="grid">
           <div class="field full">
             <label for="videoUrl">视频下载链接</label>
             <input id="videoUrl" placeholder="https://..." />
             <small>如何获取课程回放下载链接？<a href="https://www.cxxdgc.cn/blog/project/videodownload2025autumn_addition" target="_blank">点此查看</a></small>
-          </div>
-          <div class="field">
-            <label for="pkuAuthOne">IAAA账号</label>
-            <input id="pkuAuthOne" placeholder="2x000xxxxx" />
-          </div>
-          <div class="field">
-            <label for="pkuAuthTwo">IAAA密码</label>
-            <input id="pkuAuthTwo" type="password" placeholder="xxxxx" />
           </div>
         </div>
         <div class="toolbar"><button id="submitBtn">提交下载任务</button></div>
@@ -387,9 +379,7 @@
     async function submitJob(manualKey) {
       statusEl.textContent = "提交中...";
       const body = {
-        video_url: document.getElementById("videoUrl").value.trim(),
-        pku_auth_one: document.getElementById("pkuAuthOne").value.trim(),
-        pku_auth_two: document.getElementById("pkuAuthTwo").value.trim()
+        video_url: document.getElementById("videoUrl").value.trim()
       };
       if (manualKey) body.manual_key = manualKey;
 
@@ -412,10 +402,9 @@
       statusEl.textContent = "正在检测视频加密信息...";
       try {
         const resp = await api("/api/pkuvideo_fw/check-m3u8", "POST", {
-          video_url: url,
-          pku_auth_one: document.getElementById("pkuAuthOne").value.trim(),
-          pku_auth_two: document.getElementById("pkuAuthTwo").value.trim()
+          video_url: url
         });
+        if (resp.error) throw new Error(resp.error);
         if (resp.is_m3u8 && resp.key_uri) {
           document.getElementById("keyUrl").href = resp.key_uri;
           document.getElementById("keyUrl").textContent = resp.key_uri;
