@@ -112,7 +112,7 @@
       <div class="notes-layout">
         <section class="panel input-panel" aria-labelledby="inputTitle">
           <div class="panel-heading"><h2 id="inputTitle">生成课堂笔记</h2></div>
-          <p class="sub">输入课程回放下载链接，让严小希帮你记笔记。无需门户 IAAA 账号和密码；加密 m3u8 需按提示提供解密密钥。</p>
+          <p class="sub">输入课程回放下载链接，让严小希帮你记笔记。无需门户 IAAA 账号和密码；支持带 enc_key 参数的链接，自动读取密钥；普通加密 m3u8 链接仍可按提示提供密钥。</p>
           <div class="grid">
             <div class="field full">
               <label for="videoUrl">视频下载链接</label>
@@ -228,17 +228,39 @@
       }
     }
 
+    // enc_key 是本项目的导入参数，提交前移除，避免发给视频资源服务器。
+    function readVideoInput() {
+      const value = document.getElementById("videoUrl").value.trim();
+      const parsed = new URL(value);
+      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("请输入 http/https 视频链接");
+      const keys = parsed.searchParams.getAll("enc_key");
+      if (keys.length > 1) throw new Error("链接中存在重复的 enc_key 参数");
+      const key = keys[0];
+      if (key !== undefined && !(/^hex:/i.test(key) ? /^hex:[0-9a-f]{32}$/i.test(key) : new TextEncoder().encode(key).length === 16)) {
+        throw new Error("链接中的 enc_key 必须是 16 字节密钥或 hex: 加 32 位十六进制编码");
+      }
+      const source = value.split("#")[0];
+      const q = source.indexOf("?");
+      let url = source;
+      if (key !== undefined && q >= 0) {
+        const query = source.slice(q + 1).split("&")
+          .filter(part => decodeURIComponent(part.split("=")[0]) !== "enc_key").join("&");
+        url = source.slice(0, q) + (query ? "?" + query : "");
+      }
+      return { url, key: key && /^hex:/i.test(key) ? "hex:" + key.slice(4).toLowerCase() : key };
+    }
+
     async function submitJob(manualKey) {
       if (processingQuota <= 0) {
         statusEl.textContent = "提交失败: 处理资源限额不足，请联系管理员获取更多额度（严小希平均处理1小时的回放需要消耗价值0.5r的token，严小希并没有那么充足的应对攻击的资金qwq，设置限额是为了保障正常使用）";
         return;
       }
 
+      let media;
+      try { media = readVideoInput(); } catch (err) { statusEl.textContent = err.message; return; }
       statusEl.textContent = "提交中...";
-      const body = {
-        video_url: document.getElementById("videoUrl").value.trim()
-      };
-      if (manualKey) body.manual_key = manualKey;
+      const body = { video_url: media.url };
+      if (manualKey || media.key) body.manual_key = manualKey || media.key;
 
       api("/api/pkuvideo/submit-web", "POST", body)
         .then(resp => {
@@ -255,8 +277,10 @@
     }
 
     async function checkM3u8AndSubmit() {
-      const url = document.getElementById("videoUrl").value.trim();
-      if (!url.includes(".m3u8")) return submitJob();
+      let media;
+      try { media = readVideoInput(); } catch (err) { statusEl.textContent = err.message; return; }
+      const url = media.url;
+      if (media.key || !url.includes(".m3u8")) return submitJob();
 
       statusEl.textContent = "正在检测视频加密信息...";
       try {

@@ -20,7 +20,7 @@ async function checkPage(name) {
         : {job_id: 'job-1', status: 'pending'};
       return {ok: true, text: async () => JSON.stringify(payload)};
     },
-    setInterval() { return 1; }, clearInterval() {}, TextEncoder, URLSearchParams, location: {}, console
+    setInterval() { return 1; }, clearInterval() {}, TextEncoder, URL, URLSearchParams, location: {}, console
   });
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1]
     .replace('checkLogin().then(() => openLessonReplay());', '')
@@ -45,6 +45,26 @@ async function checkPage(name) {
   elements.get('videoUrl').value = 'https://example.invalid/video.mp4';
   await vm.runInContext('checkM3u8AndSubmit()', context);
   assert.deepEqual(requests[0].body, {video_url: 'https://example.invalid/video.mp4'});
+  requests.length = 0;
+  if (name === 'pkuvideo') vm.runInContext('processingQuota = 5;', context);
+  const key = 'hex:000102030405060708090a0b0c0d0e0f';
+  elements.get('videoUrl').value = 'https://example.invalid/video.m3u8?token=a%20b%2Fc&enc_key=' + encodeURIComponent(key) + '&v=1';
+  await vm.runInContext('checkM3u8AndSubmit()', context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(!requests.some(r => r.url.endsWith('/check-m3u8')), 'embedded key must skip manual key detection');
+  assert.deepEqual(requests[0].body, {video_url: 'https://example.invalid/video.m3u8?token=a%20b%2Fc&v=1', manual_key: key});
+  requests.length = 0;
+  elements.get('videoUrl').value = 'https://example.invalid/video.m3u8?enc_key=short';
+  await vm.runInContext('checkM3u8AndSubmit()', context);
+  assert.equal(requests.length, 0);
+  assert.match(elements.get('status').textContent, /enc_key/);
+  elements.get('videoUrl').value = 'https://example.invalid/video.m3u8?enc_key=0123456789ABCDEF';
+  assert.equal(vm.runInContext('readVideoInput().key', context), '0123456789ABCDEF');
+  elements.get('videoUrl').value = 'https://example.invalid/video.m3u8?enc_key=0123456789abcdef&enc_key=0123456789abcdef';
+  await vm.runInContext('checkM3u8AndSubmit()', context);
+  assert.equal(requests.length, 0);
+  assert.match(elements.get('status').textContent, /重复/);
+
 }
 (async () => {
   await checkPage('pkuvideo');
