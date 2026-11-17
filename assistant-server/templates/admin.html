@@ -158,7 +158,7 @@
       const state=listState[model],items=filteredRecords(),totalPages=Math.max(1,Math.ceil(items.length/pageSize)); state.page=Math.min(state.page,totalPages);
       const visible=items.slice((state.page-1)*pageSize,state.page*pageSize),selectable=model==='users'||model==='whitelist';
       state.selected=new Set([...state.selected].filter(id=>visible.some(record=>record.id===id)));
-      const heads=model==='users'?sortHeading('username','用户名')+sortHeading('email','邮箱')+'<th>启用</th><th>管理员</th>'+sortHeading('storage_quota','存储配额')+sortHeading('processing_quota','处理配额')+sortHeading('processing_priority','优先级')+'<th>有效会话</th>'+sortHeading('created_at','创建时间'):model==='whitelist'?sortHeading('email','邮箱地址'):sortHeading('id','任务 ID')+'<th>用户</th>'+sortHeading('status','状态')+sortHeading('updated_at','更新时间')+(model==='notes'?'<th>课程 / 日期 / 来源</th>':'');
+      const heads=model==='users'?sortHeading('username','用户名')+sortHeading('email','邮箱')+'<th>启用</th><th>管理员</th>'+sortHeading('storage_quota','存储配额')+sortHeading('processing_quota','笔记处理额度（小时）')+sortHeading('processing_priority','优先级')+'<th>有效会话</th>'+sortHeading('created_at','创建时间'):model==='whitelist'?sortHeading('email','邮箱地址'):sortHeading('id','任务 ID')+'<th>用户</th>'+sortHeading('status','状态')+sortHeading('updated_at','更新时间')+(model==='notes'?'<th>课程 / 日期 / 来源</th>':'');
       const rows=visible.map(record=> {
         const link=`<a class="record-name" href="#${model}/${encodeURIComponent(record.id)}">${escapeHTML(model==='users'?record.username:model==='whitelist'?record.email:record.id)}</a>`;
         const cells=model==='users'?`<td>${link}</td><td>${escapeHTML(record.email)}</td><td>${bool(record.is_active)}</td><td>${bool(record.is_admin)}</td><td>${record.storage_quota}</td><td>${record.processing_quota}</td><td>${record.processing_priority}</td><td>${record.sessions}</td><td>${escapeHTML(new Date(record.created_at).toLocaleDateString('zh-CN'))}</td>`:model==='whitelist'?`<td>${link}</td>`:`<td class="monospace">${link}</td><td>${escapeHTML(username(record.user_id))}</td><td>${escapeHTML(statusNames[record.status]||record.status)}</td><td>${escapeHTML(date(record.updated_at))}</td>${model==='notes'?`<td>${escapeHTML(record.course_name||'独立视频任务')}<br>${escapeHTML(record.course_date||'—')}<br>${record.regenerate?'重新生成 · ':''}${escapeHTML(record.result_source||'待执行')}</td>`:''}`;
@@ -181,8 +181,31 @@
     function renderRecord() {
       if (model==='users') {
         const user=data.users.find(record=>record.id===recordId); if (!user) return missing();
-        $('view').innerHTML=`<form id="record-form" class="change-form"><p class="errornote" id="form-error" role="alert" hidden></p><fieldset><h2 class="fieldset-title">账户信息</h2>${readonlyRow('用户名',user.username)}${readonlyRow('邮箱',user.email)}${readonlyRow('账户 ID',user.id,true)}${readonlyRow('创建时间',date(user.created_at))}</fieldset><fieldset><h2 class="fieldset-title">权限</h2><div class="form-row"><label for="is_active">启用：</label><div class="field-value"><input id="is_active" name="is_active" type="checkbox" ${user.is_active?'checked':''} ${user.is_admin?'disabled':''}><p class="help">停用后阻止此用户的后续访问。管理员账户不能在此停用。</p></div></div>${readonlyRow('管理员',user.is_admin?'是（由服务配置维护）':'否')}</fieldset><fieldset><h2 class="fieldset-title">配额与处理优先级</h2>${inputRow('存储配额','storage_quota',user.storage_quota)}${inputRow('处理配额','processing_quota',user.processing_quota)}${inputRow('处理优先级','processing_priority',user.processing_priority,'1–100，数值越小越优先；影响后续提交的任务。')}</fieldset><fieldset><h2 class="fieldset-title">登录会话</h2><div class="form-row"><span>有效会话：</span><div class="field-value">${user.sessions}${user.id!==data.current_user_id?'　<button type="button" class="text-button delete-link" data-revoke>撤销全部会话</button>':''}</div></div></fieldset>${submitRow('<a href="#users">返回用户列表</a>')}</form>`;
+        $('view').innerHTML=`<form id="record-form" class="change-form"><p class="errornote" id="form-error" role="alert" hidden></p><fieldset><h2 class="fieldset-title">账户信息</h2>${readonlyRow('用户名',user.username)}${readonlyRow('邮箱',user.email)}${readonlyRow('账户 ID',user.id,true)}${readonlyRow('创建时间',date(user.created_at))}</fieldset><fieldset><h2 class="fieldset-title">权限</h2><div class="form-row"><label for="is_active">启用：</label><div class="field-value"><input id="is_active" name="is_active" type="checkbox" ${user.is_active?'checked':''} ${user.is_admin?'disabled':''}><p class="help">停用后阻止此用户的后续访问。管理员账户不能在此停用。</p></div></div>${readonlyRow('管理员',user.is_admin?'是（由服务配置维护）':'否')}</fieldset><fieldset><h2 class="fieldset-title">配额与处理优先级</h2>${inputRow('存储配额','storage_quota',user.storage_quota)}${readonlyRow('笔记处理额度（小时）',user.processing_quota)}<div class="form-row"><span>发放额度：</span><div><input id="credit-amount" type="number" min="1" step="1" placeholder="增加小时数"><input id="credit-reason" placeholder="发放原因" maxlength="1000"><button type="button" id="credit-grant" class="button">发放笔记处理额度</button><p id="credit-feedback" role="status"></p><pre id="credit-ledger" style="white-space:pre-wrap"></pre></div></div>${inputRow('处理优先级','processing_priority',user.processing_priority,'1–100，数值越小越优先；影响后续提交的任务。')}</fieldset><fieldset><h2 class="fieldset-title">登录会话</h2><div class="form-row"><span>有效会话：</span><div class="field-value">${user.sessions}${user.id!==data.current_user_id?'　<button type="button" class="text-button delete-link" data-revoke>撤销全部会话</button>':''}</div></div></fieldset>${submitRow('<a href="#users">返回用户列表</a>')}</form>`;
         wireForm(saveUser);
+        let grantKey=crypto.randomUUID();
+        const grantButton=$('credit-grant');
+        const grantUserId=user.id;
+        let grantPayload=null;
+        grantButton.addEventListener('click',async()=> {
+          grantButton.disabled=true;
+          try {
+            if (!grantPayload) {
+              const amount=Number($('credit-amount').value),reason=$('credit-reason').value.trim();
+              if (!Number.isSafeInteger(amount)||amount<=0||!reason) throw new Error('请填写正整数小时数与发放原因');
+              grantPayload={amount,reason,idempotency_key:grantKey};
+            }
+            const result=await api('/api/admin/users/'+grantUserId+'/note-credits/grant',grantPayload);
+            grantPayload=null;grantKey=crypto.randomUUID();
+            await fetchData();renderRecord();
+            notice(`发放成功：${result.balance_before} → ${result.balance_after} 小时`,'success');
+          } catch(error) { $('credit-feedback').textContent=error.message; }
+          finally { grantButton.disabled=false; }
+        });
+        api('/api/admin/users/'+grantUserId+'/note-credits/ledger').then(result=> {
+          if (!$('credit-ledger') || recordId!==grantUserId) return;
+          $('credit-ledger').textContent=result.entries.map(e=>`${date(e.created_at)}  ${e.delta>0?'+':''}${e.delta} 小时，余额 ${e.balance_after}  ${e.reason||e.event_type}`).join('\n')||'暂无额度流水';
+        }).catch(()=>{if ($('credit-ledger')) $('credit-ledger').textContent='流水加载失败';});
       } else if (model==='whitelist') {
         const adding=recordId==='add'; if (!adding&&!data.whitelist.includes(recordId)) return missing();
         $('view').innerHTML=`<form id="record-form" class="change-form"><p class="errornote" id="form-error" role="alert" hidden></p><fieldset><h2 class="fieldset-title">注册白名单</h2><div class="form-row"><label class="required" for="email">邮箱地址：</label><div><input id="email" name="email" type="email" maxlength="254" value="${adding?'':escapeHTML(recordId)}" required autocomplete="off"><p class="help">允许此邮箱注册及通过统一认证登录，邮箱大小写与认证规则保持一致。</p></div></div></fieldset>${submitRow(adding?'<a href="#whitelist">返回列表</a>':'<button type="button" class="text-button delete-link" data-delete-email>删除</button>')}</form>`;
@@ -190,7 +213,7 @@
       } else {
         const job=data.jobs.find(record=>record.id===recordId&&record.kind===model); if (!job) return missing();
         $('page-title').textContent='查看'+models[model].name;
-        $('view').innerHTML=`<div class="change-form"><fieldset><h2 class="fieldset-title">${models[model].name}</h2>${readonlyRow('任务 ID',job.id,true)}${readonlyRow('所属用户',username(job.user_id))}${readonlyRow('用户 ID',job.user_id,true)}${readonlyRow('状态',statusNames[job.status]||job.status)}${model==='notes'?readonlyRow('课程名称',job.course_name||'独立视频任务')+readonlyRow('课程日期',job.course_date||'—')+readonlyRow('重新生成',job.regenerate?'是':'否')+readonlyRow('结果来源',job.result_source||'待执行')+readonlyRow('URL 哈希',job.url_key||'—',true):''}${job.created_at?readonlyRow('创建时间',date(job.created_at)):''}${readonlyRow('更新时间',date(job.updated_at))}</fieldset><p class="help">任务状态由处理流程维护，此处只读。</p><div class="submit-row"><a href="#${model}">返回${models[model].name}列表</a></div></div>`;
+        $('view').innerHTML=`<div class="change-form"><fieldset><h2 class="fieldset-title">${models[model].name}</h2>${readonlyRow('任务 ID',job.id,true)}${readonlyRow('所属用户',username(job.user_id))}${readonlyRow('用户 ID',job.user_id,true)}${readonlyRow('状态',statusNames[job.status]||job.status)}${model==='notes'?readonlyRow('课程名称',job.course_name||'独立视频任务')+readonlyRow('课程日期',job.course_date||'—')+readonlyRow('重新生成',job.regenerate?'是':'否')+readonlyRow('结果来源',job.result_source||'待执行')+readonlyRow('URL 哈希',job.url_key||'—',true)+readonlyRow('计费状态',job.billing_state||'历史任务')+readonlyRow('已扣小时额度',job.charged_units||0)+readonlyRow('计费时长（秒）',job.billing_duration_seconds??'—')+readonlyRow('失败码',job.failure_code||'—'):''}${job.created_at?readonlyRow('创建时间',date(job.created_at)):''}${readonlyRow('更新时间',date(job.updated_at))}</fieldset><p class="help">任务状态由处理流程维护，此处只读。</p><div class="submit-row"><a href="#${model}">返回${models[model].name}列表</a></div></div>`;
       }
     }
     function missing() { $('view').innerHTML=`<p>记录不存在或已被移除。</p><p><a href="#${model}">返回列表</a></p>`; }
@@ -203,7 +226,7 @@
         finally { submitting=false; form.querySelectorAll('[type=submit]').forEach(button=>button.disabled=false); }
       });
     }
-    async function saveUser(form) { const body={is_active:form.elements.is_active.checked}; for (const key of ['storage_quota','processing_quota','processing_priority']) body[key]=Number(form.elements[key].value); await api('/api/admin/users/'+recordId,body); return recordId; }
+    async function saveUser(form) { const body={is_active:form.elements.is_active.checked}; for (const key of ['storage_quota','processing_priority']) body[key]=Number(form.elements[key].value); await api('/api/admin/users/'+recordId,body); return recordId; }
     async function saveEmail(form) { const email=form.elements.email.value.trim(); if (data.whitelist.includes(email)&&email!==recordId) throw new Error('此邮箱已在白名单中。'); const emails=data.whitelist.filter(value=>value!==recordId); emails.push(email); await api('/api/admin/whitelist',{emails}); return email; }
     async function runAction() {
       const state=listState[model],action=$('action').value,ids=[...state.selected];
@@ -216,7 +239,7 @@
           const targets=ids.map(id=>data.users.find(user=>user.id===id));
           if (action==='disable'&&targets.some(user=>user.is_admin)) throw new Error('所选记录包含管理员，不能停用。请取消选择管理员后重试。');
           if (action==='revoke'&&ids.includes(data.current_user_id)) throw new Error('不能撤销自己的会话，请取消选择当前账户。');
-          for (const user of targets) { if (action==='revoke') await api('/api/admin/users/'+user.id+'/revoke-sessions',{}); else await api('/api/admin/users/'+user.id,{is_active:action==='enable',storage_quota:user.storage_quota,processing_quota:user.processing_quota,processing_priority:user.processing_priority}); completed++; }
+          for (const user of targets) { if (action==='revoke') await api('/api/admin/users/'+user.id+'/revoke-sessions',{}); else await api('/api/admin/users/'+user.id,{is_active:action==='enable',storage_quota:user.storage_quota,processing_priority:user.processing_priority}); completed++; }
         }
         state.selected.clear(); await fetchData(); route(); notice(`已成功处理 ${completed} 条记录。`,'success');
       } catch (error) { try { await fetchData(); route(); } catch {} notice(`已处理 ${completed} 条记录。${error.message}`); }

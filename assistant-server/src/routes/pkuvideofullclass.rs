@@ -595,7 +595,7 @@ async fn get_process_status(
             PipelineStatus::Succeeded => ("completed", "处理完成".to_string()),
             PipelineStatus::Failed => ("failed", job.error.clone().unwrap_or_default()),
         };
-        return Ok(Json(serde_json::json!({"status":status,"message":message,"job_id":job.id,"priority":job.priority,"steps":job.steps,"postprocessing":job.postprocessing,"result":job.course_notes_path})));
+        return Ok(Json(serde_json::json!({"status":status,"message":message,"job_id":job.id,"priority":job.priority,"steps":job.steps,"postprocessing":job.postprocessing,"billing_state":job.billing_state,"charged_units":job.charged_units,"billing_duration_seconds":job.billing_duration_seconds,"failure_code":job.failure_code,"result":if job.status==PipelineStatus::Succeeded {job.course_notes_path.clone()} else {None}})));
     }
     drop(jobs);
     let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
@@ -611,6 +611,7 @@ pub(super) async fn download_lesson_pdf(
 ) -> Result<impl IntoResponse, ApiError> {
     let lesson_mutex = state.lesson_mutation(current_user.id).await;
     let _guard = lesson_mutex.lock().await;
+    ensure_billed_delivery(&state,current_user.id,&course_id,Some(&video_id)).await?;
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
         ApiError::Internal("用户不存在".to_string())
@@ -767,6 +768,7 @@ async fn download_course_pdf(
 ) -> Result<impl IntoResponse, ApiError> {
     let lesson_mutex = state.lesson_mutation(current_user.id).await;
     let _guard = lesson_mutex.lock().await;
+    ensure_billed_delivery(&state,current_user.id,&course_id,None).await?;
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
         ApiError::Internal("用户不存在".to_string())
@@ -1010,6 +1012,7 @@ async fn download_lesson_tex(
 ) -> Result<impl IntoResponse, ApiError> {
     let lesson_mutex = state.lesson_mutation(current_user.id).await;
     let _guard = lesson_mutex.lock().await;
+    ensure_billed_delivery(&state,current_user.id,&course_id,Some(&video_id)).await?;
     let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
         tracing::error!("用户不存在: {}", current_user.id);
         ApiError::Internal("用户不存在".to_string())
@@ -1072,4 +1075,46 @@ async fn reprocess_lesson(
     crate::services::lesson_submission::submit_lesson_mode(
         state, current_user.id, course_id, video_id, None, true,
     ).await
+}
+
+// A course TeX may be physically installed before its final billing transaction.
+// Keep that new result private until the job and ledger have committed together.
+async fn ensure_billed_delivery(state:&AppState,user:Uuid,course:&str,lesson:Option<&str>)->Result<(),ApiError> {
+    let jobs=state.pkuvideo_jobs.read().await;
+    if jobs.values().any(|j|j.user_id==user && j.course_id.as_deref()==Some(course)
+        && lesson.is_none_or(|lesson|j.lesson_id.as_deref()==Some(lesson))
+        && j.course_notes_path.is_some() && j.billing_state.is_some()
+        && j.status!=PipelineStatus::Succeeded && j.billing_state.as_deref()!=Some("FAILED_NO_CHARGE")) {
+        return Err(ApiError::BadRequest("结果交付中，正在等待结算，请稍后重试".into()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod billing_delivery_tests {
+    use super::*;
+    use crate::{config::Settings,store::FileStore};
+    use std::sync::Arc;
+    #[tokio::test]
+    async fn installed_notes_remain_private_until_settlement() {
+        let temp=tempdir::TempDir::new("delivery-billing-gate").unwrap();
+        let settings:Settings=serde_json::from_value(serde_json::json!({
+            "server":{"address":"127.0.0.1","port":0},
+            "wechat":{"api_base_url":"","oauth_app_id":"","oauth_app_secret":"","redirect_uri":"","qr_bot_type":""},
+            "security":{"session_ttl_hours":1},"cors":{"allowed_origins":[],"allow_credentials":false},
+            "audioapi_paraformer":{},"llm_deepseek":{}
+        })).unwrap();
+        let state=AppState::new(settings,Arc::new(FileStore::new(temp.path().into()).await.unwrap()));
+        let user=Uuid::new_v4();let id=Uuid::new_v4();
+        let mut job=crate::services::pkuvideo::PkuVideoJob::new(id,user,"url".into(),"artifacts".into());
+        job.course_id=Some("course".into());job.lesson_id=Some("lesson".into());job.status=PipelineStatus::Running;
+        job.course_notes_path=Some("installed.tex".into());job.billing_state=Some("BILLING_PENDING".into());
+        state.pkuvideo_jobs.write().await.insert(id,job);
+        assert!(ensure_billed_delivery(&state,user,"course",Some("lesson")).await.is_err());
+        assert!(ensure_billed_delivery(&state,user,"course",None).await.is_err());
+        assert!(ensure_billed_delivery(&state,user,"course",Some("other")).await.is_ok());
+        assert!(ensure_billed_delivery(&state,Uuid::new_v4(),"course",None).await.is_ok());
+        state.pkuvideo_jobs.write().await.get_mut(&id).unwrap().status=PipelineStatus::Succeeded;
+        assert!(ensure_billed_delivery(&state,user,"course",None).await.is_ok());
+    }
 }

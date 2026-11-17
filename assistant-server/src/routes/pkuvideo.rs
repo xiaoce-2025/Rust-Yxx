@@ -202,7 +202,11 @@ fn public_job(job: &PkuVideoJob) -> serde_json::Value {
         "message":if step.status==PipelineStatus::Failed { "处理失败，请重试或联系管理员" } else { step.message.as_str() }
     })).collect();
     serde_json::json!({"id":job.id,"created_at":job.created_at,"updated_at":job.updated_at,
-        "status":job.status,"steps":steps,"error":job.error.as_ref().map(|_|"处理失败，请重试或联系管理员"),
+        "status":job.status,"steps":steps,"error":job.error.as_ref().map(|_| match job.failure_code.as_deref() {
+            Some("INSUFFICIENT_NOTE_CREDITS")=>"处理失败 · 额度不足：课堂笔记处理额度不足，请联系管理员添加额度",
+            Some("DURATION_UNAVAILABLE"|"BILLING_COMMIT_FAILED")=>"结果交付中，正在等待计费恢复",
+            _=>"处理失败，请重试或联系管理员"
+        }),"billing_state":job.billing_state,"charged_units":job.charged_units,"billing_duration_seconds":job.billing_duration_seconds,"failure_code":job.failure_code,
         "course_id":job.course_id,"lesson_id":job.lesson_id,"course_name":job.course_name,
         "course_date":job.course_date,"regenerate":job.regenerate,"priority":job.priority,
         "postprocessing":job.postprocessing,"started_at":job.started_at,"finished_at":job.finished_at,
@@ -319,11 +323,6 @@ async fn enqueue_job(
         return Err(ApiError::BadRequest("IAAA账号与注册邮箱学号不匹配，请检查".to_string()));
     }
     
-    // 检查用户限额
-    if user.processing_quota <= 0 {
-        return Err(ApiError::Forbidden("处理资源限额不足，请联系管理员".to_string()));
-    }
-
     // 检查储存资源限额
     if user.storage_quota <= 0 {
         return Err(ApiError::Forbidden("储存资源限额不足，请删除已完成的任务释放空间".to_string()));
@@ -331,9 +330,6 @@ async fn enqueue_job(
 
     let media = crate::services::prepared_media::prepare_teaching(&video_url, &pku_auth_one,
         &pku_auth_two, &state.login_cache, manual_key.as_deref()).await.map_err(ApiError::BadRequest)?;
-
-    // 扣除处理限额
-    state.store.decrease_processing_quota(user_id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     // 扣除储存资源限额
     state.store.decrease_storage_quota(user_id, 1).await.map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -348,11 +344,18 @@ async fn enqueue_job(
     state.pkuvideo_jobs.write().await.insert(job_id, job.clone());
     
     // 保存到FileStore
-    state.store.insert_pkuvideo_job(job).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    if let Err(error)=state.store.insert_pkuvideo_job(job).await {
+        state.pkuvideo_jobs.write().await.remove(&job_id);
+        let _=state.store.increase_storage_quota(user_id,1).await;
+        return Err(ApiError::Internal(error.to_string()));
+    }
 
     if let Err(error) = crate::services::video_jobs::enqueue_prepared_job(&state, job_id, user_id, media).await {
+        let _ = state.store.increase_storage_quota(user_id, 1).await;
         state.pkuvideo_jobs.write().await.remove(&job_id);
         let _ = state.store.delete_pkuvideo_job(job_id).await;
+        let _ = state.store.set_note_billing_state(job_id,"FAILED_NO_CHARGE",Some("ENQUEUE_FAILED")).await;
+        let _ = state.store.delete_sidecar(&PathBuf::from("note_billing_media").join(job_id.to_string())).await;
         return Err(ApiError::Internal(error));
     }
 

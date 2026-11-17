@@ -17,11 +17,50 @@ pub struct VideoTaskHandler {
 #[async_trait]
 impl TaskHandler for VideoTaskHandler {
     async fn process(&self, task: VideoTask) -> Result<(), String> {
+        // Keep the prepared media in a private DB sidecar for interrupted admission
+        // and missing-duration recovery. It is never included in public task JSON.
+        let path=PathBuf::from("note_billing_media").join(task.id.to_string());
+        self.state.store.save_sidecar(&path,&serde_json::to_string(&task.media).map_err(|e|e.to_string())?).await
+            .map_err(|e|format!("BILLING_SYSTEM_UNAVAILABLE: {e}"))?;
+        match self.state.store.check_note_start(task.id,task.user_id).await {
+            Ok(true) => {},
+            Ok(false) => return Err(format!("{}: {}",crate::store::note_billing::INSUFFICIENT,crate::store::note_billing::INSUFFICIENT_MESSAGE)),
+            Err(error) => return Err(format!("BILLING_SYSTEM_UNAVAILABLE: {error}")),
+        }
         run_prepared_job(self.state.clone(), task.id, task.user_id, task.media).await
     }
     async fn completed(&self, event: CompletionEvent) -> Result<(), String> {
         event.result?;
         let user_id = event.user_id;
+        let mut snapshot=self.state.pkuvideo_jobs.read().await.get(&event.task_id).cloned().ok_or("任务不存在")?;
+        if snapshot.user_id != user_id { return Err("任务完成通知用户不匹配".into()); }
+        if snapshot.status == PipelineStatus::Succeeded { return Ok(()); }
+        // Legacy interrupted deliveries predate billing and must never be charged retroactively.
+        let billable=match self.state.store.note_billing_state(event.task_id).await {
+            Ok(state)=>state.is_some(),
+            Err(error)=> {
+                tracing::error!(task_id=%snapshot.id,%error,"读取结算状态失败");
+                return billing_pending(&self.state,snapshot,"BILLING_COMMIT_FAILED").await;
+            }
+        };
+        if billable {
+            snapshot.billing_duration_seconds=snapshot.billing_duration_seconds.filter(|s|*s>0);
+            if snapshot.billing_duration_seconds.is_none() {
+                snapshot.billing_duration_seconds=resolve_duration(&self.state,&snapshot).await;
+            }
+            if snapshot.billing_duration_seconds.is_none() {
+                return billing_pending(&self.state,snapshot,"DURATION_UNAVAILABLE").await;
+            }
+            // A private delivery must be readable before any installation or charge.
+            let path=self.state.store.user_tex_path(user_id,event.task_id);
+            let bytes=tokio::fs::read(path).await.map_err(|e|format!("交付副本不可读: {e}"))?;
+            if Some(crate::store::tex_hash(&bytes))!=snapshot.result_tex_sha256 { return Err("交付副本校验失败".into()); }
+            if let Err(error)=self.state.store.update_pkuvideo_job(snapshot.clone()).await {
+                tracing::error!(task_id=%snapshot.id,%error,"保存交付计费信息失败");
+                return billing_pending(&self.state,snapshot,"BILLING_COMMIT_FAILED").await;
+            }
+            self.state.pkuvideo_jobs.write().await.insert(snapshot.id,snapshot.clone());
+        }
         match event.target {
             CompletionTarget::None => {
                 let job = self
@@ -33,10 +72,10 @@ impl TaskHandler for VideoTaskHandler {
                     .cloned()
                     .ok_or("任务不存在")?;
                 if let (Some(key), Some(hash)) = (&job.url_key, &job.result_tex_sha256) {
-                    self.state
-                        .store
-                        .set_standalone_initial_hash(user_id, key, hash)
-                        .await?;
+                    if let Err(error)=self.state.store.set_standalone_initial_hash(user_id,key,hash).await {
+                        if billable {return billing_pending(&self.state,snapshot,"BILLING_COMMIT_FAILED").await;}
+                        return Err(error);
+                    }
                 }
             }
             CompletionTarget::CourseLesson {
@@ -44,33 +83,35 @@ impl TaskHandler for VideoTaskHandler {
                 course_id,
                 lesson_id,
             } => {
-                super::course_processing::complete_lesson(
-                    &self.state,
-                    event.task_id,
-                    event.user_id,
-                    &username,
-                    &course_id,
-                    &lesson_id,
-                )
-                .await
-                .map_err(|error| format!("课节后处理失败: {error}"))?;
+                if snapshot.course_notes_path.is_none() {
+                    if let Err(error)=super::course_processing::complete_lesson(&self.state,event.task_id,event.user_id,&username,&course_id,&lesson_id).await {
+                        if billable && error.starts_with("BILLING_DELIVERY_COMMIT_FAILED") {
+                            let current=self.state.pkuvideo_jobs.read().await.get(&event.task_id).cloned().ok_or("任务不存在")?;
+                            return billing_pending(&self.state,current,"BILLING_COMMIT_FAILED").await;
+                        }
+                        return Err(format!("课节后处理失败: {error}"));
+                    }
+                }
             }
         }
-        let mut jobs = self.state.pkuvideo_jobs.write().await;
-        let job = jobs.get_mut(&event.task_id).ok_or("任务不存在")?;
-        job.status = PipelineStatus::Succeeded;
-        job.error = None;
-        job.postprocessing = false;
-        job.updated_at = Utc::now();
-        job.finished_at = Some(Utc::now());
-        self.state
-            .store
-            .update_pkuvideo_job(job.clone())
-            .await
-            .map_err(|e| e.to_string())?;
-        let artifacts = job.artifacts_dir.clone();
-        let installed_course = job.course_id.is_some();
-        drop(jobs);
+        let mut job = self.state.pkuvideo_jobs.read().await.get(&event.task_id).cloned().ok_or("任务不存在")?;
+        if billable {
+            match self.state.store.charge_note_job(job.clone(),snapshot.billing_duration_seconds.unwrap()).await {
+                Ok(charged) => job=charged,
+                Err(error) => {
+                    tracing::error!(task_id=%job.id,%error,"结算待恢复");
+                    return billing_pending(&self.state,job,"BILLING_COMMIT_FAILED").await;
+                }
+            }
+        } else {
+            job.status=PipelineStatus::Succeeded; job.error=None;job.postprocessing=false;
+            job.updated_at=Utc::now();job.finished_at=Some(Utc::now());
+            self.state.store.update_pkuvideo_job(job.clone()).await.map_err(|e|e.to_string())?;
+        }
+        let _=self.state.store.delete_sidecar(&PathBuf::from("note_billing_media").join(job.id.to_string())).await;
+        let artifacts=job.artifacts_dir.clone();
+        let installed_course=job.course_id.is_some();
+        self.state.pkuvideo_jobs.write().await.insert(job.id,job);
         if installed_course {
             // The course copy is now committed; the delivery snapshot is no longer needed.
             let _ = tokio::fs::remove_file(self.state.store.user_tex_path(user_id, event.task_id)).await;
@@ -83,6 +124,23 @@ impl TaskHandler for VideoTaskHandler {
         Ok(())
     }
     async fn failed(&self, task_id: Uuid, error: String) {
+        if self.state.pkuvideo_jobs.read().await.get(&task_id).is_some_and(|j|j.billing_state.as_deref()==Some("BILLING_PENDING")) { return; }
+        if error.starts_with("BILLING_SYSTEM_UNAVAILABLE") {
+            let mut jobs=self.state.pkuvideo_jobs.write().await;
+            if let Some(job)=jobs.get_mut(&task_id) {
+                job.status=PipelineStatus::Pending;job.billing_state=Some("QUEUED".into());
+                job.failure_code=Some("BILLING_SYSTEM_UNAVAILABLE".into());job.error=Some("计费服务暂时不可用，等待重试".into());
+                let _=self.state.store.update_pkuvideo_job(job.clone()).await;
+            }
+            return;
+        }
+        let billable=match self.state.store.note_billing_state(task_id).await {
+            Ok(Some(state)) if state=="CHARGED" || state=="BILLING_PENDING" => return,
+            Err(error) => { tracing::error!(%task_id,%error,"无法确认结算状态，保留任务等待恢复"); return; }
+            Ok(state)=>state.is_some(),
+        };
+        let insufficient=error.starts_with(crate::store::note_billing::INSUFFICIENT);
+        let _=self.state.store.set_note_billing_state(task_id,"FAILED_NO_CHARGE",Some(if insufficient {crate::store::note_billing::INSUFFICIENT} else {"PROCESSING_FAILED"})).await;
         let mut jobs = self.state.pkuvideo_jobs.write().await;
         if let Some(job) = jobs.get_mut(&task_id) {
             for step in job
@@ -94,13 +152,19 @@ impl TaskHandler for VideoTaskHandler {
                 step.message = error.clone();
                 step.finished_at = Some(Utc::now());
             }
+            if job.status == PipelineStatus::Succeeded { return; }
+            job.billing_state=Some(if insufficient {"REJECTED_INSUFFICIENT"} else {"FAILED_NO_CHARGE"}.into());
+            job.failure_code=Some(if insufficient {crate::store::note_billing::INSUFFICIENT} else {"PROCESSING_FAILED"}.into());
             job.status = PipelineStatus::Failed;
-            job.postprocessing = job.result_tex_sha256.is_some();
+            job.postprocessing = job.result_tex_sha256.is_some() && !billable;
             job.error = Some(error);
             job.updated_at = Utc::now();
             job.finished_at = Some(Utc::now());
             if let Err(error) = self.state.store.update_pkuvideo_job(job.clone()).await {
                 tracing::error!(%task_id,error=%error,"保存任务失败状态失败");
+            }
+            if let Some(saved)=self.state.store.get_pkuvideo_job(task_id).await {
+                if saved.status==PipelineStatus::Succeeded {*job=saved;}
             }
         }
     }
@@ -115,6 +179,11 @@ pub async fn enqueue_prepared_job(
 ) -> Result<Uuid, String> {
     let user = state.store.get_user(user_id).await.ok_or("用户不存在")?;
     let priority = user.processing_priority;
+    if state.pkuvideo_jobs.read().await.get(&job_id).is_none_or(|job|job.user_id!=user_id) {
+        return Err("任务不存在或无权提交".into());
+    }
+    state.store.queue_note_billing(job_id,user_id).await.map_err(|e|e.to_string())?;
+    state.store.save_sidecar(&PathBuf::from("note_billing_media").join(job_id.to_string()),&serde_json::to_string(&media).map_err(|e|e.to_string())?).await?;
     let task = {
         let mut jobs = state.pkuvideo_jobs.write().await;
         let job = jobs.get_mut(&job_id).ok_or("任务不存在")?;
@@ -122,6 +191,7 @@ pub async fn enqueue_prepared_job(
             return Err("无权提交此任务".into());
         }
         job.priority = priority;
+        job.billing_state=Some("QUEUED".into());
         job.video_url = media.url.clone();
         job.url_key = Some(crate::store::tex_hash(media.url.as_bytes()));
         if job.share_cache {
@@ -233,6 +303,19 @@ where
         cache.as_ref().map(|(e, _)| e.tex_sha256.as_str()),
     ) {
         let (entry, bytes) = cache.unwrap();
+        let seconds=match entry.video_duration_seconds.filter(|s|*s>0) {
+            Some(seconds)=>Some(seconds),
+            None=> {
+                let path=PathBuf::from(&job.artifacts_dir).join("duration_probe.mp4");
+                let _=tokio::fs::create_dir_all(&job.artifacts_dir).await;
+                match super::pkuvideo::download_prepared(&media,&path,state.settings.pkuvideo.m3u8_concurrency,state.settings.pkuvideo.m3u8_segment_timeout_seconds,None).await {
+                    Ok(())=>probe_duration(&path).await,
+                    Err(error)=>{ tracing::warn!(%job_id,%error,"历史缓存时长补录失败");None }
+                }
+            }
+        };
+        save_duration(&state,job_id,seconds).await?;
+        if let Some(seconds)=seconds { state.store.set_tex_duration(&key,seconds).await.map_err(|e|e.to_string())?; }
         persist_delivery(&state, job_id, &bytes, Some(&entry), "cache_hit").await?;
         state
             .store
@@ -253,10 +336,12 @@ where
         .get(&job_id)
         .map(|job| PathBuf::from(&job.artifacts_dir))
         .ok_or("任务不存在")?;
-    let result = generate(job_dir, merged_settings, media).await;
+    let result = generate(job_dir.clone(), merged_settings, media).await;
 
     match result {
         Ok((transcript_path, notes_path, pdf_path)) => {
+            let seconds=probe_duration(&job_dir.join("video.mp4")).await;
+            save_duration(&state,job_id,seconds).await?;
             mark_step_success(&state, job_id, 0, "视频下载完成").await;
             mark_step_success(&state, job_id, 1, "mp3 抽离完成").await;
             mark_step_success(&state, job_id, 2, "语音转文字完成").await;
@@ -287,6 +372,9 @@ where
             } else {
                 None
             };
+            if let (Some(entry),Some(seconds))=(&published,seconds) {
+                state.store.set_tex_duration(&entry.url_key,seconds).await.map_err(|e|e.to_string())?;
+            }
             persist_delivery(&state, job_id, &bytes, published.as_ref(), source).await?;
             Ok(())
         }
@@ -412,8 +500,11 @@ pub(crate) fn merge_with_user_config(
 }
 
 async fn mark_job_running(state: &AppState, job_id: Uuid) {
+    let billing=state.store.note_billing_state(job_id).await.ok().flatten();
     let mut jobs = state.pkuvideo_jobs.write().await;
     if let Some(job) = jobs.get_mut(&job_id) {
+        job.billing_state=billing;
+        job.failure_code=None;job.error=None;
         job.status = PipelineStatus::Running;
         job.started_at = Some(Utc::now());
         job.updated_at = Utc::now();
@@ -643,6 +734,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_cache_and_regeneration_charge_after_delivery_once() {
+        let temp=tempdir::TempDir::new("billing-worker-cache").unwrap();
+        let state=state(temp.path()).await;
+        let (user,name,_cleanup)=cache_user(&state).await;
+        let key=crate::store::tex_hash(b"https://classroom.invalid/video?identity=exact");
+        state.store.publish_tex(&key,b"\\section{Billing cached}",Uuid::new_v4()).await.unwrap();
+        state.store.set_tex_duration(&key,3601).await.unwrap();
+        for (regenerate,expected_balance) in [(false,8),(true,6)] {
+            if regenerate {
+                state.store.publish_tex(&key,b"\\section{New cached version}",Uuid::new_v4()).await.unwrap();
+            }
+            let id=cache_job(&state,user,regenerate).await;
+            let handler=VideoTaskHandler{state:state.clone()};
+            let target=CompletionTarget::CourseLesson{username:name.clone(),course_id:"course".into(),lesson_id:"lesson".into()};
+            handler.process(VideoTask{id,user_id:user,priority:5,submitted_at:Utc::now(),media:PreparedMedia{url:"https://classroom.invalid/video?identity=exact".into(),enc_key:None},completion:target.clone()}).await.unwrap();
+            assert_eq!(state.store.note_balance(user).await.unwrap(),expected_balance+2);
+            for _ in 0..3 {handler.completed(CompletionEvent{task_id:id,user_id:user,target:target.clone(),result:Ok(())}).await.unwrap();}
+            let job=state.store.get_pkuvideo_job(id).await.unwrap();
+            assert_eq!(job.status,PipelineStatus::Succeeded);assert_eq!(job.charged_units,2);assert_eq!(job.result_source.as_deref(),Some("cache_hit"));
+            assert_eq!(state.store.note_balance(user).await.unwrap(),expected_balance);
+            handler.failed(id,"late failure".into()).await;
+            assert_eq!(state.store.get_pkuvideo_job(id).await.unwrap().status,PipelineStatus::Succeeded);
+        }
+    }
+    #[tokio::test]
+    async fn missing_duration_waits_without_installing_and_recovers_once() {
+        let temp=tempdir::TempDir::new("billing-duration-recovery").unwrap();
+        let state=state(temp.path()).await;
+        let (user,name,_cleanup)=cache_user(&state).await;
+        let id=cache_job(&state,user,false).await;
+        state.store.queue_note_billing(id,user).await.unwrap();
+        assert!(state.store.check_note_start(id,user).await.unwrap());
+        persist_delivery(&state,id,b"\\section{Private pending result}",None,"generated").await.unwrap();
+        let handler=VideoTaskHandler{state:state.clone()};
+        handler.completed(CompletionEvent{task_id:id,user_id:user,target:CompletionTarget::CourseLesson{username:name.clone(),course_id:"course".into(),lesson_id:"lesson".into()},result:Ok(())}).await.unwrap();
+        let pending=state.store.get_pkuvideo_job(id).await.unwrap();
+        assert_eq!(pending.billing_state.as_deref(),Some("BILLING_PENDING"));assert_eq!(pending.failure_code.as_deref(),Some("DURATION_UNAVAILABLE"));
+        assert_eq!(state.store.note_balance(user).await.unwrap(),10);
+        assert!(!lesson_storage::load_lessons(&state.store,&name,"course").await.unwrap()[0].is_processed);
+        save_duration(&state,id,Some(3601)).await.unwrap();
+        retry_pending_billing(&state).await;
+        retry_pending_billing(&state).await;
+        assert_eq!(state.store.note_balance(user).await.unwrap(),8);
+        assert_eq!(state.store.get_pkuvideo_job(id).await.unwrap().status,PipelineStatus::Succeeded);
+        assert!(installed(&state,&name).await.0.contains("Private pending result"));
+    }
+    #[tokio::test]
+    async fn worker_rejects_zero_and_negative_before_cache_or_pipeline() {
+        let temp=tempdir::TempDir::new("billing-worker-rejection").unwrap();
+        let state=state(temp.path()).await;
+        for balance in [0,-1] {
+            let user=Uuid::new_v4();
+            state.store.insert_user(crate::store::FileUser{id:user,username:user.to_string(),email:format!("{user}@example.invalid"),password_hash:String::new(),is_active:true,created_at:Utc::now(),updated_at:Utc::now(),storage_quota:3,processing_quota:balance,processing_priority:5,iaaa_encrypted_password:None,iaaa_public_key:None}).await.unwrap();
+            let id=Uuid::new_v4();
+            let mut job=super::super::pkuvideo::PkuVideoJob::new(id,user,"https://example.invalid/unreachable".into(),temp.path().join(id.to_string()).to_string_lossy().into());job.share_cache=true;
+            state.store.insert_pkuvideo_job(job.clone()).await.unwrap();state.pkuvideo_jobs.write().await.insert(id,job);
+            let handler=VideoTaskHandler{state:state.clone()};
+            let error=handler.process(VideoTask{id,user_id:user,priority:5,submitted_at:Utc::now(),media:PreparedMedia{url:"https://example.invalid/unreachable".into(),enc_key:None},completion:CompletionTarget::None}).await.unwrap_err();
+            assert!(error.starts_with(crate::store::note_billing::INSUFFICIENT));
+            handler.failed(id,error).await;
+            assert_eq!(state.store.get_pkuvideo_job(id).await.unwrap().failure_code.as_deref(),Some(crate::store::note_billing::INSUFFICIENT));
+            assert_eq!(state.store.note_balance(user).await.unwrap(),balance);
+        }
+    }
+
+    #[tokio::test]
     async fn cross_account_cache_regeneration_edits_failure_and_old_index() {
         let temp = tempdir::TempDir::new("cross-account-cache").unwrap();
         let state = state(temp.path()).await;
@@ -848,5 +1005,84 @@ mod tests {
         assert!(!persisted.postprocessing);
         assert!(artifacts.exists());
         assert!(!state.lesson_busy(user, "course", "lesson").await);
+    }
+}
+
+
+async fn probe_duration(path: &std::path::Path) -> Option<i64> {
+    let output=tokio::time::timeout(std::time::Duration::from_secs(30),tokio::process::Command::new("ffprobe")
+        .args(["-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1"])
+        .arg(path).kill_on_drop(true).output()).await.ok()?.ok()?;
+    if !output.status.success() { return None; }
+    crate::store::note_billing::duration_seconds(&String::from_utf8(output.stdout).ok()?).ok()
+}
+async fn save_duration(state:&AppState,id:Uuid,seconds:Option<i64>)->Result<(),String> {
+    let mut jobs=state.pkuvideo_jobs.write().await;
+    let job=jobs.get_mut(&id).ok_or("任务不存在")?;
+    job.billing_duration_seconds=seconds;
+    state.store.update_pkuvideo_job(job.clone()).await.map_err(|e|e.to_string())
+}
+async fn resolve_duration(state:&AppState,job:&super::pkuvideo::PkuVideoJob)->Option<i64> {
+    if let Some(key)=&job.url_key {
+        if let Ok(Some((entry,_)))=state.store.verified_tex(key).await {
+            if let Some(seconds)=entry.video_duration_seconds.filter(|s|*s>0) {return Some(seconds);}
+        }
+    }
+    for filename in ["video.mp4","audio.mp3","duration_probe.mp4"] {
+        if let Some(seconds)=probe_duration(&PathBuf::from(&job.artifacts_dir).join(filename)).await {return Some(seconds);}
+    }
+    let media:Option<PreparedMedia>=state.store.load_sidecar(&PathBuf::from("note_billing_media").join(job.id.to_string())).await.ok().flatten();
+    if let Some(media)=media {
+        let path=PathBuf::from(&job.artifacts_dir).join("duration_probe.mp4");
+        let _=tokio::fs::create_dir_all(&job.artifacts_dir).await;
+        if super::pkuvideo::download_prepared(&media,&path,state.settings.pkuvideo.m3u8_concurrency,state.settings.pkuvideo.m3u8_segment_timeout_seconds,None).await.is_ok() {
+            if let Some(seconds)=probe_duration(&path).await {
+                if job.share_cache {if let Some(key)=&job.url_key {let _=state.store.set_tex_duration(key,seconds).await;}}
+                return Some(seconds);
+            }
+        }
+    }
+    None
+}
+async fn billing_pending(state:&AppState,mut job:super::pkuvideo::PkuVideoJob,code:&str)->Result<(),String> {
+    job.status=PipelineStatus::Running; job.postprocessing=true;job.billing_state=Some("BILLING_PENDING".into());
+    job.failure_code=Some(code.into());job.error=Some("结果交付中，正在等待计费恢复".into());job.updated_at=Utc::now();job.finished_at=None;
+    // Keep the private snapshot even when the database is temporarily unavailable.
+    state.pkuvideo_jobs.write().await.insert(job.id,job.clone());
+    state.store.set_note_billing_state(job.id,"BILLING_PENDING",Some(code)).await.map_err(|e|e.to_string())?;
+    state.store.update_pkuvideo_job(job).await.map_err(|e|e.to_string())
+}
+
+pub async fn retry_pending_billing(state:&AppState) {
+    let jobs:Vec<_>=state.pkuvideo_jobs.read().await.values().filter(|j|j.billing_state.as_deref()==Some("BILLING_PENDING") || j.failure_code.as_deref()==Some("BILLING_SYSTEM_UNAVAILABLE")).cloned().collect();
+    let handler=VideoTaskHandler{state:state.clone()};
+    for job in jobs {
+        if job.failure_code.as_deref()==Some("BILLING_SYSTEM_UNAVAILABLE") {
+            if let Ok(Some(media))=state.store.load_sidecar::<PreparedMedia>(&PathBuf::from("note_billing_media").join(job.id.to_string())).await {
+                let _=enqueue_prepared_job(state,job.id,job.user_id,media).await;
+            }
+            continue;
+        }
+        let superseded=state.pkuvideo_jobs.read().await.values().any(|newer| newer.user_id==job.user_id && newer.created_at>job.created_at && newer.status==PipelineStatus::Succeeded && match (&job.course_id,&job.lesson_id) {
+            (Some(course),Some(lesson))=>newer.course_id.as_ref()==Some(course)&&newer.lesson_id.as_ref()==Some(lesson),
+            _=>newer.course_id.is_none()&&newer.url_key==job.url_key,
+        });
+        if superseded && job.course_notes_path.is_none() {
+            let _=state.store.set_note_billing_state(job.id,"FAILED_NO_CHARGE",Some("DELIVERY_SUPERSEDED")).await;
+            let mut cancelled=job.clone();cancelled.status=PipelineStatus::Failed;cancelled.postprocessing=false;cancelled.billing_state=Some("FAILED_NO_CHARGE".into());cancelled.failure_code=Some("DELIVERY_SUPERSEDED".into());cancelled.error=Some("后续任务已交付新版笔记，取消旧结果恢复".into());
+            let _=state.store.update_pkuvideo_job(cancelled.clone()).await;
+            state.pkuvideo_jobs.write().await.insert(cancelled.id,cancelled);
+            continue;
+        }
+        let target=match (&job.course_id,&job.lesson_id) {
+            (Some(course),Some(lesson))=> {
+                let Some(user)=state.store.get_user(job.user_id).await else {continue;};
+                CompletionTarget::CourseLesson{username:user.email.split('@').next().unwrap_or_default().into(),course_id:course.clone(),lesson_id:lesson.clone()}
+            },
+            _=>CompletionTarget::None,
+        };
+        if let Err(error)=handler.completed(CompletionEvent{task_id:job.id,user_id:job.user_id,target,result:Ok(())}).await {
+            tracing::warn!(task_id=%job.id,%error,"计费恢复稍后重试");
+        }
     }
 }

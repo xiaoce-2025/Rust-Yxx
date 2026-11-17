@@ -58,6 +58,9 @@
         <p id="account-status" role="status"></p>
       </section>
       <section>
+        <h2>笔记处理额度</h2>
+        <p id="account-note-credits">—</p>
+        <p>成功生成或复用笔记后按视频时长向上取整扣除小时额度。额度不足请联系管理员添加。</p>
         <h2>账户优先级</h2>
         <p id="account-priority" class="priority">—</p>
         <p>课堂笔记任务排队时，数值越小越优先。优先级由系统管理。</p>
@@ -117,6 +120,7 @@
       document.getElementById('account-email').textContent = account.email || '未设置';
       document.getElementById('account-created').textContent = new Date(account.created_at).toLocaleDateString('zh-CN');
       document.getElementById('account-priority').textContent = account.processing_priority;
+      document.getElementById('account-note-credits').textContent = `${account.processing_quota} 小时`;
     });
 
     const form = document.getElementById('api-form');

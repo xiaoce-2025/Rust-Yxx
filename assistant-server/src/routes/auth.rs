@@ -56,7 +56,7 @@ struct CurrentUserResponse {
     username: String,
     email: String,
     storage_quota: i32,
-    processing_quota: i32,
+    processing_quota: i64,
     processing_priority: u32,
     created_at: chrono::DateTime<Utc>,
 }

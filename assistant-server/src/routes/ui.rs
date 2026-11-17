@@ -55,6 +55,9 @@ pub fn routes(state: AppState) -> Router<AppState> {
                 include_bytes!("../../assest/course-replay-hero-v3.webp").as_slice())
         }))
         .route("/chat", get(app_page))
+        .route("/note-credits.js", get(||async {
+            ([(axum::http::header::CONTENT_TYPE,"text/javascript; charset=utf-8"),(CACHE_CONTROL,"no-store")],include_str!("../../templates/note-credits.js"))
+        }))
         .route("/pkuvideo", get(pkuvideo_page))
         .route("/pkuvideofullclass", get(pkuvideofullclass_page))
         .route("/pkuvideo_fullclass", get(pkuvideofullclass_page))

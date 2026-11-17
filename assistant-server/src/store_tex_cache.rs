@@ -22,6 +22,8 @@ pub struct GlobalTexEntry {
     pub url_key: String,
     pub tex_path: String,
     pub tex_sha256: String,
+    #[serde(default)]
+    pub video_duration_seconds: Option<i64>,
     pub revision: i64,
     pub source_job_id: String,
     pub created_at: String,
@@ -102,9 +104,9 @@ impl FileStore {
         let path = self.cache_path(&entry.url_key)?;
         atomic_tex(&path, bytes)?;
         let mut tx = self.db.begin().await?;
-        sqlx::query("INSERT INTO global_tex_cache (url_key,tex_path,tex_sha256,revision,source_job_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(url_key) DO UPDATE SET tex_path=excluded.tex_path,tex_sha256=excluded.tex_sha256,revision=excluded.revision,source_job_id=excluded.source_job_id,updated_at=excluded.updated_at")
+        sqlx::query("INSERT INTO global_tex_cache (url_key,tex_path,tex_sha256,revision,source_job_id,created_at,updated_at,video_duration_seconds) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(url_key) DO UPDATE SET tex_path=excluded.tex_path,tex_sha256=excluded.tex_sha256,revision=excluded.revision,source_job_id=excluded.source_job_id,updated_at=excluded.updated_at,video_duration_seconds=COALESCE(excluded.video_duration_seconds,global_tex_cache.video_duration_seconds)")
             .bind(&entry.url_key).bind(&entry.tex_path).bind(&entry.tex_sha256).bind(entry.revision)
-            .bind(&entry.source_job_id).bind(&entry.created_at).bind(&entry.updated_at).execute(&mut *tx).await?;
+            .bind(&entry.source_job_id).bind(&entry.created_at).bind(&entry.updated_at).bind(entry.video_duration_seconds).execute(&mut *tx).await?;
         sqlx::query("DELETE FROM global_tex_publications WHERE url_key=?")
             .bind(&entry.url_key)
             .execute(&mut *tx)
@@ -151,6 +153,7 @@ impl FileStore {
             url_key: key.into(),
             tex_path: row.get("tex_path"),
             tex_sha256: row.get("tex_sha256"),
+            video_duration_seconds: row.get("video_duration_seconds"),
             revision: row.get("revision"),
             source_job_id: row.get("source_job_id"),
             created_at: row.get("created_at"),
@@ -183,6 +186,7 @@ impl FileStore {
             .await?;
         let now = chrono::Utc::now().to_rfc3339();
         let entry = GlobalTexEntry {
+            video_duration_seconds: None,
             url_key: key.into(),
             tex_path: self.cache_path(key)?.to_string_lossy().into(),
             tex_sha256: tex_hash(bytes),
@@ -355,5 +359,14 @@ mod tests {
         drop(store);
         let store = FileStore::new(dir.path().into()).await.unwrap();
         assert_eq!(store.verified_tex(&key).await.unwrap().unwrap().1, h2);
+    }
+}
+
+impl FileStore {
+    pub async fn set_tex_duration(&self, key: &str, seconds: i64) -> Result<(), StoreError> {
+        super::note_billing::cost_units(seconds)?;
+        sqlx::query("UPDATE global_tex_cache SET video_duration_seconds=? WHERE url_key=?")
+            .bind(seconds).bind(key).execute(&self.db).await?;
+        Ok(())
     }
 }

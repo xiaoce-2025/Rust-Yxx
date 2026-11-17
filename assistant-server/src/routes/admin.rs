@@ -26,6 +26,8 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/admin/", get(page))
         .route("/api/admin/data", get(management_data))
         .route("/api/admin/users/:id", post(update_user))
+        .route("/api/admin/users/:id/note-credits/grant",post(grant_note_credits))
+        .route("/api/admin/users/:id/note-credits/ledger",get(note_credit_ledger))
         .route("/api/admin/users/:id/revoke-sessions", post(revoke_sessions))
         .route("/api/admin/whitelist", post(save_whitelist))
         .route("/api/admin/ta-ai", get(ta_ai::get).post(ta_ai::save))
@@ -84,7 +86,7 @@ async fn management_data(State(state): State<AppState>, current: CurrentUser) ->
     // Deliberately project only operational metadata: no credentials, URLs or file paths.
     let mut jobs = Vec::new();
     for job in state.store.get_all_pkuvideo_jobs().await.values() {
-        jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"notes","course_name":job.course_name,"course_date":job.course_date,"regenerate":job.regenerate,"result_source":job.result_source,"url_key":job.url_key,"status":job.status,"created_at":job.created_at,"updated_at":job.updated_at}));
+        jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"notes","course_name":job.course_name,"course_date":job.course_date,"regenerate":job.regenerate,"result_source":job.result_source,"url_key":job.url_key,"status":job.status,"created_at":job.created_at,"updated_at":job.updated_at,"billing_state":job.billing_state,"charged_units":job.charged_units,"billing_duration_seconds":job.billing_duration_seconds,"failure_code":job.failure_code}));
     }
     for job in state.store.get_all_pkuvideo_fw_jobs().await.values() {
         jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"replay","status":job.status,"created_at":job.created_at,"updated_at":job.updated_at}));
@@ -101,17 +103,35 @@ async fn management_data(State(state): State<AppState>, current: CurrentUser) ->
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UserUpdate { is_active: bool, storage_quota: i32, processing_quota: i32, processing_priority: u32 }
+struct UserUpdate { is_active: bool, storage_quota: i32, #[serde(default)] processing_quota: Option<i64>, processing_priority: u32 }
 
 async fn update_user(State(state): State<AppState>, Path(id): Path<Uuid>, Json(input): Json<UserUpdate>) -> Result<Json<Value>, ApiError> {
     if !input.is_active && state.settings.admin.user_ids.contains(&id) {
         return Err(ApiError::BadRequest("不能停用管理员账户，请先在服务配置中移除其管理员权限".into()));
     }
-    if input.storage_quota < 0 || input.processing_quota < 0 || !(1..=100).contains(&input.processing_priority) {
+    if input.storage_quota < 0 || !(1..=100).contains(&input.processing_priority) {
         return Err(ApiError::BadRequest("配额必须为非负整数，优先级范围为 1–100".into()));
     }
-    state.store.admin_update_user(id, input.is_active, input.storage_quota, input.processing_quota, input.processing_priority).await?;
+    state.store.admin_update_user(id, input.is_active, input.storage_quota, input.processing_quota.unwrap_or(0), input.processing_priority).await?;
     Ok(Json(json!({"success":true})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreditGrant { amount:i64, reason:String, idempotency_key:String }
+async fn grant_note_credits(State(state):State<AppState>,current:CurrentUser,Path(id):Path<Uuid>,Json(input):Json<CreditGrant>)->Result<Json<Value>,ApiError> {
+    if input.amount<=0 || input.reason.trim().is_empty() || input.reason.len()>1000 || input.idempotency_key.is_empty() || input.idempotency_key.len()>128 {
+        return Err(ApiError::BadRequest("请填写正整数额度、备注和幂等标识".into()));
+    }
+    state.store.get_user(id).await.ok_or(ApiError::NotFound)?;
+    let value=state.store.grant_note_credits(id,current.id,input.amount,&input.reason,&input.idempotency_key).await.map_err(|e| {
+        if matches!(e.to_string().as_str(),"Overflow"|"IdempotencyConflict"|"InvalidGrant") {ApiError::BadRequest(e.to_string())} else {ApiError::Internal(e.to_string())}
+    })?;
+    Ok(Json(value))
+}
+async fn note_credit_ledger(State(state):State<AppState>,Path(id):Path<Uuid>,axum::extract::Query(query):axum::extract::Query<super::note_credits::LedgerQuery>)->Result<Json<Value>,ApiError> {
+    state.store.get_user(id).await.ok_or(ApiError::NotFound)?;
+    Ok(Json(state.store.note_ledger(id,query.limit.unwrap_or(30),query.cursor.as_deref()).await.map_err(|e|ApiError::Internal(e.to_string()))?))
 }
 
 async fn revoke_sessions(State(state): State<AppState>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
@@ -266,9 +286,33 @@ mod tests {
         assert!(restored.last_logins().await.unwrap().contains_key(&member.to_string()));
         assert_eq!(restored.load_sidecar::<crate::services::ta_ai::Annotation>(std::path::Path::new(crate::services::ta_ai::ANNOTATION_PATH)).await.unwrap().unwrap().format,"AI: {model} / {mode}");
         let user = restored.get_user(member).await.unwrap();
-        assert_eq!((user.storage_quota,user.processing_quota,user.processing_priority),(9,8,2));
+        assert_eq!((user.storage_quota,user.processing_quota,user.processing_priority),(9,1,2));
         assert_eq!(restored.admin_whitelist().await,vec!["second@example.com"]);
         assert!(restored.get_session(tokens[1]).await.is_none());
+        // Credit endpoints use the current identity; grants require both admin and CSRF checks.
+        store.insert_session(FileUserSession {session_id:tokens[1],user_id:member,expires_at:Utc::now()+Duration::hours(1),created_at:Utc::now(),user_agent:None,ip_address:None}).await.unwrap();
+        let credit_url=format!("{base}/api/note-credits/me");
+        assert_eq!(client.get(&credit_url).send().await.unwrap().status(),401);
+        let balance=client.get(&credit_url).bearer_auth(tokens[1]).send().await.unwrap();
+        assert_eq!(balance.headers()[CACHE_CONTROL],"no-store");
+        assert_eq!(balance.json::<Value>().await.unwrap()["balance"],1);
+        let grant_url=format!("{url}/note-credits/grant");
+        let grant=json!({"amount":10,"reason":"test grant","idempotency_key":"api-retry"});
+        assert_eq!(client.post(&grant_url).bearer_auth(tokens[1]).header("x-admin-request","1").json(&grant).send().await.unwrap().status(),403);
+        assert_eq!(client.post(&grant_url).bearer_auth(tokens[0]).json(&grant).send().await.unwrap().status(),403);
+        for _ in 0..3 {
+            let result:Value=client.post(&grant_url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&grant).send().await.unwrap().json().await.unwrap();
+            assert_eq!(result["balance_before"],1);assert_eq!(result["balance_after"],11);
+        }
+        let invalid_grant=json!({"amount":0,"reason":"invalid","idempotency_key":"invalid"});
+        assert_eq!(client.post(&grant_url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&invalid_grant).send().await.unwrap().status(),400);
+        assert_eq!(client.get(format!("{url}/note-credits/ledger")).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
+        let ledger:Value=client.get(format!("{base}/api/note-credits/ledger?user_id={admin}")).bearer_auth(tokens[1]).send().await.unwrap().json().await.unwrap();
+        assert_eq!(ledger["entries"].as_array().unwrap().len(),1);
+        let admin_ledger:Value=client.get(format!("{base}/api/note-credits/ledger?user_id={member}")).bearer_auth(tokens[0]).send().await.unwrap().json().await.unwrap();
+        assert!(admin_ledger["entries"].as_array().unwrap().is_empty());
+        assert_eq!(client.post(&url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&update).send().await.unwrap().status(),200);
+        assert_eq!(store.get_user(member).await.unwrap().processing_quota,11);
         // Disabling a member immediately makes its existing session unusable.
         store.insert_session(FileUserSession { session_id:tokens[1],user_id:member,expires_at:Utc::now()+Duration::hours(1),created_at:Utc::now(),user_agent:None,ip_address:None }).await.unwrap();
         assert_eq!(client.post(&url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&invalid).send().await.unwrap().status(),200);

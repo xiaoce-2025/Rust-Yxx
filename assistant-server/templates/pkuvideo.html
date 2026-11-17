@@ -103,8 +103,10 @@
     #status { max-width: 1200px; margin: 0 auto 12px; }
     @media (max-width: 760px) { .notes-layout, .grid { grid-template-columns: minmax(0, 1fr); } }
   </style>
+<script src="/note-credits.js"></script>
 </head>
 <body>
+<p data-note-credit-balance style="color:#843e52;text-align:center">正在获取笔记处理额度…</p>
   <main>
     <!-- replay-hero -->
     <div class="workspace">
@@ -202,7 +204,7 @@
       } else if (job.status === "failed") {
         stepsEl.innerHTML = '<div class="step" style="font-size: 1.2em; color: #ef4444;">处理失败: ' + esc(job.error || "未知错误") + '</div>';
       } else {
-        stepsEl.innerHTML = '<div class="step" style="font-size: 1.2em;">正在执行中，请稍后...</div>';
+        stepsEl.innerHTML = '<div class="step" style="font-size: 1.2em;">' + (job.billing_state === 'BILLING_PENDING' ? '结果交付中，正在等待计费恢复…' : '正在执行中，请稍后...') + '</div>';
       }
     }
 
@@ -222,7 +224,7 @@
         const userInfo = await api("/api/auth/me");
         storageQuota = userInfo.storage_quota || 0;
         processingQuota = userInfo.processing_quota || 0;
-        quotaInfoEl.innerHTML = `储存资源限额: 3 | 剩余: ${storageQuota}<br/>处理资源限额: 1 | 剩余: ${processingQuota}`;
+        quotaInfoEl.innerHTML = `储存资源限额: 3 | 剩余: ${storageQuota}<br/>笔记处理额度（小时）: ${processingQuota}`;
       } catch (err) {
         quotaInfoEl.textContent = `获取限额信息失败: ${err.message}`;
       }
@@ -250,30 +252,24 @@
       return { url, key: key && /^hex:/i.test(key) ? "hex:" + key.slice(4).toLowerCase() : key };
     }
 
+    let creditSubmitting = false;
     async function submitJob(manualKey) {
-      if (processingQuota <= 0) {
-        statusEl.textContent = "提交失败: 处理资源限额不足，请联系管理员获取更多额度（严小希平均处理1小时的回放需要消耗价值0.5r的token，严小希并没有那么充足的应对攻击的资金qwq，设置限额是为了保障正常使用）";
-        return;
-      }
-
-      let media;
-      try { media = readVideoInput(); } catch (err) { statusEl.textContent = err.message; return; }
-      statusEl.textContent = "提交中...";
-      const body = { video_url: media.url };
-      if (manualKey || media.key) body.manual_key = manualKey || media.key;
-
-      api("/api/pkuvideo/submit-web", "POST", body)
-        .then(resp => {
-          activeJobId = resp.job_id;
-          statusEl.textContent = "提交成功，任务已入队。";
-          processingQuota -= 1;
-          quotaInfoEl.innerHTML = `储存资源限额: 3 | 剩余: ${storageQuota}<br/>处理资源限额: 1 | 剩余: ${processingQuota}`;
-          startPolling();
-        })
-        .catch(err => {
-          statusEl.textContent = "提交失败: " + err.message;
-          updateQuotaDisplay();
-        });
+      if (creditSubmitting) return;
+      creditSubmitting=true;
+      const button=document.getElementById('submitBtn');button.disabled=true;
+      try {
+        let media=readVideoInput();
+        if (!(await window.NoteCredits.check())) return;
+        statusEl.textContent='提交中...';
+        const body={video_url:media.url};
+        if (manualKey || media.key) body.manual_key=manualKey || media.key;
+        const resp=await api('/api/pkuvideo/submit-web','POST',body);
+        activeJobId=resp.job_id;
+        statusEl.textContent='提交成功，任务已入队。';
+        startPolling();
+        updateQuotaDisplay();
+      } catch(error) { statusEl.textContent='提交失败: '+error.message; }
+      finally { creditSubmitting=false;button.disabled=false; }
     }
 
     async function checkM3u8AndSubmit() {
@@ -462,11 +458,14 @@
     }
 
     async function reexecuteStep(jobId, stepIndex) {
+      if (creditSubmitting) return;
+      creditSubmitting=true;
       try {
         statusEl.textContent = "正在提交重新生成任务...";
         const stepNames = ["download_video", "extract_mp3", "speech_to_text", "extract_notes", "compile_pdf"];
         const stepName = stepNames[stepIndex];
         
+        if (!(await window.NoteCredits.check())) return;
         const result = await api(`/api/pkuvideo/jobs/${jobId}/reexecute`, "POST", {
           step: stepIndex
         });
@@ -477,7 +476,7 @@
         await loadHistory();
       } catch (err) {
         statusEl.textContent = "重新执行步骤失败: " + err.message;
-      }
+      } finally {creditSubmitting=false;}
     }
 
     document.getElementById("goAppBtn").addEventListener("click", () => {

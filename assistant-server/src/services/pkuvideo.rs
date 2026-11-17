@@ -46,6 +46,14 @@ pub struct PkuVideoJob {
     #[serde(default)]
     pub manual_replay: Option<super::app_replay::ManualReplay>,
     #[serde(default)]
+    pub billing_state: Option<String>,
+    #[serde(default)]
+    pub billing_duration_seconds: Option<i64>,
+    #[serde(default)]
+    pub charged_units: i64,
+    #[serde(default)]
+    pub failure_code: Option<String>,
+    #[serde(default)]
     pub course_id: Option<String>,
     #[serde(default)]
     pub lesson_id: Option<String>,
@@ -115,6 +123,10 @@ impl PkuVideoJob {
             pdf_path: None,
             error: None,
             manual_replay: None,
+            billing_state: None,
+            billing_duration_seconds: None,
+            charged_units: 0,
+            failure_code: None,
             course_id: None,
             lesson_id: None,
             priority: 5,

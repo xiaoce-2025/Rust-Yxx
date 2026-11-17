@@ -11,6 +11,8 @@ use uuid::Uuid;
 mod operations;
 #[path = "store_tex_cache.rs"]
 mod tex_cache;
+#[path = "store_note_billing.rs"]
+pub mod note_billing;
 pub use tex_cache::{tex_hash, reuse_cached_tex, GlobalTexEntry};
 pub(crate) use tex_cache::{atomic_tex, valid_tex};
 pub use operations::{SiteFeatures, FEATURES_PATH};
@@ -32,7 +34,7 @@ pub struct FileUser {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub storage_quota: i32,
-    pub processing_quota: i32,
+    pub processing_quota: i64,
     #[serde(default)]
     pub iaaa_encrypted_password: Option<String>,
     #[serde(default)]
@@ -210,17 +212,19 @@ async fn write_collection(
 
 impl FileStore {
     pub async fn admin_users(&self) -> Vec<FileUser> {
-        self.users.read().await.values().cloned().collect()
+        let users: Vec<_> = self.users.read().await.values().cloned().collect();
+        let mut result = Vec::new();
+        for user in users { if let Some(user) = self.project_note_balance(user).await { result.push(user); } }
+        result
     }
 
-    pub async fn admin_update_user(&self, id: Uuid, active: bool, storage: i32, processing: i32, priority: u32) -> Result<(), crate::error::ApiError> {
+    pub async fn admin_update_user(&self, id: Uuid, active: bool, storage: i32, _processing: i64, priority: u32) -> Result<(), crate::error::ApiError> {
         use crate::error::ApiError;
         let mut users = self.users.write().await;
         let mut updated = users.clone();
         let user = updated.get_mut(&id).ok_or(ApiError::NotFound)?;
         user.is_active = active;
         user.storage_quota = storage;
-        user.processing_quota = processing;
         user.processing_priority = priority;
         user.updated_at = Utc::now();
         self.save_collection("users", &updated).await.map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -268,7 +272,8 @@ impl FileStore {
             .connect_with(
                 SqliteConnectOptions::new()
                     .filename(data_dir.join("assistant.sqlite3"))
-                    .create_if_missing(true),
+                    .create_if_missing(true)
+                    .busy_timeout(std::time::Duration::from_secs(5)),
             )
             .await?;
         let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
@@ -298,6 +303,7 @@ impl FileStore {
             db: db.clone(),
         };
         tx.commit().await?;
+        store.init_note_billing().await?;
         store.init_tex_cache().await?;
         store.init_operations().await?;
         store.load_whitelist().await?;
@@ -395,25 +401,17 @@ impl FileStore {
     }
 
     pub async fn get_user(&self, user_id: Uuid) -> Option<FileUser> {
-        self.users.read().await.get(&user_id).cloned()
+        let user = self.users.read().await.get(&user_id).cloned()?;
+        self.project_note_balance(user).await
     }
 
     pub async fn get_user_by_email(&self, email: &str) -> Option<FileUser> {
-        self.users
-            .read()
-            .await
-            .values()
-            .find(|u| u.email == email)
-            .cloned()
+        let id = self.users.read().await.values().find(|u| u.email == email).map(|u| u.id)?;
+        self.get_user(id).await
     }
-
     pub async fn get_user_by_username(&self, username: &str) -> Option<FileUser> {
-        self.users
-            .read()
-            .await
-            .values()
-            .find(|u| u.username == username)
-            .cloned()
+        let id = self.users.read().await.values().find(|u| u.username == username).map(|u| u.id)?;
+        self.get_user(id).await
     }
 
     pub async fn insert_user(&self, user: FileUser) -> Result<(), StoreError> {
@@ -422,8 +420,12 @@ impl FileStore {
             return Err("邮箱已存在".into());
         }
         let mut updated = users.clone();
-        updated.insert(user.id, user);
-        self.save_collection("users", &updated).await?;
+        updated.insert(user.id, user.clone());
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("INSERT INTO note_credit_accounts(user_id,balance,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING")
+            .bind(user.id.to_string()).bind(user.processing_quota).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
+        write_collection(&mut tx,"users", &serde_json::to_string(&updated)?).await?;
+        tx.commit().await?;
         *users = updated;
         Ok(())
     }
@@ -476,6 +478,8 @@ impl FileStore {
             let mut tx = self.db.begin().await?;
             if new_user {
                 write_collection(&mut tx, "users", &serde_json::to_string(&updated_users)?).await?;
+                sqlx::query("INSERT INTO note_credit_accounts(user_id,balance,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING")
+                    .bind(user.id.to_string()).bind(user.processing_quota).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
             }
             write_collection(&mut tx, "oidc_identities", &serde_json::to_string(&updated_links)?).await?;
             tx.commit().await?;
@@ -506,21 +510,14 @@ impl FileStore {
         }
         let mut updated = users.clone();
         updated.insert(candidate.id, candidate.clone());
-        self.save_collection("users", &updated).await?;
+        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("INSERT INTO note_credit_accounts(user_id,balance,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING")
+            .bind(candidate.id.to_string()).bind(candidate.processing_quota).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
+        write_collection(&mut tx,"users",&serde_json::to_string(&updated)?).await?;
+        tx.commit().await?;
         *users = updated;
         tracing::info!(user_id=%candidate.id, "IAAA whitelist check passed; new account registered");
         Ok(Some(candidate))
-    }
-
-    pub async fn decrease_processing_quota(&self, user_id: Uuid) -> Result<(), StoreError> {
-        self.update_collection("users", &self.users, |users| {
-            if let Some(user) = users.get_mut(&user_id) {
-                if user.processing_quota > 0 {
-                    user.processing_quota -= 1;
-                    user.updated_at = chrono::Utc::now();
-                }
-            }
-        }).await
     }
 
     pub async fn increase_storage_quota(&self, user_id: Uuid, amount: i32) -> Result<(), StoreError> {
@@ -749,21 +746,35 @@ impl FileStore {
     }
 
     pub async fn insert_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), StoreError> {
-        self.update_collection("pkuvideo_jobs", &self.pkuvideo_jobs, |records| {
-            records.insert(job.id, job);
-        }).await
+        self.update_pkuvideo_job(job).await
     }
 
     pub async fn update_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), StoreError> {
-        self.update_collection("pkuvideo_jobs", &self.pkuvideo_jobs, |records| {
-            records.insert(job.id, job);
-        }).await
+        let mut jobs=self.pkuvideo_jobs.write().await;
+        let mut tx=self.db.begin_with("BEGIN IMMEDIATE").await?;
+        let charged:i64=sqlx::query_scalar("SELECT count(*) FROM note_credit_ledger WHERE job_id=? AND event_type='JOB_CHARGE'")
+            .bind(job.id.to_string()).fetch_one(&mut *tx).await?;
+        let replacement=if charged>0 {
+            // Even a failure callback racing final settlement cannot overwrite success.
+            let payload:String=sqlx::query_scalar("SELECT payload FROM collections WHERE name='pkuvideo_jobs'").fetch_one(&mut *tx).await?;
+            let persisted:HashMap<Uuid,crate::services::pkuvideo::PkuVideoJob>=serde_json::from_str(&payload)?;
+            persisted.get(&job.id).cloned()
+        } else {
+            sqlx::query("UPDATE collections SET payload=json_set(payload,?,json(?)) WHERE name='pkuvideo_jobs'")
+                .bind(format!("$.\"{}\"",job.id)).bind(serde_json::to_string(&job)?).execute(&mut *tx).await?;
+            Some(job)
+        };
+        tx.commit().await?;
+        if let Some(job)=replacement {jobs.insert(job.id,job);}
+        Ok(())
     }
 
     pub async fn delete_pkuvideo_job(&self, job_id: Uuid) -> Result<(), StoreError> {
-        self.update_collection("pkuvideo_jobs", &self.pkuvideo_jobs, |records| {
-            records.remove(&job_id);
-        }).await
+        let mut jobs=self.pkuvideo_jobs.write().await;
+        sqlx::query("UPDATE collections SET payload=json_remove(payload,?) WHERE name='pkuvideo_jobs'")
+            .bind(format!("$.\"{job_id}\"")).execute(&self.db).await?;
+        jobs.remove(&job_id);
+        Ok(())
     }
 
     pub async fn get_all_pkuvideo_jobs(&self) -> HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob> {

@@ -57,7 +57,7 @@ pub async fn complete_lesson(
             .store
             .update_pkuvideo_job(job.clone())
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("BILLING_DELIVERY_COMMIT_FAILED: {e}"))?;
     }
     drop(_guard);
     if let Err(error) = tokio::fs::remove_dir_all(&artifacts).await {

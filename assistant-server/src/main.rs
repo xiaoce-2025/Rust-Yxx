@@ -55,6 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // 从FileStore加载pkuvideo_jobs到内存
     app_state.load_pkuvideo_jobs().await;
     app_state.load_pkuvideo_fw_jobs().await;
+    let billing_state=app_state.clone();
+    tokio::spawn(async move {
+        let mut interval=tokio::time::interval(std::time::Duration::from_secs(60));
+        loop { interval.tick().await; services::video_jobs::retry_pending_billing(&billing_state).await; }
+    });
     if let Err(error) = services::video_translation::restore(&app_state).await {
         tracing::error!(%error, "视频翻译恢复失败，已有功能继续运行");
     }

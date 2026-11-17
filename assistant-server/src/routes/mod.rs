@@ -1,6 +1,7 @@
 pub mod sso;
 pub mod ta;
 pub mod admin;
+pub mod note_credits;
 pub mod operations;
 pub mod auth;
 pub mod batch_guard;
@@ -47,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .merge(ui::routes(state.clone()))
         .merge(auth::routes())
+        .merge(note_credits::routes())
         .merge(admin::routes(state.clone()))
         .merge(operations::routes())
         .merge(sso::routes())

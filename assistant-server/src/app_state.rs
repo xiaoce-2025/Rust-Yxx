@@ -108,7 +108,7 @@ impl AppState {
         let mut jobs = self.store.get_all_pkuvideo_jobs().await;
         for job in jobs.values_mut() {
             if matches!(job.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running)
-                && job.result_tex_sha256.is_none() {
+                && job.result_tex_sha256.is_none() && job.failure_code.as_deref()!=Some("BILLING_SYSTEM_UNAVAILABLE") {
                 job.status = crate::services::pkuvideo::PipelineStatus::Failed;
                 job.postprocessing = false;
                 job.error = Some("服务重启中断任务，请重新提交；已有笔记保留".into());
@@ -137,10 +137,15 @@ impl AppState {
                     (Some(course),Some(lesson)) => newer.course_id.as_ref()==Some(course) && newer.lesson_id.as_ref()==Some(lesson),
                     _ => newer.course_id.is_none() && newer.url_key==job.url_key,
                 });
-            if superseded {
+            if superseded && job.course_notes_path.is_none() {
                 job.status = crate::services::pkuvideo::PipelineStatus::Failed;
                 job.postprocessing = false;
                 job.error = Some("后续任务已交付新版笔记，取消旧结果恢复".into());
+                if self.store.note_billing_state(job.id).await.ok().flatten().is_some() {
+                    job.billing_state=Some("FAILED_NO_CHARGE".into());
+                    job.failure_code=Some("DELIVERY_SUPERSEDED".into());
+                    let _=self.store.set_note_billing_state(job.id,"FAILED_NO_CHARGE",Some("DELIVERY_SUPERSEDED")).await;
+                }
                 job.finished_at = Some(Utc::now());
                 if let Err(error) = self.store.update_pkuvideo_job(job.clone()).await {
                     tracing::error!(job_id=%job.id,%error,"保存旧结果恢复取消状态失败");
