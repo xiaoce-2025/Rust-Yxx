@@ -99,14 +99,13 @@
     .action-btn:hover { background: #fce5e5; }
     .action-btn.delete { color: var(--warn); }
     .mono { font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
-    #historySection { grid-column: 1 / -1; }
+    #historySection { grid-column: 1 / -1; scroll-margin-top: 90px; }
     #status { max-width: 1200px; margin: 0 auto 12px; }
     @media (max-width: 760px) { .notes-layout, .grid { grid-template-columns: minmax(0, 1fr); } }
   </style>
 <script src="/note-credits.js"></script>
 </head>
 <body>
-<p data-note-credit-balance style="color:#843e52;text-align:center">正在获取笔记处理额度…</p>
   <main>
     <!-- replay-hero -->
     <div class="workspace">
@@ -129,10 +128,6 @@
           </div>
         </section>
         <div class="notes-sidebar">
-          <section class="card" aria-labelledby="quotaTitle">
-            <h2 id="quotaTitle">资源限额</h2>
-            <div id="quotaInfo" class="mono">加载中...</div>
-          </section>
           <section class="card" aria-labelledby="jobTitle">
             <h2 id="jobTitle">任务状态</h2>
             <div class="mono" id="jobMeta" role="status">尚未提交任务</div>
@@ -170,11 +165,8 @@
     const statusEl = document.getElementById("status");
     const jobMetaEl = document.getElementById("jobMeta");
     const stepsEl = document.getElementById("steps");
-    const quotaInfoEl = document.getElementById("quotaInfo");
     let activeJobId = "";
     let pollTimer = null;
-    let storageQuota = 0;
-    let processingQuota = 0;
 
     async function api(path, method = "GET", body) {
       const res = await fetch(path, {
@@ -210,23 +202,9 @@
 
     async function checkLogin() {
       try {
-        const userInfo = await api("/api/auth/me");
-        storageQuota = userInfo.storage_quota || 0;
-        processingQuota = userInfo.processing_quota || 0;
-        updateQuotaDisplay();
+        await api("/api/auth/me");
       } catch {
         location.href = "/auth?next=/pkuvideo";
-      }
-    }
-
-    async function updateQuotaDisplay() {
-      try {
-        const userInfo = await api("/api/auth/me");
-        storageQuota = userInfo.storage_quota || 0;
-        processingQuota = userInfo.processing_quota || 0;
-        quotaInfoEl.innerHTML = `储存资源限额: 3 | 剩余: ${storageQuota}<br/>笔记处理额度（小时）: ${processingQuota}`;
-      } catch (err) {
-        quotaInfoEl.textContent = `获取限额信息失败: ${err.message}`;
       }
     }
 
@@ -267,7 +245,6 @@
         activeJobId=resp.job_id;
         statusEl.textContent='提交成功，任务已入队。';
         startPolling();
-        updateQuotaDisplay();
       } catch(error) { statusEl.textContent='提交失败: '+error.message; }
       finally { creditSubmitting=false;button.disabled=false; }
     }
@@ -426,8 +403,7 @@
         statusEl.textContent = "正在删除任务...";
         await api("/api/pkuvideo/jobs/" + jobId, "DELETE");
         statusEl.textContent = "任务删除成功";
-        // 刷新限额信息和历史记录
-        await updateQuotaDisplay();
+        // 刷新历史记录
         await loadHistory();
       } catch (err) {
         statusEl.textContent = "删除任务失败: " + err.message;
@@ -485,7 +461,13 @@
     document.getElementById("submitBtn").addEventListener("click", checkM3u8AndSubmit);
     document.getElementById("historyBtn").addEventListener("click", loadHistory);
 
-    checkLogin();
+    async function openLinkedHistory() {
+      if (location.hash !== '#history') return;
+      await loadHistory();
+      document.getElementById('historySection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    window.addEventListener('hashchange', openLinkedHistory);
+    checkLogin().then(openLinkedHistory);
   </script>
 </body>
 </html>

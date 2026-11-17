@@ -21,7 +21,6 @@ window.NoteCredits = (() => {
     if (!response.ok) throw new Error('额度查询失败');
     const value=await response.json();
     if (typeof value.balance!=='number' || !Number.isFinite(value.balance)) throw new Error('额度响应无效');
-    document.querySelectorAll('[data-note-credit-balance]').forEach(el=>el.textContent=`笔记处理额度：${value.balance} 小时`);
     return value;
   }
   async function check() {
@@ -36,6 +35,5 @@ window.NoteCredits = (() => {
       show('暂时无法获取额度','暂时无法获取额度，请稍后重试');return false;
     }
   }
-  document.addEventListener('DOMContentLoaded',()=>balance().catch(()=>{}));
   return {check,balance};
 })();
