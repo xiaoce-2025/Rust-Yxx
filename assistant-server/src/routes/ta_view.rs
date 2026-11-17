@@ -27,6 +27,10 @@ fn context(s: &Selection, csrf: &str) -> String {
     .map(|(k, v)| hidden(k, v))
     .collect()
 }
+fn refresh(s: &Selection, csrf: &str, label: &str) -> String {
+    format!("<form method=\"post\" action=\"/ta/action\">{}{}<button class=\"button ghost\" name=\"action\" value=\"refresh\" type=\"submit\">{}</button></form>",
+        context(s, csrf), hidden("attempt", &s.attempt), e(label))
+}
 fn selected(a: &str, b: &str) -> &'static str {
     if a == b {
         " selected"
@@ -90,7 +94,9 @@ fn wrap(content: &str, loading: bool) -> String {
 }
 pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
     let mut html = String::new();
-    html.push_str("<div class=\"ta-workspace\"><aside class=\"course-panel\"><div class=\"panel-heading\"><h2>我的助教课程</h2><a class=\"text-link\" href=\"/ta\">刷新</a></div><p class=\"muted\">沿用已绑定的教学网账号</p><nav class=\"course-list\" aria-label=\"助教课程\">");
+    html.push_str("<div class=\"ta-workspace\"><aside class=\"course-panel\"><div class=\"panel-heading\"><h2>我的助教课程</h2>");
+    html.push_str(&refresh(s, csrf, "刷新"));
+    html.push_str("</div><p class=\"muted\">已拉取的数据保存在本地，点击刷新更新教学网数据。</p><nav class=\"course-list\" aria-label=\"助教课程\">");
     for c in &w.courses {
         let target = Selection {
             course: c.id.clone(),
@@ -132,7 +138,7 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
             .find(|c| c.id == s.course)
             .map(|c| c.name.as_str())
             .unwrap_or("课程");
-        let _ = write!(html,"<div class=\"section-header\"><div><div class=\"eyebrow\">作业批改工作台</div><h2>{}</h2></div><a class=\"button ghost\" href=\"{}\">刷新提交</a></div>",e(name),e(&Selection {notice:String::new(),..s.clone()}.url()));
+        let _ = write!(html,"<div class=\"section-header\"><div><div class=\"eyebrow\">作业批改工作台</div><h2>{}</h2></div>{}</div>",e(name),refresh(s, csrf, "刷新提交"));
         filters(&mut html, s, w);
         if w.assignments.iter().any(|a| a.id == s.column) { ai_panel(&mut html, s, w, csrf); }
         if w.assignments.is_empty() {
@@ -528,6 +534,16 @@ button,.button{display:inline-flex;align-items:center;justify-content:center;gap
 mod tests {
     use super::*;
     use crate::services::ta::{Assignment, Attachment, Course, Student, Submission};
+
+    #[test]
+    fn refresh_is_an_explicit_csrf_protected_post_and_keeps_selection() {
+        let selection = Selection { course: "_c_1".into(), column: "_h_1".into(), attempt: "_a_1".into(), ..Default::default() };
+        let html = refresh(&selection, "csrf-value", "刷新提交");
+        assert!(html.contains("method=\"post\" action=\"/ta/action\""));
+        for value in ["csrf-value", "_c_1", "_h_1", "_a_1"] { assert!(html.contains(value)); }
+        assert!(html.contains("name=\"action\" value=\"refresh\""));
+        assert!(!selection.url().contains("refresh"));
+    }
     pub(crate) fn fixture() -> (Selection, Workspace) {
         let s = Selection {
             course: "_c_1".into(),

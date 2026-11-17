@@ -296,7 +296,8 @@ async fn run(
             Err(_) => continue,
         }
     };
-    let bb = client(state, user).await?;
+    // AI draft creation retains its live concurrency checks; all reads are persisted.
+    let bb = Blackboard::live_checks(state, user);
     run_with_client(state, user, job, provider, annotation, cancel, &bb).await
 }
 async fn run_with_client(

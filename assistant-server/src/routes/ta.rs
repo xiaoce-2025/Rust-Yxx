@@ -4,7 +4,6 @@ use crate::{
     auth::CurrentUser,
     error::ApiError,
     services::{
-        pkulogin,
         ta::{self, Blackboard, Draft},
     },
 };
@@ -93,23 +92,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn client(state: &AppState, user: &CurrentUser) -> Result<Blackboard, String> {
-    let username = user
-        .email
-        .split('@')
-        .next()
-        .ok_or("无法识别当前教学网账号")?;
-    // A live lease takes precedence; no new credentials or login component are introduced.
-    if let Some(login) = state.login_cache.get(username).await {
-        return Blackboard::from_session(login);
-    }
-    let stored = state.store.get_user(user.id).await.ok_or("用户不存在")?;
-    let password = stored
-        .iaaa_encrypted_password
-        .ok_or("尚未绑定教学网，请前往用户中心完成现有 IAAA 绑定")?;
-    let login =
-        pkulogin::login_iaaa_and_get_cookies_with_cache(username, &password, &state.login_cache)
-            .await?;
-    Blackboard::from_session(login)
+    Ok(Blackboard::cached(state, user, false))
 }
 
 pub(super) async fn page(_user: CurrentUser) -> Response {
@@ -130,6 +113,8 @@ async fn workspace(
     headers: HeaderMap,
     Query(mut selection): Query<Selection>,
 ) -> Response {
+    let lock = state.ta_mutation(user.id).await;
+    let _guard = lock.lock().await;
     let mut workspace = Workspace::default();
     if let Err(error) = load_workspace(&state, &user, &mut selection, &mut workspace).await {
         tracing::warn!(target: "teaching_ta", error=%error, "加载助教工作台失败");
@@ -163,6 +148,16 @@ async fn load_workspace(
     workspace: &mut Workspace,
 ) -> Result<(), String> {
     let bb = client(state, user).await?;
+    load_workspace_with_client(state, user, selection, workspace, &bb).await
+}
+
+async fn load_workspace_with_client(
+    state: &AppState,
+    user: &CurrentUser,
+    selection: &mut Selection,
+    workspace: &mut Workspace,
+    bb: &Blackboard,
+) -> Result<(), String> {
     workspace.courses = bb.courses().await?;
     if selection.course.is_empty() {
         selection.course = workspace
@@ -350,6 +345,19 @@ async fn action(
     }
     let lock = state.ta_mutation(user.id).await;
     let _guard = lock.lock().await;
+    if field(&form, "action") == "refresh" {
+        let mut workspace = Workspace::default();
+        let bb = Blackboard::cached(&state, &user, true);
+        match load_workspace_with_client(&state, &user, &mut selection, &mut workspace, &bb).await {
+            Ok(()) => selection.notice = "已从教学网刷新当前课程、作业和提交，本地缓存已更新".into(),
+            Err(error) => workspace.error = Some(format!("刷新失败，已有本地缓存保留：{error}")),
+        }
+        if headers.get("x-ta-partial").is_some_and(|v| v == "1") {
+            return workspace_response(&selection, &workspace, expected.as_deref().unwrap_or(""), StatusCode::OK);
+        }
+        let Html(html) = super::ui::site_page(&view::render(&selection, &workspace, expected.as_deref().unwrap_or("")), "/ta");
+        return ([(header::CACHE_CONTROL, "no-store")], Html(html)).into_response();
+    }
     let result = mutate(&state, &user, &form, &mut selection).await;
     let operation=match field(&form,"action") {
         "ai_start"=>"ta.ai_start","ai_cancel"=>"ta.ai_cancel","commit"=>"ta.commit","discard"=>"ta.discard",
@@ -446,7 +454,8 @@ async fn mutate(
         "ai_cancel" => return ai::cancel(state,user,form,selection).await,
         _ => {}
     }
-    let bb = client(state, user).await?;
+    // Publishing grades must still check live permissions, revisions and score limits.
+    let bb = Blackboard::cached(state, user, field(form, "action") == "commit");
     mutate_with_client(state, user, form, selection, &bb).await
 }
 
@@ -699,6 +708,8 @@ async fn attachment(
     user: CurrentUser,
     Query(query): Query<Download>,
 ) -> Result<Response, ApiError> {
+    let lock = state.ta_mutation(user.id).await;
+    let _guard = lock.lock().await;
     let bb = client(&state, &user).await.map_err(ApiError::BadRequest)?;
     bb.authorize(&query.course)
         .await

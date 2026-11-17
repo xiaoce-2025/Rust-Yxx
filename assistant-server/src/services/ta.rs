@@ -101,6 +101,21 @@ pub struct Blackboard {
     base: Url,
     // Keep the existing cookie-file lease alive for the whole operation.
     login: Option<PkuLoginResult>,
+    cached: Option<CachedClient>,
+}
+
+struct CachedClient {
+    state: crate::app_state::AppState,
+    user: crate::auth::CurrentUser,
+    login: tokio::sync::OnceCell<PkuLoginResult>,
+    fresh: bool,
+    refresh_submissions: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedResponse {
+    // Base64 keeps binary attachments compact in the existing SQLite sidecar store.
+    body: String,
 }
 
 impl Blackboard {
@@ -111,6 +126,7 @@ impl Blackboard {
         Self {
             base: Url::parse(base).unwrap(),
             login: Some(PkuLoginResult::new(cookie, "Windows TA-test".into())),
+            cached: None,
         }
     }
     pub fn from_session(login: PkuLoginResult) -> Result<Self, String> {
@@ -121,7 +137,70 @@ impl Blackboard {
         Ok(Self {
             base: Url::parse(BASE).unwrap(),
             login: Some(login),
+            cached: None,
         })
+    }
+
+    /// No authentication or network work until an uncached read is requested.
+    pub fn cached(state: &crate::app_state::AppState, user: &crate::auth::CurrentUser, fresh: bool) -> Self {
+        Self {
+            base: Url::parse(BASE).unwrap(),
+            login: None,
+            cached: Some(CachedClient {
+                state: state.clone(), user: user.clone(),
+                login: tokio::sync::OnceCell::new(), fresh,
+                refresh_submissions: fresh,
+            }),
+        }
+    }
+
+    /// Validate changing grade metadata live while reusing already downloaded work.
+    pub fn live_checks(state: &crate::app_state::AppState, user: &crate::auth::CurrentUser) -> Self {
+        let mut client = Self::cached(state, user, true);
+        client.cached.as_mut().unwrap().refresh_submissions = false;
+        client
+    }
+
+    async fn session(&self) -> Result<PkuLoginResult, String> {
+        if let Some(login) = &self.login { return Ok(login.clone()); }
+        let cache = self.cached.as_ref().ok_or("教学网缓存不可用")?;
+        cache.login.get_or_try_init(|| async {
+            let username = cache.user.email.split('@').next().ok_or("无法识别当前教学网账号")?;
+            if let Some(login) = cache.state.login_cache.get(username).await { return Ok(login); }
+            let stored = cache.state.store.get_user(cache.user.id).await.ok_or("用户不存在")?;
+            let password = stored.iaaa_encrypted_password.ok_or("尚未绑定教学网，请前往用户中心完成现有 IAAA 绑定")?;
+            super::pkulogin::login_iaaa_and_get_cookies_with_cache(username, &password, &cache.state.login_cache).await
+        }).await.cloned()
+    }
+
+    fn cache_path(&self, path: &str) -> Result<std::path::PathBuf, String> {
+        let cache = self.cached.as_ref().ok_or("教学网缓存不可用")?;
+        let url = self.url(path)?;
+        Ok(std::path::PathBuf::from("ta_cache").join(cache.user.id.to_string())
+            .join(format!("{:x}.json", Sha256::digest(url.as_str()))))
+    }
+
+    async fn cached_get(&self, path: &str, fresh: bool) -> Result<Vec<u8>, String> {
+        self.cached_get_version(path, fresh, "").await
+    }
+
+    async fn cached_get_version(&self, path: &str, fresh: bool, version: &str) -> Result<Vec<u8>, String> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let Some(cache) = &self.cached else { return self.request(path, Vec::new(), None).await; };
+        let mut key = self.cache_path(path)?;
+        if !version.is_empty() {
+            key.set_extension(format!("{:x}.json", Sha256::digest(version)));
+        }
+        if !fresh {
+            if let Some(saved) = cache.state.store.load_sidecar::<CachedResponse>(&key).await? {
+                return STANDARD.decode(saved.body).map_err(|_| "教学网本地缓存损坏，请点击刷新".into());
+            }
+        }
+        let body = self.request(path, Vec::new(), None).await?;
+        let saved = serde_json::to_string(&CachedResponse { body: STANDARD.encode(&body) })
+            .map_err(|_| "无法编码教学网本地缓存")?;
+        cache.state.store.save_sidecar(&key, &saved).await?;
+        Ok(body)
     }
 
     fn url(&self, path: &str) -> Result<Url, String> {
@@ -149,6 +228,7 @@ impl Blackboard {
             if let Some(login) = &self.login {
                 login.invalidate();
             }
+            if let Some(login) = self.cached.as_ref().and_then(|c| c.login.get()) { login.invalidate(); }
             return Err("教学网登录已失效，请刷新重试；将复用现有登录逻辑".into());
         }
         if response.status == 403 {
@@ -166,6 +246,7 @@ impl Blackboard {
                         if let Some(login) = &self.login {
                             login.invalidate();
                         }
+                        if let Some(login) = self.cached.as_ref().and_then(|c| c.login.get()) { login.invalidate(); }
                     }
                     return Err(error);
                 }
@@ -181,7 +262,7 @@ impl Blackboard {
         form: Option<String>,
     ) -> Result<Vec<u8>, String> {
         let mut url = self.url(path)?;
-        let login = self.login.as_ref().ok_or("教学网缓存不可用")?.clone();
+        let login = self.session().await?;
         for _ in 0..8 {
             let route = safe_route(&url);
             tracing::info!(target: "teaching_ta", method=if form.is_some() { "POST" } else { "GET" }, route=%route, "请求教学网");
@@ -212,7 +293,7 @@ impl Blackboard {
         Err("教学网重定向过多".into())
     }
     async fn get(&self, path: &str) -> Result<Vec<u8>, String> {
-        self.request(path, Vec::new(), None).await
+        self.cached_get(path, self.cached.as_ref().is_some_and(|c| c.fresh)).await
     }
     async fn json(&self, path: &str) -> Result<Value, String> {
         let route = safe_route(&self.url(path)?);
@@ -424,7 +505,8 @@ impl Blackboard {
             valid_id(id)?;
         }
         let path = format!("/webapps/assignment/gradeAssignmentRedirector?outcomeDefinitionId={column}&course_id={course}&attempt_id={}&courseMembershipId={}&mode=inline&currentAttemptIndex=0&numAttempts=1&sequenceId={course}_0", attempt.id, student.membership);
-        let html = String::from_utf8(self.get(&path).await?).map_err(|_| "提交页面编码错误")?;
+        let fresh = self.cached.as_ref().is_some_and(|c| c.refresh_submissions);
+        let html = String::from_utf8(self.cached_get_version(&path, fresh, &attempt.revision).await?).map_err(|_| "提交页面编码错误")?;
         let (text, file_ids) = parse_submission(&html);
         let mut files = Vec::new();
         for id in file_ids {
@@ -433,7 +515,8 @@ impl Blackboard {
                 urlencoding::encode(&id),
                 attempt.id
             );
-            let info = self.json(&path).await?;
+            let info: Value = serde_json::from_slice(&self.cached_get_version(&path, fresh, &attempt.revision).await?)
+                .map_err(|_| "教学网附件信息格式不正确")?;
             let url = string(&info, "downloadUrl");
             if url.is_empty() {
                 return Err("教学网未返回附件下载地址".into());
@@ -448,7 +531,7 @@ impl Blackboard {
         Ok(Submission { text, files })
     }
     pub async fn download(&self, file: &Attachment) -> Result<Vec<u8>, String> {
-        self.get(&file.url).await
+        self.cached_get(&file.url, false).await
     }
 
     pub async fn save_grade(
@@ -463,9 +546,9 @@ impl Blackboard {
             valid_id(id)?;
         }
         let page = self
-            .get(&format!(
+            .request(&format!(
                 "/webapps/gradebook/controller/reconcileGrades?course_id={course}&id={column}"
-            ))
+            ), Vec::new(), None)
             .await?;
         let nonce = parse_nonce(&String::from_utf8_lossy(&page))?;
         let route = "/webapps/gradebook/controller/saveReconcileGrade";
@@ -523,11 +606,11 @@ impl Blackboard {
             }
         }
         // Never treat HTTP 200 as a successful grade write. Re-read the exact attempt.
-        let data = self
-            .json(&format!(
+        let data: Value = serde_json::from_slice(&self
+            .request(&format!(
                 "/webapps/gradebook/controller/loadReconcileData?course_id={course}&id={column}"
-            ))
-            .await?;
+            ), Vec::new(), None)
+            .await?).map_err(|_| "评分请求已发送，但回读数据无法识别；请在教学网核对后再操作")?;
         let actual = data
             .get("attempts")
             .and_then(Value::as_array)
@@ -851,6 +934,62 @@ mod tests {
             assert!(!same_origin(&base, &Url::parse(url).unwrap()));
         }
     }
+    #[tokio::test]
+    async fn persistent_reads_only_refetch_on_refresh_and_keep_cache_on_failure() {
+        use axum::{routing::get, Router};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let count = Arc::new(AtomicUsize::new(0));
+        let calls = count.clone();
+        let app = Router::new().route("/resource", get(move || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n >= 2 { (axum::http::StatusCode::SERVICE_UNAVAILABLE, vec![]) }
+                else { (axum::http::StatusCode::OK, vec![0, 255, n as u8]) }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let tmp = tempdir::TempDir::new("ta-cache-test").unwrap();
+        let settings: crate::config::Settings = serde_json::from_value(serde_json::json!({
+            "server":{"address":"127.0.0.1","port":0},
+            "wechat":{"api_base_url":"","oauth_app_id":"","oauth_app_secret":"","redirect_uri":"","qr_bot_type":""},
+            "security":{"session_ttl_hours":1},"cors":{"allowed_origins":[],"allow_credentials":false},
+            "audioapi_paraformer":{},"llm_deepseek":{}
+        })).unwrap();
+        let state = crate::app_state::AppState::new(settings.clone(), Arc::new(crate::store::FileStore::new(tmp.path().into()).await.unwrap()));
+        let user = crate::auth::CurrentUser { id: uuid::Uuid::new_v4(), username: "test".into(), email: "test@pku.edu.cn".into() };
+        let mut bb = Blackboard::test_client(&base);
+        bb.cached = Blackboard::cached(&state, &user, false).cached;
+        assert_eq!(bb.get("/resource").await.unwrap(), vec![0, 255, 0]);
+        assert_eq!(bb.get("/resource").await.unwrap(), vec![0, 255, 0]);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        // A new store/client can read the persisted bytes without any teaching credentials.
+        let restarted = crate::app_state::AppState::new(settings, Arc::new(crate::store::FileStore::new(tmp.path().into()).await.unwrap()));
+        let mut offline = Blackboard::cached(&restarted, &user, false);
+        offline.base = Url::parse(&base).unwrap();
+        assert_eq!(offline.get("/resource").await.unwrap(), vec![0, 255, 0]);
+        assert!(offline.cached.as_ref().unwrap().login.get().is_none());
+        let other = crate::auth::CurrentUser { id: uuid::Uuid::new_v4(), ..user.clone() };
+        let mut isolated = Blackboard::cached(&restarted, &other, false);
+        isolated.base = offline.base.clone();
+        assert_ne!(offline.cache_path("/resource").unwrap(), isolated.cache_path("/resource").unwrap());
+        assert!(isolated.get("/resource").await.is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        bb.cached.as_mut().unwrap().fresh = true;
+        assert_eq!(bb.get("/resource").await.unwrap(), vec![0, 255, 1]);
+        assert!(bb.get("/resource").await.is_err());
+        assert_eq!(offline.get("/resource").await.unwrap(), vec![0, 255, 1]);
+        // Even a live validation client reuses downloaded immutable attachment bytes.
+        let file = Attachment { id: "file".into(), name: "test.bin".into(), url: format!("{base}/resource") };
+        assert_eq!(bb.download(&file).await.unwrap(), vec![0, 255, 1]);
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        assert!(offline.get("https://evil.test/leak").await.is_err());
+        server.abort();
+    }
+
     #[tokio::test]
     async fn follows_pagination_and_checks_role_against_actual_membership() {
         use axum::{routing::get, Json, Router};
