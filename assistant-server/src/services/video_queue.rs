@@ -58,7 +58,29 @@ struct Entry {
 struct Inner {
     pending: Vec<Entry>,
     in_flight: HashSet<Uuid>,
+    active_urls: std::collections::HashMap<Uuid, String>,
     sequence: u64,
+}
+
+impl Inner {
+    fn claim(&mut self) -> Option<Entry> {
+        let next = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                !self
+                    .active_urls
+                    .values()
+                    .any(|url| url == &e.task.media.url)
+            })
+            .min_by_key(|(_, e)| (e.task.priority, e.sequence))
+            .map(|(i, _)| i)?;
+        let entry = self.pending.swap_remove(next);
+        self.active_urls
+            .insert(entry.task.id, entry.task.media.url.clone());
+        Some(entry)
+    }
 }
 pub struct VideoQueue {
     inner: Mutex<Inner>,
@@ -73,6 +95,7 @@ impl VideoQueue {
             inner: Mutex::new(Inner {
                 pending: Vec::new(),
                 in_flight: HashSet::new(),
+                active_urls: Default::default(),
                 sequence: 0,
             }),
             notify: Notify::new(),
@@ -99,7 +122,12 @@ impl VideoQueue {
                 if let Err(error) = result {
                     completion_handler.failed(id, error).await;
                 }
-                queue.inner.lock().await.in_flight.remove(&id);
+                {
+                    let mut inner = queue.inner.lock().await;
+                    inner.in_flight.remove(&id);
+                    inner.active_urls.remove(&id);
+                }
+                queue.notify.notify_waiters();
             }
         });
         for _ in 0..self.limit {
@@ -113,13 +141,7 @@ impl VideoQueue {
                     notified.as_mut().enable();
                     let entry = {
                         let mut inner = queue.inner.lock().await;
-                        let next = inner
-                            .pending
-                            .iter()
-                            .enumerate()
-                            .min_by_key(|(_, e)| (e.task.priority, e.sequence))
-                            .map(|(i, _)| i);
-                        next.map(|i| inner.pending.swap_remove(i))
+                        inner.claim()
                     };
                     if let Some(entry) = entry {
                         let task = entry.task;
@@ -204,7 +226,7 @@ mod tests {
             priority,
             submitted_at: Utc::now(),
             media: PreparedMedia {
-                url: "https://example.invalid/video.m3u8".into(),
+                url: format!("https://example.invalid/{}.m3u8", Uuid::new_v4()),
                 enc_key: Some("0123456789abcdef".into()),
             },
             completion: CompletionTarget::None,
@@ -215,6 +237,75 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn url_wait_preserves_original_fifo_and_priority() {
+        let a = task(5);
+        let mut b = task(5);
+        b.media.url = a.media.url.clone();
+        let c = task(5);
+        let e = task(1);
+        let mut inner = Inner {
+            pending: vec![],
+            in_flight: Default::default(),
+            active_urls: Default::default(),
+            sequence: 0,
+        };
+        inner.active_urls.insert(a.id, a.media.url);
+        inner.pending.push(Entry {
+            task: b.clone(),
+            sequence: 1,
+        });
+        inner.pending.push(Entry {
+            task: c.clone(),
+            sequence: 2,
+        });
+        assert_eq!(inner.claim().unwrap().task.id, c.id); // free worker can run a different URL
+        assert_eq!(inner.pending[0].task.id, b.id);
+        assert_eq!(inner.pending[0].sequence, 1);
+        inner.active_urls.remove(&a.id);
+        let later = task(5);
+        inner.pending.push(Entry {
+            task: later.clone(),
+            sequence: 3,
+        });
+        inner.pending.push(Entry {
+            task: e.clone(),
+            sequence: 4,
+        });
+        assert_eq!(inner.claim().unwrap().task.id, e.id);
+        assert_eq!(inner.claim().unwrap().task.id, b.id);
+        assert_eq!(inner.claim().unwrap().task.id, later.id);
+    }
+
+    #[tokio::test]
+    async fn same_url_stays_pending_while_other_url_uses_free_worker() {
+        let queue = VideoQueue::new(2);
+        let (started, mut starts) = mpsc::unbounded_channel();
+        let (finished, mut ends) = mpsc::unbounded_channel();
+        let handler = Arc::new(Handler {
+            release: Semaphore::new(0),
+            started,
+            finished,
+            panic_id: Uuid::nil(),
+        });
+        queue.start(handler.clone());
+        let a = task(5);
+        let mut b = task(5);
+        b.media.url = a.media.url.clone();
+        let c = task(5);
+        queue.submit(a.clone()).await.unwrap();
+        assert_eq!(receive(&mut starts).await, a.id);
+        queue.submit(b.clone()).await.unwrap();
+        queue.submit(c.clone()).await.unwrap();
+        assert_eq!(receive(&mut starts).await, c.id);
+        assert_eq!(queue.inner.lock().await.pending[0].task.id, b.id);
+        handler.release.add_permits(3);
+        assert_eq!(receive(&mut starts).await, b.id);
+        for _ in 0..3 {
+            receive(&mut ends).await;
+        }
     }
     #[tokio::test]
     async fn submission_returns_id_without_waiter_and_completion_notifies_consumer() {

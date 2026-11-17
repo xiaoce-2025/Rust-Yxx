@@ -55,6 +55,30 @@ pub struct PkuVideoJob {
     pub postprocessing: bool,
     #[serde(default)]
     pub course_notes_path: Option<String>,
+    #[serde(default)]
+    pub regenerate: bool,
+    #[serde(default)]
+    pub share_cache: bool,
+    #[serde(default)]
+    pub course_name: Option<String>,
+    #[serde(default)]
+    pub course_date: Option<String>,
+    #[serde(default)]
+    pub url_key: Option<String>,
+    #[serde(default)]
+    pub result_source: Option<String>,
+    #[serde(default)]
+    pub result_tex_sha256: Option<String>,
+    #[serde(default)]
+    pub cache_revision_used: Option<i64>,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub regenerate_decision_initial_hash: Option<String>,
+    #[serde(default)]
+    pub regenerate_decision_global_hash: Option<String>,
 
 }
 
@@ -94,6 +118,18 @@ impl PkuVideoJob {
             course_id: None,
             lesson_id: None,
             priority: 5,
+            regenerate: false,
+            share_cache: false,
+            course_name: None,
+            course_date: None,
+            url_key: None,
+            result_source: None,
+            result_tex_sha256: None,
+            cache_revision_used: None,
+            started_at: None,
+            finished_at: None,
+            regenerate_decision_initial_hash: None,
+            regenerate_decision_global_hash: None,
             postprocessing: false,
             course_notes_path: None,
         }

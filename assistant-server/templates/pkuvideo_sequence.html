@@ -346,6 +346,7 @@
     const lessonPolls = new Set();
     let downloadingLessonId = null;
     let pendingKeyLessonId = null;
+    let pendingKeyRegenerate = false;
 
     function setProcessing(processing) {
       isProcessing = processing;
@@ -880,7 +881,7 @@
       } finally { lessonPolls.delete(key); }
     }
 
-    async function handleProcessLesson(lessonId, manualKey) {
+    async function handleProcessLesson(lessonId, manualKey, regenerate = false) {
       if (isProcessing || !selectedCourse || activeLessons.has(lessonId)) return;
       const courseId = selectedCourse;
       const lesson = currentLessons.find(l => l.id === lessonId);
@@ -891,16 +892,18 @@
       statusEl.textContent = '正在获取播放链接和密钥…';
       statusEl.className = 'status loading';
       try {
-        const resp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos/${lessonId}/process`, 'POST', manualKey ? {manual_key:manualKey} : {});
+        const resp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos/${lessonId}/process`, 'POST', {regenerate, ...(manualKey ? {manual_key:manualKey} : {})});
         if (resp.needs_key) {
           document.getElementById('keyUrl').href = resp.key_uri;
           document.getElementById('keyUrl').textContent = resp.key_uri;
           document.getElementById('manualKey').value = '';
           document.getElementById('keyModal').style.display = 'flex';
           pendingKeyLessonId = lessonId;
+          pendingKeyRegenerate = regenerate;
           statusEl.textContent = '请粘贴密钥以继续';
           return;
         }
+        if (resp.needs_app_login) { await ensureAppLogin(); return; }
         if (!resp.success) throw new Error(resp.message || '提交失败');
         activeLessons.add(lessonId);
         statusEl.textContent = '已加入处理队列，可以继续提交其他课节';
@@ -979,26 +982,9 @@
 
     async function handleReprocessLesson(lessonId) {
       const courseId = selectedCourse;
-      if (isProcessing || !courseId || !confirm("确定要重新处理该课节吗？旧的tex文件将被删除。")) return;
+      if (isProcessing || !courseId || !confirm("确定要重新生成该课节吗？成功后将替换你的笔记，个人编辑可能丢失；旧版本会按现有规则备份。")) return;
 
-      try {
-        statusEl.textContent = "正在重置处理状态...";
-        statusEl.className = "status loading";
-
-        const resp = await api(`/api/pkuvideofullclass/courses/${courseId}/videos/${lessonId}/reprocess`, "POST");
-
-        if (selectedCourse !== courseId) return;
-        statusEl.textContent = resp.message || "已重置处理状态";
-        statusEl.className = "status success";
-
-        // 刷新课节列表
-        await selectCourse(selectedCourse, selectedCourseName);
-      } catch (error) {
-        if (selectedCourse !== courseId) return;
-        console.error('重新处理失败:', error);
-        statusEl.textContent = "重新处理失败: " + error.message;
-        statusEl.className = "status error";
-      }
+      await handleProcessLesson(lessonId, null, true);
     }
 
     processAllBtnEl.addEventListener('click', async () => {
@@ -1134,7 +1120,8 @@
       document.getElementById("keyModal").style.display = "none";
       const lessonId = pendingKeyLessonId;
       pendingKeyLessonId = null;
-      handleProcessLesson(lessonId, key);
+      const regenerate = pendingKeyRegenerate; pendingKeyRegenerate = false;
+      handleProcessLesson(lessonId, key, regenerate);
     });
     document.getElementById("keyCancelBtn").addEventListener("click", () => {
       document.getElementById("keyModal").style.display = "none";

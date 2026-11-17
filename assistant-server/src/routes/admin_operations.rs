@@ -173,7 +173,7 @@ pub(super) async fn notes(
         if !q.user.is_empty() && q.user != job.user_id.to_string() {
             continue;
         }
-        records.push(json!({"id":format!("job:{}",job.id),"job":job.id,"user_id":job.user_id,"username":users.iter().find(|u|u.id==job.user_id).map(|u|u.username.as_str()).unwrap_or("已删除用户"),"title":"独立笔记任务","date":job.updated_at,"kind":"job","has_tex":job.notes_path.is_some(),"has_pdf":job.pdf_path.is_some()}));
+        records.push(json!({"id":format!("job:{}",job.id),"job":job.id,"user_id":job.user_id,"username":users.iter().find(|u|u.id==job.user_id).map(|u|u.username.as_str()).unwrap_or("已删除用户"),"title":"独立笔记任务","date":job.updated_at,"kind":"job","has_tex":job.notes_path.is_some(),"has_pdf":job.pdf_path.is_some() || job.notes_path.is_some()}));
     }
     let search = q.q.to_lowercase();
     records.retain(|r| r.to_string().to_lowercase().contains(&search));
@@ -233,6 +233,15 @@ pub(super) async fn note(
             .ok_or(ApiError::NotFound)?;
         if job.user_id != q.owner || job.course_id.is_some() {
             return Err(ApiError::NotFound);
+        }
+        if job.result_tex_sha256.is_some() {
+            let path = state.store.user_tex_path(job.user_id, job.id);
+            if q.format == "pdf" {
+                let bytes = crate::routes::pkuvideo::compile_note_pdf(&path).await?;
+                return Ok(([("Content-Type","application/pdf"),("Content-Disposition","inline; filename=notes.pdf")],bytes).into_response());
+            }
+            let bytes = tokio::fs::read(path).await.map_err(|_|ApiError::NotFound)?;
+            return Ok(([("Content-Type","text/plain; charset=utf-8"),("X-Content-Type-Options","nosniff")],bytes).into_response());
         }
         let relative = if q.format == "pdf" {
             job.pdf_path

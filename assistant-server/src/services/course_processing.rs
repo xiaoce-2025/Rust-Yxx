@@ -22,7 +22,7 @@ pub async fn complete_lesson(
             return Err("任务完成通知与课节不匹配".into());
         }
         (
-            job.notes_path.clone().ok_or("视频处理未生成课节笔记")?,
+            job.notes_path.clone().or_else(|| job.result_tex_sha256.as_ref().map(|_| state.store.user_tex_path(user_id, task_id).canonicalize().unwrap_or_else(|_| state.store.user_tex_path(user_id, task_id)).to_string_lossy().into_owned())).ok_or("视频处理未生成课节笔记")?,
             job.artifacts_dir.clone(),
         )
     };
@@ -61,7 +61,9 @@ pub async fn complete_lesson(
     }
     drop(_guard);
     if let Err(error) = tokio::fs::remove_dir_all(&artifacts).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
         tracing::warn!(%task_id,error=%error,"课节笔记已安装，清理视频中间资源失败");
+        }
     }
     Ok(())
 }

@@ -41,6 +41,8 @@ pub(super) fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<(), S
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LessonInfo {
+    #[serde(default)]
+    pub initial_tex_hash: Option<String>,
     /// AES key: 16 UTF-8 bytes, or hex: followed by 32 hex digits.
     #[serde(default, rename = "enc.key", alias = "enc_key")]
     pub enc_key: Option<String>,
@@ -116,9 +118,11 @@ pub async fn install_lesson_notes(store: &FileStore, username: &str, course_id: 
     let dir = init_course_dir(username,course_id)?;
     let pending = format!("note_{}.tex",uuid::Uuid::new_v4().simple());
     let path = dir.join(&pending);
-    atomic_write(&path,&fs::read(source).map_err(|e|format!("读取处理结果失败: {e}"))?)?;
+    let bytes = fs::read(source).map_err(|e|format!("读取处理结果失败: {e}"))?;
+    atomic_write(&path,&bytes)?;
     lesson.tex_filename=Some(pending);
     lesson.is_processed=true;
+    lesson.initial_tex_hash=Some(crate::store::tex_hash(&bytes));
     if let Err(error)=save_ordered_lessons(store, username,course_id,&old,&mut lessons).await{
         // Recovery normally restores this newly-created file. If recovery itself
         // failed, keep it as part of the transaction instead of losing notes.
@@ -178,7 +182,7 @@ mod tests {
         let store = FileStore::new(db.path().into()).await.unwrap();
         let user=TestUser(format!("test_manual_delete_{}",uuid::Uuid::new_v4().simple()));let course="c";
         let mut old=Vec::new();let dir=init_course_dir(&user.0,course).unwrap();
-        for(i,id)in ["manual","regular"].iter().enumerate(){let name=super::super::lesson_order::filename(course,i+1);fs::write(dir.join(&name),id).unwrap();old.push(LessonInfo{enc_key:None,id:id.to_string(),video_url:String::new(),play_url:String::new(),date:format!("2026-01-0{}",i+1),time:"08:00".into(),day_of_week:String::new(),is_processed:true,tex_filename:Some(name),manual_replay:if i==0{Some(super::super::app_replay::ManualReplay{course_id:"app".into(),sub_id:"sub".into(),date:"2026-01-01".into(),lesson_start:Some(1),lesson_end:Some(2)})}else{None}});}
+        for(i,id)in ["manual","regular"].iter().enumerate(){let name=super::super::lesson_order::filename(course,i+1);fs::write(dir.join(&name),id).unwrap();old.push(LessonInfo{ initial_tex_hash: None,enc_key:None,id:id.to_string(),video_url:String::new(),play_url:String::new(),date:format!("2026-01-0{}",i+1),time:"08:00".into(),day_of_week:String::new(),is_processed:true,tex_filename:Some(name),manual_replay:if i==0{Some(super::super::app_replay::ManualReplay{course_id:"app".into(),sub_id:"sub".into(),date:"2026-01-01".into(),lesson_start:Some(1),lesson_end:Some(2)})}else{None}});}
         save_lessons(&store, &user.0,course,&old).await.unwrap();
         let attempt=ManualAttempt{date:old[0].date.clone(),status:"success".into(),message:"已添加".into(),updated_at:String::new()};save_manual_attempts(&store, &user.0,course,&[attempt]).await.unwrap();
         assert!(delete_manual_lesson(&store, &user.0,course,"manual","删除").await.is_err());
@@ -234,7 +238,7 @@ mod tests {
         let username = fixture.0.as_str();
         let course_id = "_12345_1";
         let lessons = vec![
-            LessonInfo {
+            LessonInfo { initial_tex_hash: None,
                 enc_key: Some("0123456789abcdef".into()),
                 id: "1".to_string(),
                 video_url: "http://example.com/video1.mp4".to_string(),
@@ -246,7 +250,7 @@ mod tests {
                 tex_filename: None,
                 manual_replay: None,
             },
-            LessonInfo {
+            LessonInfo { initial_tex_hash: None,
                 enc_key: None,
                 id: "2".to_string(),
                 video_url: "http://example.com/video2.mp4".to_string(),

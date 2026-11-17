@@ -107,16 +107,101 @@ impl AppState {
     pub async fn load_pkuvideo_jobs(&self) {
         let mut jobs = self.store.get_all_pkuvideo_jobs().await;
         for job in jobs.values_mut() {
-            if matches!(job.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running) {
+            if matches!(job.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running)
+                && job.result_tex_sha256.is_none() {
                 job.status = crate::services::pkuvideo::PipelineStatus::Failed;
                 job.postprocessing = false;
-                job.error = Some("服务重启中断任务，请重新提交；已保存的课节密钥可直接复用".into());
+                job.error = Some("服务重启中断任务，请重新提交；已有笔记保留".into());
                 job.updated_at = Utc::now();
-                let _ = self.store.update_pkuvideo_job(job.clone()).await;
+                job.finished_at = Some(Utc::now());
+                if let Err(error) = self.store.update_pkuvideo_job(job.clone()).await {
+                    tracing::error!(job_id=%job.id, %error, "持久化中断状态失败");
+                }
             }
         }
-        let mut in_memory_jobs = self.pkuvideo_jobs.write().await;
-        *in_memory_jobs = jobs;
+        *self.pkuvideo_jobs.write().await = jobs.clone();
+        // Exact private snapshots survive publication/installation failures. Retry only
+        // delivery, never run AI again or silently declare an interrupted generation done.
+        use crate::services::video_queue::TaskHandler;
+        let handler = crate::services::video_jobs::VideoTaskHandler { state: self.clone() };
+        let mut deliveries: Vec<_> = jobs.into_values().filter(|j|
+            j.status != crate::services::pkuvideo::PipelineStatus::Succeeded && j.result_tex_sha256.is_some()
+                && (j.postprocessing || matches!(j.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running))
+        ).collect();
+        deliveries.sort_by_key(|j|j.created_at);
+        for mut job in deliveries {
+            let superseded = self.pkuvideo_jobs.read().await.values().any(|newer|
+                newer.user_id == job.user_id && newer.created_at > job.created_at
+                && newer.status == crate::services::pkuvideo::PipelineStatus::Succeeded
+                && match (&job.course_id, &job.lesson_id) {
+                    (Some(course),Some(lesson)) => newer.course_id.as_ref()==Some(course) && newer.lesson_id.as_ref()==Some(lesson),
+                    _ => newer.course_id.is_none() && newer.url_key==job.url_key,
+                });
+            if superseded {
+                job.status = crate::services::pkuvideo::PipelineStatus::Failed;
+                job.postprocessing = false;
+                job.error = Some("后续任务已交付新版笔记，取消旧结果恢复".into());
+                job.finished_at = Some(Utc::now());
+                if let Err(error) = self.store.update_pkuvideo_job(job.clone()).await {
+                    tracing::error!(job_id=%job.id,%error,"保存旧结果恢复取消状态失败");
+                }
+                self.pkuvideo_jobs.write().await.insert(job.id,job);
+                continue;
+            }
+            let target = match (&job.course_id, &job.lesson_id) {
+                (Some(course), Some(lesson)) => {
+                    let Some(user) = self.store.get_user(job.user_id).await else { continue; };
+                    crate::services::video_queue::CompletionTarget::CourseLesson {
+                        username:user.email.split('@').next().unwrap_or_default().into(),
+                        course_id:course.clone(), lesson_id:lesson.clone(),
+                    }
+                }
+                _ => crate::services::video_queue::CompletionTarget::None,
+            };
+            let bytes = tokio::fs::read(self.store.user_tex_path(job.user_id, job.id)).await;
+            let bytes = match bytes {
+                Ok(bytes) if Some(crate::store::tex_hash(&bytes)) == job.result_tex_sha256 => bytes,
+                _ => {
+                handler.failed(job.id, "待安装的独立 TeX 副本校验失败，请重新提交".into()).await;
+                continue;
+                }
+            };
+            // A crash may precede the publication journal itself. Finish publishing
+            // this compiled snapshot before delivery, unless a later task has
+            // already advanced the global cache while this task was failed.
+            if job.share_cache && job.cache_revision_used.is_none() {
+                let Some(key) = job.url_key.as_deref() else {
+                    handler.failed(job.id, "待恢复结果缺少缓存身份".into()).await;
+                    continue;
+                };
+                let recovered = async {
+                    let current = self.store.verified_tex(key).await?;
+                    if let Some((entry, _)) = current {
+                        if Some(entry.tex_sha256.as_str()) == job.result_tex_sha256.as_deref() {
+                            return Ok(Some(entry.revision));
+                        }
+                        let newer = chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
+                            .is_ok_and(|time|time > job.updated_at);
+                        if newer { return Ok(None); }
+                    }
+                    self.store.publish_tex(key, &bytes, job.id).await.map(|entry|Some(entry.revision))
+                }.await;
+                match recovered {
+                    Ok(revision) => {
+                        job.cache_revision_used = revision;
+                        if let Err(error) = self.store.update_pkuvideo_job(job.clone()).await {
+                            handler.failed(job.id, error.to_string()).await;
+                            continue;
+                        }
+                        self.pkuvideo_jobs.write().await.insert(job.id, job.clone());
+                    }
+                    Err(error) => { handler.failed(job.id, format!("恢复缓存发布失败: {error}")).await; continue; }
+                }
+            }
+            if let Err(error) = handler.completed(crate::services::video_queue::CompletionEvent {
+                task_id:job.id, user_id:job.user_id, target, result:Ok(()),
+            }).await { handler.failed(job.id,error).await; }
+        }
     }
 
     pub async fn load_pkuvideo_fw_jobs(&self) {

@@ -70,6 +70,8 @@ struct BatchSubmitRequest {
 #[derive(Debug, Deserialize)]
 struct ProcessLessonRequest {
     manual_key: Option<String>,
+    #[serde(default)]
+    regenerate: bool,
 }
 
 pub fn routes() -> Router<AppState> {
@@ -429,6 +431,7 @@ fn merge_lesson_data(new_lessons: &mut Vec<LessonInfo>, existing_lessons: &Vec<L
             new_lesson.enc_key = existing.enc_key.clone();
             new_lesson.is_processed = existing.is_processed;
             new_lesson.tex_filename = existing.tex_filename.clone();
+            new_lesson.initial_tex_hash = existing.initial_tex_hash.clone();
             new_lesson.id = existing.id.clone();
             // play_url 从新解析结果中获取（可能已更新）
         } else if !existing_lessons.is_empty() {
@@ -445,12 +448,12 @@ mod manual_refresh_tests {
 
     #[test]
     fn refresh_retains_manual_origin_and_processed_ids() {
-        let regular = LessonInfo {enc_key:None,id:"lesson_9".into(), video_url:"saved".into(), play_url:"old".into(),
+        let regular = LessonInfo { initial_tex_hash: None,enc_key:None,id:"lesson_9".into(), video_url:"saved".into(), play_url:"old".into(),
             date:"2026-10-12".into(), time:"第1-2节".into(), day_of_week:"周一".into(),
             is_processed:true, tex_filename:Some("saved.tex".into()), manual_replay:None};
-        let manual = LessonInfo {id:"app_stable".into(), manual_replay:Some(crate::services::app_replay::ManualReplay {
+        let manual = LessonInfo { initial_tex_hash: None,id:"app_stable".into(), manual_replay:Some(crate::services::app_replay::ManualReplay {
             course_id:"app-course".into(), sub_id:"app-sub".into(),date:"2026-10-12".into(),lesson_start:Some(1),lesson_end:Some(2)}), ..regular.clone()};
-        let fresh = LessonInfo {id:"lesson_1".into(), video_url:String::new(), play_url:"new".into(),
+        let fresh = LessonInfo { initial_tex_hash: None,id:"lesson_1".into(), video_url:String::new(), play_url:"new".into(),
             is_processed:false, tex_filename:None, ..regular.clone()};
         let mut new = vec![fresh];
         merge_lesson_data(&mut new, &vec![regular, manual]);
@@ -571,7 +574,10 @@ async fn process_lesson(
     current_user: CurrentUser,
     Json(req): Json<ProcessLessonRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    crate::services::lesson_submission::submit_lesson(state, current_user.id, course_id, video_id, req.manual_key).await
+    if req.regenerate && !state.store.site_features().await.map_err(ApiError::Internal)?.show_reprocess {
+        return Err(ApiError::Forbidden("管理员已关闭课节重新处理功能".into()));
+    }
+    crate::services::lesson_submission::submit_lesson_mode(state, current_user.id, course_id, video_id, req.manual_key, req.regenerate).await
 }
 
 async fn get_process_status(
@@ -1063,49 +1069,7 @@ async fn reprocess_lesson(
     if !state.store.site_features().await.map_err(ApiError::Internal)?.show_reprocess {
         return Err(ApiError::Forbidden("管理员已关闭课节重新处理功能".into()));
     }
-    let lesson_mutex = state.lesson_mutation(current_user.id).await;
-    let _guard = lesson_mutex.lock().await;
-    if state.course_busy(current_user.id, &course_id).await {
-        return Err(ApiError::BadRequest("请等待当前课节处理完成".into()));
-    }
-    let user = state.store.get_user(current_user.id).await.ok_or_else(|| {
-        tracing::error!("用户不存在: {}", current_user.id);
-        ApiError::Internal("用户不存在".to_string())
-    })?;
-
-    let username = user.email.split('@').next().ok_or_else(|| {
-        tracing::error!("邮箱格式无效: {}", user.email);
-        ApiError::BadRequest("无效的邮箱格式".to_string())
-    })?;
-
-    // 加载课节信息
-    let mut lessons = lesson_storage::load_lessons(&state.store, username, &course_id).await
-        .map_err(|e| {
-            tracing::error!("加载课节信息失败: {}", e);
-            ApiError::Internal(format!("加载课节信息失败: {}", e))
-        })?;
-
-    // 找到对应的课节
-    let lesson_index = lessons.iter().position(|l| l.id == video_id)
-        .ok_or_else(|| ApiError::BadRequest("课节不存在".to_string()))?;
-
-    let old_lessons = lessons.clone();
-
-    // 重置课节的处理状态
-    lessons[lesson_index].tex_filename = None;
-    lessons[lesson_index].is_processed = false;
-
-    // 保存更新后的课节信息
-    lesson_storage::save_ordered_lessons(&state.store, username, &course_id, &old_lessons, &mut lessons).await
-        .map_err(|e| {
-            tracing::error!("保存课节信息失败: {}", e);
-            ApiError::Internal(format!("保存课节信息失败: {}", e))
-        })?;
-
-    tracing::info!("用户 {} 已重置课节 {} 的处理状态，准备重新处理", username, video_id);
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "已重置处理状态，请点击\"提交处理\"重新处理该课节"
-    })))
+    crate::services::lesson_submission::submit_lesson_mode(
+        state, current_user.id, course_id, video_id, None, true,
+    ).await
 }

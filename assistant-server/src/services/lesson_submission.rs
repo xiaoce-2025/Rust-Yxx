@@ -11,6 +11,13 @@ pub async fn submit_lesson(
     video_id: String,
     manual_key: Option<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    submit_lesson_mode(state, user_id, course_id, video_id, manual_key, false).await
+}
+
+pub async fn submit_lesson_mode(
+    state: AppState, user_id: Uuid, course_id: String, video_id: String,
+    manual_key: Option<String>, regenerate: bool,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let lesson_mutex = state.lesson_mutation(user_id).await;
     let _mutation_guard = lesson_mutex.lock().await;
     if state.lesson_busy(user_id, &course_id, &video_id).await {
@@ -93,6 +100,11 @@ pub async fn submit_lesson(
         media.url.clone(),
         format!("./data/pkuvideo_jobs/{timestamp}_{job_id}"),
     );
+    job.regenerate = regenerate;
+    job.share_cache = true; // Only authenticated classroom discovery opts in to sharing.
+    job.course_name = super::course_storage::load_courses(&state.store, &username).await
+        .map_err(ApiError::Internal)?.into_iter().find(|c|c.key == course_id).map(|c|c.name);
+    job.course_date = Some(lessons[index].date.clone());
     job.course_id = Some(course_id.clone());
     job.lesson_id = Some(video_id.clone());
     state

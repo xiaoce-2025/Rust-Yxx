@@ -406,6 +406,7 @@
                   <div>视频链接: ${esc(job.video_url)}</div>
                   <div class="history-actions">
                     ${job.pdf_path ? `<button onclick="downloadPdf('${job.id}')" class="action-btn" style="background: var(--accent); color: #fff;">下载 PDF</button>` : ""}
+                    ${job.tex_url ? `<button onclick="downloadPdf('${job.id}', 'tex')" class="action-btn">下载 TeX</button>` : ""}
                     <button onclick="deleteJob('${job.id}')" class="action-btn delete">删除任务</button>
                   </div>
                 </div>
@@ -437,9 +438,9 @@
       }
     }
 
-    async function downloadPdf(jobId) {
+    async function downloadPdf(jobId, format = "pdf") {
       try {
-        const response = await fetch(`/api/pkuvideo/jobs/${jobId}/pdf`, {
+        const response = await fetch(`/api/pkuvideo/jobs/${jobId}/${format}`, {
           method: "GET",
           credentials: "include"
         });
@@ -450,27 +451,28 @@
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `lecture_notes_${jobId}.pdf`;
+        a.download = `lecture_notes_${jobId}.${format}`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
       } catch (err) {
-        alert("下载 PDF 失败: " + err.message);
+        alert("下载失败: " + err.message);
       }
     }
 
     async function reexecuteStep(jobId, stepIndex) {
       try {
-        statusEl.textContent = "正在重新执行步骤...";
+        statusEl.textContent = "正在提交重新生成任务...";
         const stepNames = ["download_video", "extract_mp3", "speech_to_text", "extract_notes", "compile_pdf"];
         const stepName = stepNames[stepIndex];
         
-        await api(`/api/pkuvideo/jobs/${jobId}/reexecute`, "POST", {
+        const result = await api(`/api/pkuvideo/jobs/${jobId}/reexecute`, "POST", {
           step: stepIndex
         });
         
-        statusEl.textContent = `步骤 ${stepIndex} (${stepName}) 重新执行成功`;
+        statusEl.textContent = "重新生成任务已排队";
+        if (result.job_id) { activeJobId = result.job_id; startPolling(); }
         // 重新加载历史记录以更新状态
         await loadHistory();
       } catch (err) {

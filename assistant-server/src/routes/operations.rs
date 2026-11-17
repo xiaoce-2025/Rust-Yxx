@@ -31,7 +31,8 @@ pub async fn audit(State(state): State<AppState>, request: Request, next: Next) 
     let is_note = method == axum::http::Method::GET
         && (path.ends_with("/download-pdf")
             || path.ends_with("/download-tex")
-            || (path.starts_with("/api/pkuvideo/jobs/") && path.ends_with("/pdf"))
+            || (path.starts_with("/api/pkuvideo/jobs/") && (path.ends_with("/pdf") || path.ends_with("/tex")))
+            || (path.starts_with("/api/admin/tex-cache/") && path.ends_with("/tex"))
             || path == "/api/admin/note");
     let mutation = method != axum::http::Method::GET && path.starts_with("/api/");
     if !is_note && !mutation {

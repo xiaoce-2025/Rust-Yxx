@@ -250,7 +250,7 @@ async fn add(
                     .parse()
                     .map_err(|_| ApiError::Internal("返回日期无效".into()))?;
                 use chrono::Datelike;
-                lessons.push(LessonInfo {
+                lessons.push(LessonInfo { initial_tex_hash: None,
                 enc_key: None,
                 id: format!("app_{}", Uuid::new_v4()),
                     video_url: row["video_url"].as_str().unwrap_or_default().into(),

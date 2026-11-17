@@ -17,6 +17,8 @@ mod ta_ai;
 mod operations;
 #[path = "admin_operations_view.rs"]
 mod operations_view;
+#[path = "admin_tex_cache.rs"]
+mod tex_cache;
 
 pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
@@ -32,6 +34,9 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/admin/notes", get(operations::notes))
         .route("/api/admin/note", get(operations::note))
         .route("/api/admin/features", get(operations::features).post(operations::save_features))
+        .route("/api/admin/tex-cache", get(tex_cache::list))
+        .route("/api/admin/tex-cache/:key", get(tex_cache::detail))
+        .route("/api/admin/tex-cache/:key/tex", get(tex_cache::tex))
         .route_layer(middleware::from_fn_with_state(state, require_admin))
 }
 
@@ -61,7 +66,7 @@ async fn require_admin(State(state): State<AppState>, request: Request, next: Ne
     response
 }
 
-async fn page() -> Html<String> { Html(operations_view::page(ta_ai::page())) }
+async fn page() -> Html<String> { Html(tex_cache::page(operations_view::page(ta_ai::page()))) }
 
 async fn management_data(State(state): State<AppState>, current: CurrentUser) -> Result<Json<Value>,ApiError> {
     let last_logins=state.store.last_logins().await.map_err(|e|ApiError::Internal(e.to_string()))?;
@@ -79,7 +84,7 @@ async fn management_data(State(state): State<AppState>, current: CurrentUser) ->
     // Deliberately project only operational metadata: no credentials, URLs or file paths.
     let mut jobs = Vec::new();
     for job in state.store.get_all_pkuvideo_jobs().await.values() {
-        jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"notes","status":job.status,"created_at":job.created_at,"updated_at":job.updated_at}));
+        jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"notes","course_name":job.course_name,"course_date":job.course_date,"regenerate":job.regenerate,"result_source":job.result_source,"url_key":job.url_key,"status":job.status,"created_at":job.created_at,"updated_at":job.updated_at}));
     }
     for job in state.store.get_all_pkuvideo_fw_jobs().await.values() {
         jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"replay","status":job.status,"created_at":job.created_at,"updated_at":job.updated_at}));
@@ -167,10 +172,35 @@ mod tests {
                 created_at:Utc::now(),user_agent:None,ip_address:None,
             }).await.unwrap();
         }
+        let private_id=Uuid::new_v4();
+        let mut private_job=crate::services::pkuvideo::PkuVideoJob::new(private_id,member,"https://private.invalid/?token=SECRET_TOKEN".into(),"SECRET_LOCAL_PATH".into());
+        private_job.status=crate::services::pkuvideo::PipelineStatus::Failed;
+        private_job.steps[0].status=crate::services::pkuvideo::PipelineStatus::Failed;
+        private_job.steps[0].message="SECRET_INTERNAL_ERROR".into();
+        private_job.error=Some("SECRET_ERROR".into());
+        state.pkuvideo_jobs.write().await.insert(private_id,private_job);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}",listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener,crate::routes::router(state)).await.unwrap(); });
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let private_url=format!("{base}/api/pkuvideo/jobs/{private_id}");
+        assert_eq!(client.get(&private_url).bearer_auth(tokens[0]).send().await.unwrap().status(),403);
+        let safe_job=client.get(&private_url).bearer_auth(tokens[1]).send().await.unwrap().text().await.unwrap();
+        assert!(!safe_job.contains("SECRET_") && !safe_job.contains("private.invalid"));
+        let cache_key=crate::store::tex_hash(b"shared-classroom-url");
+        store.publish_tex(&cache_key,b"\\section{Shared classroom}",Uuid::new_v4()).await.unwrap();
+        for path in ["/api/admin/tex-cache".to_string(),format!("/api/admin/tex-cache/{cache_key}"),format!("/api/admin/tex-cache/{cache_key}/tex")] {
+            let url=format!("{base}{path}");
+            assert_eq!(client.get(&url).send().await.unwrap().status(),401);
+            assert_eq!(client.get(&url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
+            let response=client.get(&url).bearer_auth(tokens[0]).send().await.unwrap();
+            assert_eq!(response.status(),200);
+            let text=response.text().await.unwrap();
+            assert!(!text.contains("tex_path") && !text.contains("global_tex_cache"));
+        }
+        let cache_page=client.get(format!("{base}/admin")).bearer_auth(tokens[0]).send().await.unwrap().text().await.unwrap();
+        assert!(cache_page.contains("data-model=\"global_tex\""));
+        assert!(cache_page.contains("else if (model==='global_tex') renderGlobalTex()"));
         let flags_url=format!("{base}/api/admin/features");
         assert_eq!(client.get(&flags_url).send().await.unwrap().status(),401);
         assert_eq!(client.get(&flags_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
@@ -182,7 +212,7 @@ mod tests {
         let course="_admin_course";
         std::fs::create_dir_all(note_dir.path().join(course)).unwrap();
         std::fs::write(note_dir.path().join(course).join("lesson.tex"),"PRIVATE_NOTE_BODY").unwrap();
-        let lesson=crate::services::lesson_storage::LessonInfo{enc_key:None,id:"_l_1".into(),video_url:"SECRET_VIDEO_URL".into(),play_url:String::new(),date:"2026-11-14".into(),time:String::new(),day_of_week:String::new(),is_processed:true,tex_filename:Some("lesson.tex".into()),manual_replay:None};
+        let lesson=crate::services::lesson_storage::LessonInfo{ initial_tex_hash: None,enc_key:None,id:"_l_1".into(),video_url:"SECRET_VIDEO_URL".into(),play_url:String::new(),date:"2026-11-14".into(),time:String::new(),day_of_week:String::new(),is_processed:true,tex_filename:Some("lesson.tex".into()),manual_replay:None};
         crate::services::lesson_storage::save_lessons(&store,&note_username,course,&[lesson]).await.unwrap();
         let inventory_url=format!("{base}/api/admin/notes?user={member}");
         assert_eq!(client.get(&inventory_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);

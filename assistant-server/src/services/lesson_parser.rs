@@ -44,7 +44,7 @@ pub fn parse_lessons(html: &str, course_id: &str) -> Vec<LessonInfo> {
             String::new()
         };
 
-        let lesson = LessonInfo {
+        let lesson = LessonInfo { initial_tex_hash: None,
             enc_key: None,
             id: format!("{}_lesson_{}", course_id, index),
             video_url: String::new(),
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn test_assign_lesson_numbers() {
         let mut lessons = vec![
-            LessonInfo {
+            LessonInfo { initial_tex_hash: None,
                 enc_key: None,
                 id: "test_1".to_string(),
                 video_url: "".to_string(),
@@ -230,7 +230,7 @@ mod tests {
                 tex_filename: None,
                 manual_replay: None,
             },
-            LessonInfo {
+            LessonInfo { initial_tex_hash: None,
                 enc_key: None,
                 id: "test_2".to_string(),
                 video_url: "".to_string(),
@@ -242,7 +242,7 @@ mod tests {
                 tex_filename: None,
                 manual_replay: None,
             },
-            LessonInfo {
+            LessonInfo { initial_tex_hash: None,
                 enc_key: None,
                 id: "test_3".to_string(),
                 video_url: "".to_string(),

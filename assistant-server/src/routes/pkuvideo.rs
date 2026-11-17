@@ -5,7 +5,6 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -26,6 +25,8 @@ struct SubmitApiRequest {
     pku_auth_two: String,
     video_url: String,
     manual_key: Option<String>,
+    #[serde(default)]
+    regenerate: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +37,8 @@ struct SubmitWebRequest {
     pku_auth_two: String,
     video_url: String,
     manual_key: Option<String>,
+    #[serde(default)]
+    regenerate: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +67,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideo/jobs/:id/reexecute", post(reexecute_step))
         .route("/api/pkuvideo/jobs/:id", delete(delete_job))
         .route("/api/pkuvideo/jobs/:id/pdf", get(download_pdf))
+        .route("/api/pkuvideo/jobs/:id/tex", get(download_tex))
 }
 
 async fn submit_api(
@@ -96,6 +100,7 @@ async fn submit_api(
         req.pku_auth_one,
         req.pku_auth_two,
         req.manual_key,
+        req.regenerate,
     )
     .await?;
 
@@ -120,6 +125,7 @@ async fn submit_web(
         req.pku_auth_one,
         req.pku_auth_two,
         req.manual_key,
+        req.regenerate,
     )
     .await?;
 
@@ -163,7 +169,7 @@ async fn job_detail(
     State(state): State<AppState>,
     current_user: CurrentUser,
     Path(id): Path<Uuid>,
-) -> Result<Json<PkuVideoJob>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let jobs = state.pkuvideo_jobs.read().await;
     let job = jobs.get(&id).cloned().ok_or(ApiError::NotFound)?;
 
@@ -171,155 +177,62 @@ async fn job_detail(
         return Err(ApiError::Forbidden("无权访问".to_string()));
     }
 
-    Ok(Json(job))
+    Ok(Json(public_job(&job)))
 }
 
 async fn job_list(
     State(state): State<AppState>,
     current_user: CurrentUser,
-) -> Result<Json<Vec<PkuVideoJob>>, ApiError> {
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     let jobs = state.pkuvideo_jobs.read().await;
-    let user_jobs: Vec<PkuVideoJob> = jobs
+    let mut user_jobs: Vec<PkuVideoJob> = jobs
         .values()
         .filter(|job| job.user_id == current_user.id)
         .cloned()
         .collect();
 
-    Ok(Json(user_jobs))
+    user_jobs.sort_by_key(|j|std::cmp::Reverse(j.created_at));
+    Ok(Json(user_jobs.iter().map(public_job).collect()))
+}
+
+// Never serialize internal URLs, keys or local filesystem paths to normal users.
+fn public_job(job: &PkuVideoJob) -> serde_json::Value {
+    let steps: Vec<_> = job.steps.iter().map(|step|serde_json::json!({
+        "name":step.name,"status":step.status,"started_at":step.started_at,"finished_at":step.finished_at,
+        "message":if step.status==PipelineStatus::Failed { "处理失败，请重试或联系管理员" } else { step.message.as_str() }
+    })).collect();
+    serde_json::json!({"id":job.id,"created_at":job.created_at,"updated_at":job.updated_at,
+        "status":job.status,"steps":steps,"error":job.error.as_ref().map(|_|"处理失败，请重试或联系管理员"),
+        "course_id":job.course_id,"lesson_id":job.lesson_id,"course_name":job.course_name,
+        "course_date":job.course_date,"regenerate":job.regenerate,"priority":job.priority,
+        "postprocessing":job.postprocessing,"started_at":job.started_at,"finished_at":job.finished_at,
+        "result_source":job.result_source,"video_url":"已隐藏源链接",
+        "pdf_path":if job.status == PipelineStatus::Succeeded { Some(format!("/api/pkuvideo/jobs/{}/pdf",job.id)) } else { None },
+        "tex_url":if job.status == PipelineStatus::Succeeded { Some(format!("/api/pkuvideo/jobs/{}/tex",job.id)) } else { None }})
 }
 
 #[derive(Debug, Deserialize)]
 struct ReexecuteStepRequest {
     step: u8,
+    manual_key: Option<String>,
 }
 
 async fn reexecute_step(
-    State(state): State<AppState>,
-    current_user: CurrentUser,
-    Path(id): Path<Uuid>,
+    State(state): State<AppState>, current_user: CurrentUser, Path(id): Path<Uuid>,
     Json(req): Json<ReexecuteStepRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut jobs = state.pkuvideo_jobs.write().await;
-    let job = jobs.get_mut(&id).ok_or(ApiError::NotFound)?;
-
-    if job.user_id != current_user.id {
-        return Err(ApiError::Forbidden("无权访问".to_string()));
-    }
-
+    if req.step > 4 { return Err(ApiError::BadRequest("无效的步骤索引".into())); }
+    let job = state.pkuvideo_jobs.read().await.get(&id).cloned().ok_or(ApiError::NotFound)?;
+    if job.user_id != current_user.id { return Err(ApiError::Forbidden("无权访问".into())); }
     if matches!(job.status, PipelineStatus::Pending | PipelineStatus::Running) || job.course_id.is_some() {
         return Err(ApiError::Conflict("活动任务不能重执行；课节任务请通过课节重新处理接口提交".into()));
     }
-
-    // 构建任务目录路径（时间戳_任务ID）
-    let timestamp = job.created_at.format("%Y%m%d_%H%M%S").to_string();
-    let base_dir = PathBuf::from("./data/pkuvideo_jobs");
-    let job_dir = base_dir.join(format!("{}_{}", timestamp, id));
-
-    let video_path = job_dir.join("video.mp4");
-    let mp3_path = job_dir.join("audio.mp3");
-    let transcript_path = job_dir.join("transcript.txt");
-    let notes_path = job_dir.join("lecture_notes.tex");
-    let pdf_path = job_dir.join("lecture_notes.pdf");
-
-    let config = state.store.get_config(current_user.id).await;
-    let settings = crate::services::video_jobs::merge_with_user_config(&state.settings, &config);
-
-    // 根据步骤索引重新执行
-    match req.step {
-        0 => {
-            if let Some(replay) = &job.manual_replay {
-                let client = state.app_replay_client(current_user.id).await.map_err(ApiError::Internal)?;
-                let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
-                let mut client = client.lock().await;
-                let login = client.login_bound(&user, &serde_json::json!({})).await.map_err(ApiError::Internal)?;
-                if login["ok"] != true { return Err(ApiError::BadRequest(login["error"].as_str().unwrap_or("好学认证失败").into())); }
-                client.download(replay, &video_path).await.map_err(ApiError::Internal)?;
-            } else {
-            // 重新执行 视频下载（需要原始URL）
-            crate::services::pkuvideo::download_video(
-                &job.video_url,
-                &video_path,
-                "",
-                "",
-                &state.login_cache,
-                None,
-                3,
-                120,
-                None,
-            )
-                .await
-                .map_err(|e| ApiError::Internal(e))?;
-            }
-            job.steps[0].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
-            job.steps[0].message = "视频下载完成".to_string();
-            job.steps[0].finished_at = Some(chrono::Utc::now());
-        }
-        1 => {
-            // 重新执行 MP3 抽离
-            crate::services::pkuvideo::extract_mp3(&video_path, &mp3_path)
-                .await
-                .map_err(|e| ApiError::Internal(e))?;
-            job.steps[1].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
-            job.steps[1].message = "MP3 抽离完成".to_string();
-            job.steps[1].finished_at = Some(chrono::Utc::now());
-        }
-        2 => {
-            // 重新执行 语音转文字
-            crate::services::pkuvideo::speech_to_text(&mp3_path, &transcript_path, &settings)
-                .await
-                .map_err(|e| ApiError::Internal(e))?;
-            job.steps[2].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
-            job.steps[2].message = "语音转文字完成".to_string();
-            job.steps[2].finished_at = Some(chrono::Utc::now());
-            // 存储相对路径
-            let transcript_rel = transcript_path.strip_prefix(&base_dir)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| transcript_path.to_string_lossy().to_string());
-            job.transcript_path = Some(transcript_rel);
-        }
-        3 => {
-            // 重新执行 讲义提取
-            crate::services::pkuvideo::extract_notes(&transcript_path, &notes_path, &settings)
-                .await
-                .map_err(|e| ApiError::Internal(e))?;
-            job.steps[3].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
-            job.steps[3].message = "讲义提取完成".to_string();
-            job.steps[3].finished_at = Some(chrono::Utc::now());
-            // 存储相对路径
-            let notes_rel = notes_path.strip_prefix(&base_dir)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| notes_path.to_string_lossy().to_string());
-            job.notes_path = Some(notes_rel);
-        }
-        4 => {
-            // 重新执行 PDF 编译
-            crate::services::pkuvideo::compile_pdf(&notes_path, &pdf_path)
-                .await
-                .map_err(|e| ApiError::Internal(e))?;
-            job.steps[4].status = crate::services::pkuvideo::PipelineStatus::Succeeded;
-            job.steps[4].message = "PDF 编译完成".to_string();
-            job.steps[4].finished_at = Some(chrono::Utc::now());
-            // 存储相对路径
-            let pdf_rel = pdf_path.strip_prefix(&base_dir)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| pdf_path.to_string_lossy().to_string());
-            job.pdf_path = Some(pdf_rel);
-        }
-        _ => {
-            return Err(ApiError::BadRequest("无效的步骤索引".to_string()));
-        }
-    }
-
-    job.updated_at = chrono::Utc::now();
-    job.status = crate::services::pkuvideo::PipelineStatus::Succeeded;
-    
-    // 保存到FileStore
-    state.store.update_pkuvideo_job(job.clone()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": format!("步骤 {} 重新执行成功", req.step)
-    })))
+    let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
+    let job_id = enqueue_job(state, current_user.id, job.video_url,
+        user.email.split('@').next().unwrap_or_default().into(),
+        user.iaaa_encrypted_password.unwrap_or_default(), req.manual_key, true).await?;
+    Ok(Json(serde_json::json!({"success":true,"job_id":job_id,"status":"queued",
+        "status_url":format!("/api/pkuvideo/jobs/{job_id}"),"message":"已加入重新生成队列"})))
 }
 
 async fn delete_job(
@@ -337,26 +250,24 @@ async fn delete_job(
         }
 
         // 复制需要的信息
-        (job.pdf_path.clone(), job.status.clone(), job.course_id.is_none())
+        (job.artifacts_dir.clone(), job.status.clone(), job.course_id.is_none())
     };
 
-    let (pdf_path, job_status, charged_storage) = job_info;
+    let (artifacts_dir, job_status, charged_storage) = job_info;
     if matches!(job_status, PipelineStatus::Pending | PipelineStatus::Running) {
         return Err(ApiError::Conflict("排队或处理中的任务不能删除".into()));
     }
 
-    // 删除任务目录中的文件（通过 pdf_path 的父目录定位）
-    if let Some(pdf) = pdf_path {
-        let artifacts_path = PathBuf::from(&pdf).parent()
-            .map(|p| std::path::Path::new("./data/pkuvideo_jobs").join(p))
-            .unwrap_or_else(|| PathBuf::from("./data/pkuvideo_jobs"));
-        
-        if artifacts_path.exists() {
-            if let Err(e) = tokio::fs::remove_dir_all(&artifacts_path).await {
-                eprintln!("删除任务目录失败: {}", e);
-            }
+    if let (Ok(root),Ok(target)) = (
+        tokio::fs::canonicalize("./data/pkuvideo_jobs").await,
+        tokio::fs::canonicalize(&artifacts_dir).await,
+    ) {
+        if target.starts_with(&root) && target != root {
+            tokio::fs::remove_dir_all(target).await.map_err(|e|ApiError::Internal(e.to_string()))?;
         }
     }
+
+    let _ = tokio::fs::remove_file(state.store.user_tex_path(current_user.id, id)).await;
 
     // 从内存中删除任务
     {
@@ -395,6 +306,7 @@ async fn enqueue_job(
     pku_auth_one: String,
     pku_auth_two: String,
     manual_key: Option<String>,
+    regenerate: bool,
 ) -> Result<Uuid, ApiError> {
     // 获取用户信息，校验学号与邮箱匹配
     let user = state.store.get_user(user_id).await.ok_or(ApiError::Unauthorized)?;
@@ -407,20 +319,6 @@ async fn enqueue_job(
         return Err(ApiError::BadRequest("IAAA账号与注册邮箱学号不匹配，请检查".to_string()));
     }
     
-    // 先检查是否有相同视频链接的已完成任务
-    {
-        let existing_jobs = state.pkuvideo_jobs.read().await;
-        if let Some(existing_job) = existing_jobs.values().find(|job| {
-            job.user_id == user_id && 
-            job.video_url == video_url && 
-            job.status == PipelineStatus::Succeeded &&
-            job.pdf_path.is_some()
-        }) {
-            // 找到相同视频链接的已完成任务，直接复制结果（不消耗限额）
-            return copy_existing_job(&state, user_id, &video_url, existing_job).await;
-        }
-    } // 在这里释放读取锁
-
     // 检查用户限额
     if user.processing_quota <= 0 {
         return Err(ApiError::Forbidden("处理资源限额不足，请联系管理员".to_string()));
@@ -443,7 +341,10 @@ async fn enqueue_job(
     let job_id = Uuid::new_v4();
     let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");
 
-    let job = PkuVideoJob::new(job_id, user_id, video_url.clone(), artifacts_dir);
+    let mut job = PkuVideoJob::new(job_id, user_id, media.url.clone(), artifacts_dir);
+    job.regenerate = regenerate;
+    // Arbitrary direct URLs may contain private media. They stay outside sharing.
+    // Classroom discovery uses the authorized course submission path instead.
     state.pkuvideo_jobs.write().await.insert(job_id, job.clone());
     
     // 保存到FileStore
@@ -458,103 +359,14 @@ async fn enqueue_job(
     Ok(job_id)
 }
 
-async fn copy_existing_job(
-    state: &AppState,
-    user_id: Uuid,
-    video_url: &str,
-    existing_job: &PkuVideoJob,
-) -> Result<Uuid, ApiError> {
-    let job_id = Uuid::new_v4();
-    let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");
-    
-    // 创建新任务目录
-    std::fs::create_dir_all(&artifacts_dir).map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    // 复制转写文件
-    let mut new_transcript_path = None;
-    if let Some(transcript_path) = &existing_job.transcript_path {
-        let src_path = PathBuf::from(transcript_path);
-        let dest_path = PathBuf::from(&artifacts_dir).join(src_path.file_name().unwrap());
-        std::fs::copy(&src_path, &dest_path).map_err(|e| ApiError::Internal(e.to_string()))?;
-        new_transcript_path = Some(dest_path.to_string_lossy().to_string());
-    }
-
-    // 复制讲义文件
-    let mut new_notes_path = None;
-    if let Some(notes_path) = &existing_job.notes_path {
-        let src_path = PathBuf::from(notes_path);
-        let dest_path = PathBuf::from(&artifacts_dir).join(src_path.file_name().unwrap());
-        std::fs::copy(&src_path, &dest_path).map_err(|e| ApiError::Internal(e.to_string()))?;
-        new_notes_path = Some(dest_path.to_string_lossy().to_string());
-    }
-
-    // 复制PDF文件
-    let mut new_pdf_path = None;
-    if let Some(pdf_path) = &existing_job.pdf_path {
-        let src_path = PathBuf::from(pdf_path);
-        let dest_path = PathBuf::from(&artifacts_dir).join(src_path.file_name().unwrap());
-        std::fs::copy(&src_path, &dest_path).map_err(|e| ApiError::Internal(e.to_string()))?;
-        new_pdf_path = Some(dest_path.to_string_lossy().to_string());
-    }
-
-    // 创建新任务并标记为成功
-    let mut job = PkuVideoJob::new(job_id, user_id, video_url.to_string(), artifacts_dir);
-    job.status = PipelineStatus::Succeeded;
-    job.transcript_path = new_transcript_path;
-    job.notes_path = new_notes_path;
-    job.pdf_path = new_pdf_path;
-    
-    // 标记所有步骤为成功
-    job.steps[0].status = PipelineStatus::Succeeded;
-    job.steps[0].message = "视频下载完成(复制)".to_string();
-    job.steps[0].finished_at = Some(Utc::now());
-    
-    job.steps[1].status = PipelineStatus::Succeeded;
-    job.steps[1].message = "MP3抽离完成(复制)".to_string();
-    job.steps[1].finished_at = Some(Utc::now());
-    
-    job.steps[2].status = PipelineStatus::Succeeded;
-    job.steps[2].message = "语音转文字完成(复制)".to_string();
-    job.steps[2].finished_at = Some(Utc::now());
-    
-    job.steps[3].status = PipelineStatus::Succeeded;
-    job.steps[3].message = "讲义提取完成(复制)".to_string();
-    job.steps[3].finished_at = Some(Utc::now());
-    
-    job.steps[4].status = PipelineStatus::Succeeded;
-    job.steps[4].message = "PDF编译完成(复制)".to_string();
-    job.steps[4].finished_at = Some(Utc::now());
-
-    job.updated_at = Utc::now();
-
-    // 保存到内存和文件存储
-    state.pkuvideo_jobs.write().await.insert(job_id, job.clone());
-    state.store.insert_pkuvideo_job(job).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    Ok(job_id)
-}
-
 async fn download_pdf(
     State(state): State<AppState>,
     current_user: CurrentUser,
     Path(job_id): Path<Uuid>,
 ) -> Result<axum::response::Response, ApiError> {
-    let pdf_path_relative = {
-        let jobs = state.pkuvideo_jobs.read().await;
-        let job = jobs.get(&job_id).ok_or(ApiError::NotFound)?;
-
-        if job.user_id != current_user.id {
-            return Err(ApiError::Forbidden("无权访问此任务的 PDF".to_string()));
-        }
-
-        job.pdf_path.clone().ok_or(ApiError::NotFound)?
-    };
-
-    let pdf_full_path = std::path::Path::new("./data/pkuvideo_jobs").join(&pdf_path_relative);
-    
-    let pdf_data = tokio::fs::read(&pdf_full_path)
-        .await
-        .map_err(|_| ApiError::NotFound)?;
+    let job = owned_completed_job(&state, current_user.id, job_id).await?;
+    let notes = private_note_path(&job)?;
+    let pdf_data = compile_note_pdf(&notes).await?;
 
     let filename = format!("lecture_notes_{}.pdf", job_id);
     let response = axum::response::Response::builder()
@@ -565,6 +377,36 @@ async fn download_pdf(
         .map_err(|_| ApiError::Internal("构建响应失败".to_string()))?;
 
     Ok(response)
+}
+
+async fn owned_completed_job(state: &AppState, user: Uuid, id: Uuid) -> Result<PkuVideoJob, ApiError> {
+    let job = state.pkuvideo_jobs.read().await.get(&id).cloned().ok_or(ApiError::NotFound)?;
+    if job.user_id != user { return Err(ApiError::Forbidden("无权访问".into())); }
+    if job.status != PipelineStatus::Succeeded { return Err(ApiError::Conflict("任务尚未成功完成".into())); }
+    Ok(job)
+}
+
+pub(super) fn private_note_path(job: &PkuVideoJob) -> Result<PathBuf, ApiError> {
+    if let Some(path) = &job.course_notes_path { return Ok(PathBuf::from(path)); }
+    let path = job.notes_path.as_ref().ok_or(ApiError::NotFound)?;
+    Ok(PathBuf::from("./data/pkuvideo_jobs").join(path))
+}
+
+pub(super) async fn compile_note_pdf(path: &std::path::Path) -> Result<Vec<u8>, ApiError> {
+    let temp = tempdir::TempDir::new("note-pdf").map_err(|e|ApiError::Internal(e.to_string()))?;
+    let notes = temp.path().join("notes.tex");
+    tokio::fs::copy(path,&notes).await.map_err(|_|ApiError::NotFound)?;
+    let pdf = temp.path().join("notes.pdf");
+    crate::services::pkuvideo::compile_pdf(&notes,&pdf).await.map_err(ApiError::Internal)?;
+    tokio::fs::read(pdf).await.map_err(|e|ApiError::Internal(e.to_string()))
+}
+
+async fn download_tex(State(state): State<AppState>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<axum::response::Response, ApiError> {
+    let job = owned_completed_job(&state,current.id,id).await?;
+    let bytes = tokio::fs::read(private_note_path(&job)?).await.map_err(|_|ApiError::NotFound)?;
+    axum::response::Response::builder().header("Content-Type","application/x-tex; charset=utf-8")
+        .header("Content-Disposition",format!("attachment; filename=\"lecture_notes_{id}.tex\""))
+        .body(axum::body::Body::from(bytes)).map_err(|e|ApiError::Internal(e.to_string()))
 }
 
 #[cfg(test)]

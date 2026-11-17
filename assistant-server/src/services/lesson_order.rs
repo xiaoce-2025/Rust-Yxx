@@ -292,7 +292,7 @@ mod tests {
     use super::*;
 
     fn lesson(id: &str, day: u32, processed: bool) -> LessonInfo {
-        LessonInfo {
+        LessonInfo { initial_tex_hash: None,
             enc_key: None,
             id: id.into(),
             video_url: String::new(),

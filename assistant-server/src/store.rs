@@ -9,6 +9,10 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 #[path = "store_operations.rs"]
 mod operations;
+#[path = "store_tex_cache.rs"]
+mod tex_cache;
+pub use tex_cache::{tex_hash, reuse_cached_tex, GlobalTexEntry};
+pub(crate) use tex_cache::{atomic_tex, valid_tex};
 pub use operations::{SiteFeatures, FEATURES_PATH};
 
 
@@ -139,6 +143,7 @@ pub struct RegistrationWhitelist {
 type StoreError = Box<dyn std::error::Error + Send + Sync>;
 
 pub struct FileStore {
+    tex_cache_lock: tokio::sync::Mutex<()>,
     data_dir: PathBuf,
     db: SqlitePool,
     users: RwLock<HashMap<Uuid, FileUser>>,
@@ -276,6 +281,7 @@ impl FileStore {
         .execute(&mut *tx)
         .await?;
         let store = Self {
+            tex_cache_lock: tokio::sync::Mutex::new(()),
             users: RwLock::new(import_collection(&mut tx, &data_dir, "users").await?),
             sessions: RwLock::new(import_collection(&mut tx, &data_dir, "sessions").await?),
             configs: RwLock::new(import_collection(&mut tx, &data_dir, "configs").await?),
@@ -292,6 +298,7 @@ impl FileStore {
             db: db.clone(),
         };
         tx.commit().await?;
+        store.init_tex_cache().await?;
         store.init_operations().await?;
         store.load_whitelist().await?;
         Ok(store)
