@@ -10,7 +10,7 @@ function fixture(balance,fail=false) {
   const elements=new Map();
   const element=()=>({style:{},children:[],textContent:'',disabled:false,append(...children){this.children.push(...children)},setAttribute(){},addEventListener(){},querySelector(tag){return this.children.find(x=>x.tag===tag)},showModal(){this.open=true},close(){this.open=false}});
   const document={createElement(tag){return {...element(),tag}},body:element(),querySelectorAll(){return []},getElementById(id){if(!elements.has(id)) elements.set(id,element());return elements.get(id)},addEventListener(){}};
-  const context=vm.createContext({document,window:{},console,Set,fetch:async()=>{checks++;return {ok:!fail,json:async()=>({balance})}},readVideoInput:()=>({url:'https://example.invalid/video'}),api:async()=>{submissions++;return {job_id:'job',success:true}},statusEl:{},startPolling(){},updateQuotaDisplay(){},activeJobId:null});
+  const context=vm.createContext({document,window:{},console,Set,fetch:async()=>{checks++;return {ok:!fail,json:async()=>({balance})}},readVideoInput:()=>({url:'https://example.invalid/video'}),api:async()=>{submissions++;return {job_id:'job',success:true}},statusEl:{},startPolling(){},loadHistory(){},updateQuotaDisplay(){},activeJobId:null});
   vm.runInContext(source,context);
   return {context,document,checks:()=>checks,submissions:()=>submissions};
 }

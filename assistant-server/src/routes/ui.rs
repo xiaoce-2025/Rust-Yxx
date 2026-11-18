@@ -66,6 +66,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/ta", get(super::ta::page))
         .route("/settings", get(settings_page))
         .route("/user-center", get(user_center_page))
+        .route("/task-history", get(task_history_page))
         .route_layer(middleware::from_fn_with_state(state, require_login))
 }
 
@@ -164,6 +165,10 @@ fn replay_page(source: &str, active_path: &str, title: &str, description: &str) 
         .replacen("/* replay-hero */", include_str!("../../templates/replay-hero.css").trim_start(), 1)
         .replacen("    <!-- replay-hero -->", hero.trim_end(), 1);
     site_page(&page, active_path)
+}
+
+async fn task_history_page()->Html<String> {
+    site_page(include_str!("../../templates/task-history.html"),"/task-history")
 }
 
 async fn user_center_page() -> Html<String> {

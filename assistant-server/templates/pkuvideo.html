@@ -123,7 +123,7 @@
           </div>
           <div class="toolbar">
             <button id="submitBtn">提交处理任务</button>
-            <button id="historyBtn" class="ghost">查看历史记录</button>
+            <button id="historyBtn" class="ghost">刷新任务列表</button>
             <button id="goAppBtn" class="ghost">返回首页</button>
           </div>
         </section>
@@ -134,8 +134,9 @@
             <div class="steps" id="steps" aria-live="polite"></div>
           </section>
         </div>
-        <section class="card" id="historySection" style="display: none;" aria-labelledby="historyTitle">
-          <h2 id="historyTitle">历史任务记录</h2>
+        <section class="card" id="historySection" aria-labelledby="historyTitle">
+          <h2 id="historyTitle">已存储的直链任务 <small id="storageCount">0 / 3</small></h2>
+          <p class="sub">最多保留 3 个直链任务；课程笔记请在课程页面管理。删除文件可释放名额，任务记录仍可在<a href="/task-history">历史任务</a>中查询。</p>
           <div id="historyList"></div>
         </section>
       </div>
@@ -172,6 +173,7 @@
       const res = await fetch(path, {
         method,
         credentials: "include",
+        cache: "no-store",
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined
       });
@@ -245,6 +247,7 @@
         activeJobId=resp.job_id;
         statusEl.textContent='提交成功，任务已入队。';
         startPolling();
+        loadHistory();
       } catch(error) { statusEl.textContent='提交失败: '+error.message; }
       finally { creditSubmitting=false;button.disabled=false; }
     }
@@ -346,6 +349,7 @@
         if (job.status === "succeeded" || job.status === "failed") {
           clearInterval(pollTimer);
           pollTimer = null;
+          loadHistory();
         }
       } catch (err) {
         statusEl.textContent = "查询任务失败: " + err.message;
@@ -358,13 +362,16 @@
       pollTimer = setInterval(pollJob, 2000);
     }
 
+    let historyTimer = null;
     async function loadHistory() {
+      clearTimeout(historyTimer);
       try {
-        const jobs = await api("/api/pkuvideo/jobs");
+        const jobs = await api("/api/pkuvideo/standalone-jobs");
+        document.getElementById("storageCount").textContent = `${jobs.length} / 3`;
         const historyList = document.getElementById("historyList");
         
         if (jobs.length === 0) {
-          historyList.innerHTML = "暂无历史任务记录";
+          historyList.innerHTML = "暂无已存储的直链任务";
         } else {
           historyList.innerHTML = jobs.map(job => {
             const statusText = job.status === "succeeded" ? "已完成" : (job.status === "failed" ? "失败" : "处理中");
@@ -376,11 +383,11 @@
                   <span style="color: ${statusColor}; font-weight: bold;">${statusText}</span>
                 </div>
                 <div class="history-info">
-                  <div>视频链接: ${esc(job.video_url)}</div>
+                  <div>任务 ID: ${esc(job.id)}</div>
                   <div class="history-actions">
                     ${job.pdf_path ? `<button onclick="downloadPdf('${job.id}')" class="action-btn" style="background: var(--accent); color: #fff;">下载 PDF</button>` : ""}
                     ${job.tex_url ? `<button onclick="downloadPdf('${job.id}', 'tex')" class="action-btn">下载 TeX</button>` : ""}
-                    <button onclick="deleteJob('${job.id}')" class="action-btn delete">删除任务</button>
+                    ${["succeeded", "failed"].includes(job.status) ? `<button onclick="deleteJob('${job.id}')" class="action-btn delete">删除任务文件</button>` : ""}
                   </div>
                 </div>
               </div>
@@ -389,20 +396,21 @@
         }
         
         document.getElementById("historySection").style.display = "block";
+        if (jobs.some(job => ["pending", "running"].includes(job.status))) historyTimer = setTimeout(loadHistory, 5000);
       } catch (err) {
-        statusEl.textContent = "加载历史记录失败: " + err.message;
+        statusEl.textContent = "加载已存储任务失败: " + err.message;
       }
     }
 
     async function deleteJob(jobId) {
-      if (!confirm("确定要删除此任务吗？删除后将无法恢复，相关文件也会被删除。")) {
+      if (!confirm("确定要删除此任务文件并释放存储名额吗？文件无法恢复，历史任务记录仍会保留。")) {
         return;
       }
 
       try {
         statusEl.textContent = "正在删除任务...";
         await api("/api/pkuvideo/jobs/" + jobId, "DELETE");
-        statusEl.textContent = "任务删除成功";
+        statusEl.textContent = "任务文件已删除，历史记录保留";
         // 刷新历史记录
         await loadHistory();
       } catch (err) {
@@ -461,13 +469,7 @@
     document.getElementById("submitBtn").addEventListener("click", checkM3u8AndSubmit);
     document.getElementById("historyBtn").addEventListener("click", loadHistory);
 
-    async function openLinkedHistory() {
-      if (location.hash !== '#history') return;
-      await loadHistory();
-      document.getElementById('historySection').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-    window.addEventListener('hashchange', openLinkedHistory);
-    checkLogin().then(openLinkedHistory);
+    checkLogin().then(loadHistory);
   </script>
 </body>
 </html>

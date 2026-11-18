@@ -64,6 +64,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideo/check-m3u8", post(check_m3u8))
         .route("/api/pkuvideo/jobs/:id", get(job_detail))
         .route("/api/pkuvideo/jobs", get(job_list))
+        .route("/api/pkuvideo/standalone-jobs", get(standalone_job_list))
+        .route("/api/video-task-history", get(task_history))
         .route("/api/pkuvideo/jobs/:id/reexecute", post(reexecute_step))
         .route("/api/pkuvideo/jobs/:id", delete(delete_job))
         .route("/api/pkuvideo/jobs/:id/pdf", get(download_pdf))
@@ -195,6 +197,26 @@ async fn job_list(
     Ok(Json(user_jobs.iter().map(public_job).collect()))
 }
 
+async fn standalone_job_list(State(state):State<AppState>,current:CurrentUser)->Json<Vec<serde_json::Value>> {
+    let jobs=state.pkuvideo_jobs.read().await;
+    let mut jobs:Vec<_>=jobs.values().filter(|job|job.user_id==current.id && job.is_stored_standalone()).collect();
+    jobs.sort_by_key(|job|std::cmp::Reverse(job.created_at));
+    Json(jobs.into_iter().map(public_job).collect())
+}
+
+async fn task_history(State(state):State<AppState>,current:CurrentUser)->Json<Vec<serde_json::Value>> {
+    let jobs=state.pkuvideo_jobs.read().await;
+    let mut jobs:Vec<_>=jobs.values().filter(|job|job.user_id==current.id).collect();
+    jobs.sort_by_key(|job|std::cmp::Reverse(job.created_at));
+    Json(jobs.into_iter().map(|job| {
+        let mut record=public_job(job);
+        if let Some(record)=record.as_object_mut() {
+            for key in ["pdf_path","tex_url","video_url","steps"] {record.remove(key);}
+        }
+        record
+    }).collect())
+}
+
 // Never serialize internal URLs, keys or local filesystem paths to normal users.
 fn public_job(job: &PkuVideoJob) -> serde_json::Value {
     let steps: Vec<_> = job.steps.iter().map(|step|serde_json::json!({
@@ -202,7 +224,7 @@ fn public_job(job: &PkuVideoJob) -> serde_json::Value {
         "message":if step.status==PipelineStatus::Failed { "处理失败，请重试或联系管理员" } else { step.message.as_str() }
     })).collect();
     serde_json::json!({"id":job.id,"created_at":job.created_at,"updated_at":job.updated_at,
-        "status":job.status,"steps":steps,"error":job.error.as_ref().map(|_| match job.failure_code.as_deref() {
+        "status":job.status,"artifacts_deleted_at":job.artifacts_deleted_at,"steps":steps,"error":job.error.as_ref().map(|_| match job.failure_code.as_deref() {
             Some("INSUFFICIENT_NOTE_CREDITS")=>"处理失败 · 额度不足：课堂笔记处理额度不足，请联系管理员添加额度",
             Some("DURATION_UNAVAILABLE"|"BILLING_COMMIT_FAILED")=>"结果交付中，正在等待计费恢复",
             _=>"处理失败，请重试或联系管理员"
@@ -211,8 +233,8 @@ fn public_job(job: &PkuVideoJob) -> serde_json::Value {
         "course_date":job.course_date,"regenerate":job.regenerate,"priority":job.priority,
         "postprocessing":job.postprocessing,"started_at":job.started_at,"finished_at":job.finished_at,
         "result_source":job.result_source,"video_url":"已隐藏源链接",
-        "pdf_path":if job.status == PipelineStatus::Succeeded { Some(format!("/api/pkuvideo/jobs/{}/pdf",job.id)) } else { None },
-        "tex_url":if job.status == PipelineStatus::Succeeded { Some(format!("/api/pkuvideo/jobs/{}/tex",job.id)) } else { None }})
+        "pdf_path":if job.status == PipelineStatus::Succeeded && job.artifacts_deleted_at.is_none() { Some(format!("/api/pkuvideo/jobs/{}/pdf",job.id)) } else { None },
+        "tex_url":if job.status == PipelineStatus::Succeeded && job.artifacts_deleted_at.is_none() { Some(format!("/api/pkuvideo/jobs/{}/tex",job.id)) } else { None }})
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,6 +250,7 @@ async fn reexecute_step(
     if req.step > 4 { return Err(ApiError::BadRequest("无效的步骤索引".into())); }
     let job = state.pkuvideo_jobs.read().await.get(&id).cloned().ok_or(ApiError::NotFound)?;
     if job.user_id != current_user.id { return Err(ApiError::Forbidden("无权访问".into())); }
+    if job.artifacts_deleted_at.is_some() { return Err(ApiError::NotFound); }
     if matches!(job.status, PipelineStatus::Pending | PipelineStatus::Running) || job.course_id.is_some() {
         return Err(ApiError::Conflict("活动任务不能重执行；课节任务请通过课节重新处理接口提交".into()));
     }
@@ -244,53 +267,46 @@ async fn delete_job(
     current_user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // 先获取任务信息
-    let job_info = {
-        let jobs = state.pkuvideo_jobs.read().await;
-        let job = jobs.get(&id).ok_or(ApiError::NotFound)?;
-
-        if job.user_id != current_user.id {
-            return Err(ApiError::Forbidden("无权访问".to_string()));
-        }
-
-        // 复制需要的信息
-        (job.artifacts_dir.clone(), job.status.clone(), job.course_id.is_none())
-    };
-
-    let (artifacts_dir, job_status, charged_storage) = job_info;
-    if matches!(job_status, PipelineStatus::Pending | PipelineStatus::Running) {
+    let job=state.pkuvideo_jobs.read().await.get(&id).cloned().ok_or(ApiError::NotFound)?;
+    if job.user_id!=current_user.id {return Err(ApiError::Forbidden("无权访问".into()));}
+    if job.course_id.is_some() {return Err(ApiError::BadRequest("课程笔记请在课程页面管理".into()));}
+    if matches!(job.status,PipelineStatus::Pending|PipelineStatus::Running) {
         return Err(ApiError::Conflict("排队或处理中的任务不能删除".into()));
     }
-
-    if let (Ok(root),Ok(target)) = (
-        tokio::fs::canonicalize("./data/pkuvideo_jobs").await,
-        tokio::fs::canonicalize(&artifacts_dir).await,
-    ) {
-        if target.starts_with(&root) && target != root {
-            tokio::fs::remove_dir_all(target).await.map_err(|e|ApiError::Internal(e.to_string()))?;
+    // Remove standalone files first. A failed cleanup must not free a storage slot.
+    if let (Ok(root),Ok(target))=(tokio::fs::canonicalize("./data/pkuvideo_jobs").await,tokio::fs::canonicalize(&job.artifacts_dir).await) {
+        if target.starts_with(&root) && target!=root {
+            match tokio::fs::remove_dir_all(target).await {
+                Ok(())=>{},
+                Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+                Err(error)=>return Err(ApiError::Internal(error.to_string())),
+            }
         }
     }
-
-    let _ = tokio::fs::remove_file(state.store.user_tex_path(current_user.id, id)).await;
-
-    // 从内存中删除任务
-    {
-        let mut jobs = state.pkuvideo_jobs.write().await;
-        jobs.remove(&id);
+    match tokio::fs::remove_file(state.store.user_tex_path(current_user.id,id)).await {
+        Ok(())=>{},
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+        Err(error)=>return Err(ApiError::Internal(error.to_string())),
     }
-
-    // 从文件存储中删除任务
-    state.store.delete_pkuvideo_job(id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    // 如果任务已完成，返还储存限额
-    if charged_storage && job_status == PipelineStatus::Succeeded {
-        state.store.increase_storage_quota(current_user.id, 1).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-    }
+    let archived=state.store.archive_standalone_job(id,current_user.id).await.map_err(storage_error)?;
+    state.pkuvideo_jobs.write().await.insert(id,archived);
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "message": "任务删除成功"
+        "message": "任务文件已删除，历史记录保留"
     })))
+}
+
+fn storage_error(error:Box<dyn std::error::Error+Send+Sync>)->ApiError {
+    match error.to_string().as_str() {
+        "STANDALONE_STORAGE_FULL"=>ApiError::Conflict("课堂笔记生成页最多保留 3 个任务，请先删除已有任务文件释放名额".into()),
+        "STORAGE_QUOTA_EXCEEDED"=>ApiError::Forbidden("存储空间不足，请先删除已有任务文件".into()),
+        "ACTIVE_JOB"=>ApiError::Conflict("排队或处理中的任务不能删除".into()),
+        "COURSE_JOB"=>ApiError::BadRequest("课程笔记请在课程页面管理".into()),
+        "OWNER_MISMATCH"=>ApiError::Forbidden("无权访问".into()),
+        "JOB_NOT_FOUND"=>ApiError::NotFound,
+        _=>ApiError::Internal(error.to_string()),
+    }
 }
 
 fn validate_input(video_url: &str) -> Result<(), ApiError> {
@@ -331,9 +347,6 @@ async fn enqueue_job(
     let media = crate::services::prepared_media::prepare_teaching(&video_url, &pku_auth_one,
         &pku_auth_two, &state.login_cache, manual_key.as_deref()).await.map_err(ApiError::BadRequest)?;
 
-    // 扣除储存资源限额
-    state.store.decrease_storage_quota(user_id, 1).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-
     let job_id = Uuid::new_v4();
     let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");
 
@@ -341,19 +354,15 @@ async fn enqueue_job(
     job.regenerate = regenerate;
     // Arbitrary direct URLs may contain private media. They stay outside sharing.
     // Classroom discovery uses the authorized course submission path instead.
-    state.pkuvideo_jobs.write().await.insert(job_id, job.clone());
-    
-    // 保存到FileStore
-    if let Err(error)=state.store.insert_pkuvideo_job(job).await {
-        state.pkuvideo_jobs.write().await.remove(&job_id);
-        let _=state.store.increase_storage_quota(user_id,1).await;
-        return Err(ApiError::Internal(error.to_string()));
-    }
+    state.store.reserve_standalone_job(job.clone()).await.map_err(storage_error)?;
+    state.pkuvideo_jobs.write().await.insert(job_id, job);
 
     if let Err(error) = crate::services::video_jobs::enqueue_prepared_job(&state, job_id, user_id, media).await {
-        let _ = state.store.increase_storage_quota(user_id, 1).await;
-        state.pkuvideo_jobs.write().await.remove(&job_id);
-        let _ = state.store.delete_pkuvideo_job(job_id).await;
+        let mut failed=state.pkuvideo_jobs.read().await.get(&job_id).cloned().ok_or(ApiError::NotFound)?;
+        failed.status=PipelineStatus::Failed;failed.error=Some("提交队列失败".into());failed.finished_at=Some(chrono::Utc::now());
+        state.store.update_pkuvideo_job(failed.clone()).await.map_err(|e|ApiError::Internal(e.to_string()))?;
+        state.pkuvideo_jobs.write().await.insert(job_id,failed);
+        if let Ok(archived)=state.store.archive_standalone_job(job_id,user_id).await {state.pkuvideo_jobs.write().await.insert(job_id,archived);}
         let _ = state.store.set_note_billing_state(job_id,"FAILED_NO_CHARGE",Some("ENQUEUE_FAILED")).await;
         let _ = state.store.delete_sidecar(&PathBuf::from("note_billing_media").join(job_id.to_string())).await;
         return Err(ApiError::Internal(error));
@@ -385,6 +394,7 @@ async fn download_pdf(
 async fn owned_completed_job(state: &AppState, user: Uuid, id: Uuid) -> Result<PkuVideoJob, ApiError> {
     let job = state.pkuvideo_jobs.read().await.get(&id).cloned().ok_or(ApiError::NotFound)?;
     if job.user_id != user { return Err(ApiError::Forbidden("无权访问".into())); }
+    if job.artifacts_deleted_at.is_some() { return Err(ApiError::NotFound); }
     if job.status != PipelineStatus::Succeeded { return Err(ApiError::Conflict("任务尚未成功完成".into())); }
     Ok(job)
 }
@@ -430,5 +440,82 @@ mod credential_optional_tests {
         assert!(validate_input(&check.video_url).is_ok());
         assert!(validate_input("").is_err());
         assert!(validate_input("file:///tmp/video.m3u8").is_err());
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crate::{config::Settings,store::{FileStore,FileUser,FileUserSession}};
+    use chrono::{Duration,Utc};
+    use std::sync::Arc;
+    #[tokio::test]
+    async fn history_is_private_read_only_and_standalone_list_excludes_course_and_deleted() {
+        let temp=tempdir::TempDir::new("task-history-api").unwrap();
+        let settings:Settings=serde_json::from_value(serde_json::json!({
+            "server":{"address":"127.0.0.1","port":0},
+            "wechat":{"api_base_url":"","oauth_app_id":"","oauth_app_secret":"","redirect_uri":"","qr_bot_type":""},
+            "security":{"session_ttl_hours":1},"cors":{"allowed_origins":[],"allow_credentials":false},
+            "audioapi_paraformer":{},"llm_deepseek":{}
+        })).unwrap();
+        let store=Arc::new(FileStore::new(temp.path().into()).await.unwrap());
+        let owner=Uuid::new_v4();let token=Uuid::new_v4();let stranger=Uuid::new_v4();
+        store.insert_user(FileUser{id:owner,username:"owner".into(),email:"owner@example.invalid".into(),password_hash:String::new(),is_active:true,created_at:Utc::now(),updated_at:Utc::now(),storage_quota:3,processing_quota:10,processing_priority:5,iaaa_encrypted_password:None,iaaa_public_key:None}).await.unwrap();
+        store.insert_session(FileUserSession{session_id:token,user_id:owner,expires_at:Utc::now()+Duration::hours(1),created_at:Utc::now(),user_agent:None,ip_address:None}).await.unwrap();
+        let direct=Uuid::new_v4();let course=Uuid::new_v4();let deleted=Uuid::new_v4();let foreign=Uuid::new_v4();
+        for (id,user,course_id,removed) in [(direct,owner,None,false),(course,owner,Some("course"),false),(deleted,owner,None,true),(foreign,stranger,None,false)] {
+            let mut job=PkuVideoJob::new(id,user,"SECRET_SOURCE_URL".into(),"SECRET_FILE_PATH".into());
+            job.course_id=course_id.map(String::from);job.status=PipelineStatus::Succeeded;
+            if removed {job.artifacts_deleted_at=Some(Utc::now());}
+            if id==direct {store.reserve_standalone_job(job).await.unwrap();}
+            else {store.insert_pkuvideo_job(job).await.unwrap();}
+        }
+        let direct_file=store.user_tex_path(owner,direct);
+        crate::store::atomic_tex(&direct_file,b"\\section{Private direct note}").unwrap();
+        let state=AppState::new(settings,store.clone());
+        *state.pkuvideo_jobs.write().await=store.get_all_pkuvideo_jobs().await;
+        let app=crate::routes::ui::routes(state.clone()).merge(routes()).with_state(state);
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base=format!("http://{}",listener.local_addr().unwrap());
+        let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
+        let client=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        assert_eq!(client.get(format!("{base}/task-history")).send().await.unwrap().status(),303);
+        for path in ["/api/video-task-history","/api/pkuvideo/standalone-jobs"] {
+            assert_eq!(client.get(format!("{base}{path}")).send().await.unwrap().status(),401);
+        }
+        let page=client.get(format!("{base}/task-history")).bearer_auth(token).send().await.unwrap();
+        assert_eq!(page.status(),200);assert_eq!(page.headers()["cache-control"],"no-store");
+        let html=page.text().await.unwrap();assert!(html.contains("此页面仅供查询"));
+        assert!(!html.contains("downloadPdf")&&!html.contains("deleteJob")&&!html.contains("/download-tex"));
+        let history:Vec<serde_json::Value>=client.get(format!("{base}/api/video-task-history?user_id={stranger}")).bearer_auth(token).send().await.unwrap().json().await.unwrap();
+        assert_eq!(history.len(),3);
+        assert!(history.iter().any(|j|j["id"]==deleted.to_string()));
+        assert!(history.iter().any(|j|j["id"]==course.to_string()));
+        for record in &history {
+            assert!(record.get("pdf_path").is_none()&&record.get("tex_url").is_none());
+            assert!(!record.to_string().contains("SECRET_"));
+        }
+        let list:Vec<serde_json::Value>=client.get(format!("{base}/api/pkuvideo/standalone-jobs")).bearer_auth(token).send().await.unwrap().json().await.unwrap();
+        assert_eq!(list.len(),1);assert_eq!(list[0]["id"],direct.to_string());
+        // A cleanup error must preserve the stored item and its reserved slot.
+        std::fs::remove_file(&direct_file).unwrap();std::fs::create_dir(&direct_file).unwrap();
+        assert_eq!(client.delete(format!("{base}/api/pkuvideo/jobs/{direct}")).bearer_auth(token).send().await.unwrap().status(),500);
+        assert_eq!(store.get_user(owner).await.unwrap().storage_quota,2);
+        assert!(store.get_pkuvideo_job(direct).await.unwrap().artifacts_deleted_at.is_none());
+        std::fs::remove_dir(&direct_file).unwrap();crate::store::atomic_tex(&direct_file,b"\\section{Private direct note}").unwrap();
+        assert_eq!(client.delete(format!("{base}/api/pkuvideo/jobs/{course}")).bearer_auth(token).send().await.unwrap().status(),400);
+        for _ in 0..2 {
+            assert_eq!(client.delete(format!("{base}/api/pkuvideo/jobs/{direct}")).bearer_auth(token).send().await.unwrap().status(),200);
+        }
+        assert!(!direct_file.exists());
+        assert_eq!(store.get_user(owner).await.unwrap().storage_quota,3);
+        let list:Vec<serde_json::Value>=client.get(format!("{base}/api/pkuvideo/standalone-jobs")).bearer_auth(token).send().await.unwrap().json().await.unwrap();
+        assert!(list.is_empty());
+        let retained:Vec<serde_json::Value>=client.get(format!("{base}/api/video-task-history")).bearer_auth(token).send().await.unwrap().json().await.unwrap();
+        assert_eq!(retained.len(),3);
+        assert!(retained.iter().find(|j|j["id"]==direct.to_string()).unwrap()["artifacts_deleted_at"].is_string());
+        assert_eq!(client.post(format!("{base}/api/video-task-history")).bearer_auth(token).send().await.unwrap().status(),405);
+        assert_eq!(client.get(format!("{base}/api/pkuvideo/jobs/{deleted}/tex")).bearer_auth(token).send().await.unwrap().status(),404);
+        server.abort();
     }
 }

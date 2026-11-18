@@ -13,6 +13,8 @@ mod operations;
 mod tex_cache;
 #[path = "store_note_billing.rs"]
 pub mod note_billing;
+#[path = "store_video_storage.rs"]
+mod video_storage;
 pub use tex_cache::{tex_hash, reuse_cached_tex, GlobalTexEntry};
 pub(crate) use tex_cache::{atomic_tex, valid_tex};
 pub use operations::{SiteFeatures, FEATURES_PATH};

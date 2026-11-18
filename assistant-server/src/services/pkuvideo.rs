@@ -37,6 +37,9 @@ pub struct PkuVideoJob {
     pub updated_at: DateTime<Utc>,
     pub status: PipelineStatus,
     pub video_url: String,
+    /// File deletion releases a standalone slot while preserving queue history.
+    #[serde(default)]
+    pub artifacts_deleted_at: Option<DateTime<Utc>>,
     pub steps: Vec<PipelineStep>,
     pub artifacts_dir: String,
     pub transcript_path: Option<String>,
@@ -91,6 +94,10 @@ pub struct PkuVideoJob {
 }
 
 impl PkuVideoJob {
+    pub fn is_stored_standalone(&self) -> bool {
+        self.course_id.is_none() && self.artifacts_deleted_at.is_none()
+    }
+
     pub fn new(id: Uuid, user_id: Uuid, video_url: String, artifacts_dir: String) -> Self {
         let step_names = [
             "download_video",
@@ -107,6 +114,7 @@ impl PkuVideoJob {
             updated_at: Utc::now(),
             status: PipelineStatus::Pending,
             video_url,
+            artifacts_deleted_at: None,
             steps: step_names
                 .iter()
                 .map(|name| PipelineStep {
