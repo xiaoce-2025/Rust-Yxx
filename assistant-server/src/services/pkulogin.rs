@@ -347,7 +347,7 @@ mod session_tests {
 
     #[tokio::test]
     async fn failed_teaching_callback_is_not_cached_and_next_attempt_restarts_iaaa() {
-        let cache=LoginCache::new(60);
+        let cache=LoginCache::new();
         let mut iaaa_calls=0;
         let first:Result<PkuLoginResult,String>=cached_teaching_login("ticket-test",&cache,|| {
             iaaa_calls+=1;
@@ -373,12 +373,14 @@ mod session_tests {
     }
 
     #[tokio::test]
-    async fn cached_session_is_reused_regardless_of_ua_platform() {
-        let cache = LoginCache::new(60);
+    async fn old_cached_session_is_reused_regardless_of_ua_platform() {
+        let cache = LoginCache::new();
         let dir = tempdir::TempDir::new("ua-cache").unwrap();
         let cookie = dir.path().join("cookies.txt");
         std::fs::write(&cookie, "teaching-cookie").unwrap();
-        cache.insert("ua-test", PkuLoginResult::new(cookie.clone(), "Android mobile".into())).await;
+        let mut session = PkuLoginResult::new(cookie.clone(), "Android mobile".into());
+        session.created_at = Utc::now() - chrono::Duration::days(365);
+        cache.insert("ua-test", session).await;
         let entry = cached_teaching_login("ua-test", &cache, || async {
             panic!("UA platform must not trigger another IAAA login")
         }).await.unwrap();
@@ -428,7 +430,7 @@ mod session_tests {
 
     #[tokio::test]
     async fn authentication_retry_is_bounded_and_failure_evicts_new_session() {
-        let cache = LoginCache::new(60);
+        let cache = LoginCache::new();
         let mut login = cache.insert("user", test_session()).await;
         let mut calls = 0;
         let mut refreshes = 0;
@@ -447,7 +449,7 @@ mod session_tests {
 
     #[tokio::test]
     async fn network_failure_clears_cache_without_relogin() {
-        let cache = LoginCache::new(60);
+        let cache = LoginCache::new();
         let mut login = cache.insert("user", test_session()).await;
         let result: Result<(), String> = session_operation_with_refresh(&mut login,
             |_| Err("网络连接失败".into()),
@@ -457,12 +459,12 @@ mod session_tests {
     }
 
     #[tokio::test]
-    async fn running_operation_uses_expired_lease_without_refreshing() {
-        let cache = LoginCache::new(60);
+    async fn running_operation_reuses_old_session_without_refreshing() {
+        let cache = LoginCache::new();
         let mut session = test_session();
-        session.created_at = Utc::now() - chrono::Duration::minutes(61);
+        session.created_at = Utc::now() - chrono::Duration::days(365);
         let mut login = cache.insert("user", session).await;
-        cache.cleanup_expired().await;
+        cache.cleanup_missing_cookies().await;
         let result = session_operation_with_refresh(&mut login,
             |session| Ok(session.cookie_file.is_file()),
             || async { panic!("running operation must not check TTL") }).await;
@@ -471,7 +473,7 @@ mod session_tests {
 
     #[tokio::test]
     async fn authentication_retry_can_succeed_with_new_session() {
-        let cache = LoginCache::new(60);
+        let cache = LoginCache::new();
         let mut login = cache.insert("user", test_session()).await;
         let old_path = login.cookie_file.clone();
         let mut calls = 0;
@@ -515,7 +517,7 @@ mod session_tests {
         let dir = tempdir::TempDir::new("pku-session-test").unwrap();
         let login = PkuLoginResult::new(dir.path().join("cookies.txt"), "Windows session-test-agent".into());
         download_in_session(&login, &format!("{base}/login")).unwrap();
-        let cache = LoginCache::new(60);
+        let cache = LoginCache::new();
         let login = cache.insert("test-user", login).await;
         fetch_with_cookie_redirect(
             login.cookie_file.to_str().unwrap(), &login.user_agent, &format!("{base}/watch"),

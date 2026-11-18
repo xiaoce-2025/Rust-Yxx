@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     })?;
 
     let login_cache = Arc::new(services::login_cache::LoginCache::persistent(
-        60, data_dir.join("teaching_sessions"),
+        data_dir.join("teaching_sessions"),
     )?);
     let store = Arc::new(store::FileStore::new(data_dir).await?);
 
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cache = app_state.login_cache.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop { interval.tick().await; cache.cleanup_expired().await; }
+        loop { interval.tick().await; cache.cleanup_missing_cookies().await; }
     });
     // 从FileStore加载pkuvideo_jobs到内存
     app_state.load_pkuvideo_jobs().await;

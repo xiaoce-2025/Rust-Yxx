@@ -26,7 +26,7 @@ impl Drop for CookieFile {
     }
 }
 
-/// Holding a lease pins the cookie file, regardless of cache expiration.
+/// Holding a lease pins the cookie file, until all running requests release it.
 #[derive(Debug, Clone)]
 pub struct LoginCacheEntry {
     pub cookie_file: PathBuf,
@@ -87,7 +87,6 @@ impl LoginCacheEntry {
 pub struct LoginCache {
     cache: Arc<Entries>,
     login_locks: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
-    ttl_minutes: i64,
     directory: Option<PathBuf>,
 }
 #[derive(Serialize, Deserialize)]
@@ -97,23 +96,22 @@ struct SavedSession {
     created_at: DateTime<Utc>,
 }
 impl LoginCache {
-    pub fn new(ttl_minutes: i64) -> Self {
+    pub fn new() -> Self {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
             login_locks: Arc::new(Mutex::new(HashMap::new())),
-            ttl_minutes,
             directory: None,
         }
     }
     /// Cookie files stay live on disk, so curl updates survive a process restart too.
-    pub fn persistent(ttl_minutes: i64, directory: PathBuf) -> std::io::Result<Self> {
+    pub fn persistent(directory: PathBuf) -> std::io::Result<Self> {
         std::fs::create_dir_all(&directory)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
         }
-        let mut cache = Self::new(ttl_minutes);
+        let mut cache = Self::new();
         cache.directory = Some(directory.clone());
         for item in std::fs::read_dir(&directory)? {
             let path = item?.path();
@@ -259,7 +257,7 @@ impl LoginCache {
             entry.retire();
         }
     }
-    pub async fn cleanup_expired(&self) {
+    pub async fn cleanup_missing_cookies(&self) {
         self.cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -272,8 +270,8 @@ impl LoginCache {
             });
     }
     fn is_valid(&self, entry: &LoginCacheEntry) -> bool {
-        Utc::now() - entry.created_at < chrono::Duration::minutes(self.ttl_minutes)
-            && entry.cookie_file.is_file()
+        // The teaching server decides when cookies expire; age alone never evicts a session.
+        entry.cookie_file.is_file()
     }
 }
 
@@ -286,11 +284,11 @@ mod tests {
         LoginCacheEntry::new(path, "test-ua".into())
     }
     #[tokio::test]
-    async fn restart_restores_cookie_updates_user_agent_and_original_expiry() {
+    async fn restart_restores_old_cookie_updates_user_agent_and_login_time() {
         let dir = tempdir::TempDir::new("persistent-login").unwrap();
-        let cache = LoginCache::persistent(60, dir.path().into()).unwrap();
+        let cache = LoginCache::persistent(dir.path().into()).unwrap();
         let mut original = session();
-        original.created_at = Utc::now() - chrono::Duration::minutes(20);
+        original.created_at = Utc::now() - chrono::Duration::days(365);
         let entry = cache.insert("user", original).await;
         let created = entry.created_at;
         let cookie = entry.cookie_file.clone();
@@ -298,7 +296,7 @@ mod tests {
         drop(entry);
         drop(cache);
         assert!(cookie.is_file());
-        let restored = LoginCache::persistent(60, dir.path().into()).unwrap();
+        let restored = LoginCache::persistent(dir.path().into()).unwrap();
         let entry = restored.get("user").await.unwrap();
         assert_eq!(entry.created_at, created);
         assert_eq!(entry.user_agent, "test-ua");
@@ -311,7 +309,7 @@ mod tests {
         drop(entry);
         assert!(!cookie.exists());
         drop(restored);
-        assert!(LoginCache::persistent(60, dir.path().into())
+        assert!(LoginCache::persistent(dir.path().into())
             .unwrap()
             .get("user")
             .await
@@ -319,37 +317,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_expiry_and_stale_failure_never_resurrect_sessions() {
+    async fn persistent_old_sessions_survive_and_stale_failures_do_not_evict_replacements() {
         let dir = tempdir::TempDir::new("persistent-login").unwrap();
-        let cache = LoginCache::persistent(60, dir.path().into()).unwrap();
+        let cache = LoginCache::persistent(dir.path().into()).unwrap();
         let old = cache.insert("user", session()).await;
         let new = cache.insert("user", session()).await;
         old.invalidate();
         let cookie = new.cookie_file.clone();
         drop(old);
         drop(new);
-        let mut expired = session();
-        expired.created_at = Utc::now() - chrono::Duration::minutes(61);
-        drop(cache.insert("expired", expired).await);
+        let mut aged = session();
+        aged.created_at = Utc::now() - chrono::Duration::days(365);
+        drop(cache.insert("aged", aged).await);
         drop(cache);
-        let restored = LoginCache::persistent(60, dir.path().into()).unwrap();
+        let restored = LoginCache::persistent(dir.path().into()).unwrap();
         assert_eq!(restored.get("user").await.unwrap().cookie_file, cookie);
-        assert!(restored.get("expired").await.is_none());
+        assert!(restored.get("aged").await.is_some());
         restored.get("user").await.unwrap().invalidate();
         drop(restored);
-        assert!(LoginCache::persistent(60, dir.path().into())
+        assert!(LoginCache::persistent(dir.path().into())
             .unwrap()
             .get("user")
             .await
             .is_none());
     }
     #[tokio::test]
-    async fn expiry_removes_cache_but_keeps_running_task_alive() {
-        let cache = LoginCache::new(60);
+    async fn invalidation_removes_cache_but_keeps_running_task_alive() {
+        let cache = LoginCache::new();
         let mut entry = session();
-        entry.created_at = Utc::now() - chrono::Duration::minutes(61);
+        entry.created_at = Utc::now() - chrono::Duration::days(365);
         let active = cache.insert("user", entry).await;
         let path = active.cookie_file.clone();
+        active.invalidate();
         assert!(cache.get("user").await.is_none());
         assert!(path.exists());
         drop(active);
@@ -357,11 +356,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_is_reusable_before_one_hour_and_not_renewed_by_reads() {
-        let cache = LoginCache::new(60);
+    async fn old_session_survives_reads_and_periodic_cleanup() {
+        let cache = LoginCache::new();
         let mut entry = session();
-        entry.created_at = Utc::now() - chrono::Duration::minutes(59);
+        entry.created_at = Utc::now() - chrono::Duration::days(365);
         let entry = cache.insert("user", entry).await;
+        cache.cleanup_missing_cookies().await;
         let read = cache.get("user").await.unwrap();
         assert_eq!(read.created_at, entry.created_at);
         assert_eq!(
@@ -371,7 +371,7 @@ mod tests {
     }
     #[tokio::test]
     async fn old_failure_does_not_remove_new_session() {
-        let cache = LoginCache::new(60);
+        let cache = LoginCache::new();
         let old = cache.insert("user", session()).await;
         let new = cache.insert("user", session()).await;
         old.invalidate();
@@ -384,21 +384,20 @@ mod tests {
     }
     #[tokio::test]
     async fn missing_cookie_and_periodic_cleanup() {
-        let cache = LoginCache::new(60);
+        let cache = LoginCache::new();
         let entry = cache.insert("user", session()).await;
         std::fs::remove_file(&entry.cookie_file).unwrap();
         assert!(cache.get("user").await.is_none());
-        let mut expired = session();
-        let path = expired.cookie_file.clone();
-        expired.created_at = Utc::now() - chrono::Duration::hours(2);
-        drop(cache.insert("user", expired).await);
-        cache.cleanup_expired().await;
-        assert!(!path.exists());
+        let missing = cache.insert("missing", session()).await;
+        std::fs::remove_file(&missing.cookie_file).unwrap();
+        cache.cleanup_missing_cookies().await;
+        assert!(cache.get("missing").await.is_none());
+        assert!(cache.cache.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn replacement_releases_old_cookie_and_preserves_new_one() {
-        let cache = LoginCache::new(60);
+        let cache = LoginCache::new();
         let old = cache.insert("user", session()).await;
         let old_path = old.cookie_file.clone();
         drop(old);
@@ -413,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn simultaneous_cache_misses_share_one_login_lock() {
-        let cache = LoginCache::new(60);
+        let cache = LoginCache::new();
         let first = cache.login_lock("user").await;
         let guard = first.lock().await;
         let second = cache.login_lock("user").await;

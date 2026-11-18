@@ -161,14 +161,14 @@ mod tests {
             "https://invalid.example/video.m3u8",
             "",
             "",
-            &LoginCache::new(60),
+            &LoginCache::new(),
             Some("0123456789abcdef"),
         )
         .await
         .unwrap();
         assert!(media.enc_key.is_some());
         let error = prepare_teaching(
-            "https://invalid.example/video.m3u8", "", "", &LoginCache::new(60), None,
+            "https://invalid.example/video.m3u8", "", "", &LoginCache::new(), None,
         ).await.err().unwrap();
         assert!(error.contains("请提供 m3u8 解密密钥"));
     }
