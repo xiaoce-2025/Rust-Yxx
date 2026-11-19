@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>希元充值 | 「严小希」小助手</title>
+  <style>
+    body { margin: 0; }
+    .recharge { --red: #960b16; --ink: #291e20; --muted: #695b5e; --line: #eadcde;
+      color: var(--ink); background: #fcf9f9; padding-bottom: 52px;
+      font: 15px/1.55 Arial, "Microsoft YaHei", sans-serif; }
+    .recharge *, .recharge *::before, .recharge *::after { box-sizing: border-box; }
+    .recharge [hidden] { display: none; }
+    .recharge-inner { width: min(980px, calc(100% - 32px)); margin: auto; }
+    .recharge-hero { padding: 26px 0 32px; border-bottom: 1px solid var(--line); background: #f7eeee; }
+    .recharge a { color: var(--red); text-underline-offset: 4px; }
+    .recharge-heading { display: flex; align-items: end; flex-wrap: wrap; justify-content: space-between;
+      gap: 10px 28px; margin-top: 16px; }
+    .recharge h1 { font-size: clamp(32px, 6vw, 48px); line-height: 1.15; margin: 0; }
+    .recharge p { margin: 0; }
+    .recharge-balance { color: var(--muted); }
+    .recharge-balance strong { color: var(--red); font-size: 23px; margin-left: 6px; }
+    .recharge-body { padding-top: 28px; }
+    .recharge fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+    .recharge legend, .recharge h2 { font-size: 19px; font-weight: 700; padding: 0; margin: 0 0 14px; }
+    .recharge-plans { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .recharge-plan { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center;
+      padding: 16px; min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: #fff; cursor: pointer; }
+    .recharge-plan:has(:checked) { border-color: var(--red); background: #fff4f4; }
+    .recharge-plan:focus-within { outline: 2px solid var(--red); outline-offset: 2px; }
+    .recharge-plan > input { margin: 0; accent-color: var(--red); }
+    .recharge-plan > span { font-weight: 700; }
+    .recharge-plan > strong { grid-column: 1 / -1; color: var(--red); font-size: clamp(22px, 4vw, 29px); }
+    .recharge-plan > small { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
+    .recharge-custom { display: grid; gap: 7px; width: min(100%, 250px); margin-top: 18px; font-weight: 700; }
+    .recharge-custom input { width: 100%; padding: 10px; border: 1px solid #ad999c; border-radius: 6px; font: inherit; }
+    .recharge-summary, .recharge-result { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 18px; }
+    .recharge-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+      gap: 14px 24px; margin-top: 20px; }
+    .recharge-summary strong { color: var(--red); font-size: 22px; margin-left: 5px; }
+    .recharge-summary small { display: block; color: var(--muted); font-size: 13px; margin-top: 3px; }
+    .recharge button { color: white; background: var(--red); border: 0; border-radius: 7px;
+      padding: 10px 17px; min-height: 42px; font: inherit; font-weight: 700; cursor: pointer; }
+    .recharge button:disabled { opacity: .48; cursor: default; }
+    .recharge #checkout-status:not(:empty) { margin-top: 10px; color: var(--red); }
+    .recharge-result p { margin-bottom: 14px; }
+    .recharge-result button { margin-right: 12px; }
+    @media (max-width: 640px) {
+      .recharge-plans { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .recharge-plan { padding: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="recharge">
+    <div class="recharge-hero">
+      <div class="recharge-inner">
+        <a href="/user-center">← 返回用户中心</a>
+        <div class="recharge-heading">
+          <h1>希元充值</h1>
+          <p class="recharge-balance">当前余额 <strong id="recharge-balance">—</strong></p>
+        </div>
+      </div>
+    </div>
+    <div class="recharge-inner recharge-body">
+      <section class="recharge-result" id="recharge-result" hidden>
+        <h2>充值订单</h2>
+        <p id="result-status" role="status">正在确认充值结果…</p>
+        <button type="button" id="refresh-order">刷新到账状态</button>
+        <a href="/recharge">返回充值</a>
+      </section>
+      <form id="recharge-form">
+        <fieldset>
+          <legend>选择充值档位</legend>
+          <div class="recharge-plans">
+            <label class="recharge-plan">
+              <span>Plus</span><input name="plan" value="plus" type="radio" data-yuan="{{plus}}" checked>
+              <strong>¥{{plus}}</strong><small>{{plus}} 点希元</small>
+            </label>
+            <label class="recharge-plan">
+              <span>Pro</span><input name="plan" value="pro" type="radio" data-yuan="{{pro}}">
+              <strong>¥{{pro}}</strong><small>{{pro}} 点希元</small>
+            </label>
+            <label class="recharge-plan">
+              <span>Max</span><input name="plan" value="max" type="radio" data-yuan="{{max}}">
+              <strong>¥{{max}}</strong><small>{{max}} 点希元</small>
+            </label>
+            <label class="recharge-plan">
+              <span>自定义充值</span><input name="plan" value="custom" type="radio" data-yuan="{{custom_yuan}}">
+              <strong>¥{{custom_yuan}}</strong><small>每点希元</small>
+            </label>
+          </div>
+          <label class="recharge-custom" id="custom-quantity" hidden>
+            购买数量（希元）
+            <input name="credits" type="number" inputmode="numeric" min="1" max="{{custom_max}}" step="1" value="1" required disabled>
+          </label>
+        </fieldset>
+        <div class="recharge-summary">
+          <div>
+            <p>应付 <strong id="recharge-total" aria-live="polite">¥{{plus}}</strong></p>
+            <small>通过严小希支付中心完成微信支付</small>
+          </div>
+          <button type="submit" id="recharge-submit" {{checkout_disabled}}>前往支付中心</button>
+        </div>
+        <p id="checkout-status" role="status"></p>
+        <p {{unavailable_hidden}}>充值暂未开放。</p>
+      </form>
+    </div>
+  </main>
+  <!-- site-footer -->
+  <script>
+    const form = document.getElementById('recharge-form');
+    const customQuantity = document.getElementById('custom-quantity');
+    const creditsInput = form.elements.credits;
+    const submit = document.getElementById('recharge-submit');
+    const checkoutStatus = document.getElementById('checkout-status');
+    const balanceLabel = document.getElementById('recharge-balance');
+    const total = document.getElementById('recharge-total');
+    const yuan = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 });
+    const checkoutEnabled = !submit.disabled;
+    let submitting = false;
+    let confirmed = false;
+
+    window.siteAccount.then(account => {
+      if (account && !confirmed) balanceLabel.textContent = account.processing_quota + ' 点希元';
+    });
+
+    function updateTotal() {
+      const selected = form.querySelector('[name="plan"]:checked');
+      const custom = selected.value === 'custom';
+      customQuantity.hidden = !custom;
+      creditsInput.disabled = !custom;
+      const valid = !custom || creditsInput.validity.valid;
+      const amount = Number(selected.dataset.yuan) * (custom ? creditsInput.valueAsNumber : 1);
+      total.textContent = valid ? '¥' + yuan.format(amount) : '—';
+      submit.disabled = submitting || !checkoutEnabled || !valid;
+    }
+
+    form.addEventListener('input', updateTotal);
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (submit.disabled) return;
+      const plan = form.elements.plan.value;
+      const credits = plan === 'custom' ? creditsInput.valueAsNumber : null;
+      const key = JSON.stringify([plan, credits]);
+      submitting = true;
+      updateTotal();
+      checkoutStatus.textContent = '正在创建订单…';
+      try {
+        let attempt = history.state?.rechargeAttempt;
+        if (attempt?.key !== key) {
+          attempt = { key, id: crypto.randomUUID() };
+          history.replaceState({ ...history.state, rechargeAttempt: attempt }, '');
+        }
+        const response = await fetch('/api/recharge/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ request_id: attempt.id, plan, credits })
+        });
+        if (response.status === 409) {
+          history.replaceState({ ...history.state, rechargeAttempt: null }, '');
+          throw new Error('请重新创建订单。');
+        }
+        if (!response.ok) throw new Error('暂时无法创建订单，请稍后重试。');
+        const order = await response.json();
+        location.assign(order.checkout_url);
+      } catch (error) {
+        checkoutStatus.textContent = error.message;
+        submitting = false;
+        updateTotal();
+      }
+    });
+    window.addEventListener('pageshow', () => {
+      submitting = false;
+      checkoutStatus.textContent = '';
+      updateTotal();
+    });
+
+    const paymentId = new URLSearchParams(location.search).get('payment_id');
+    if (paymentId && /^[a-f0-9]{32}$/.test(paymentId)) {
+      const result = document.getElementById('recharge-result');
+      const status = document.getElementById('result-status');
+      const refresh = document.getElementById('refresh-order');
+      let timer;
+      let polls = 0;
+      form.hidden = true;
+      result.hidden = false;
+
+      async function checkOrder() {
+        clearTimeout(timer);
+        refresh.disabled = true;
+        try {
+          const response = await fetch('/api/recharge/orders/' + paymentId, { cache: 'no-store' });
+          if (response.status === 404) {
+            status.textContent = '找不到此账户的充值订单。';
+            return;
+          }
+          if (!response.ok) throw new Error();
+          const order = await response.json();
+          confirmed = true;
+          balanceLabel.textContent = order.balance + ' 点希元';
+          if (order.credited) {
+            status.textContent = '充值成功，' + order.credits + ' 点希元已到账。';
+            refresh.hidden = true;
+            return;
+          }
+          status.textContent = '正在等待到账确认，请稍后刷新。';
+        } catch {
+          status.textContent = '暂时无法查询订单，请稍后刷新。';
+        } finally {
+          refresh.disabled = false;
+        }
+        if (++polls < 8) timer = setTimeout(checkOrder, 3000);
+      }
+
+      refresh.addEventListener('click', () => {
+        polls = 0;
+        checkOrder();
+      });
+      checkOrder();
+    }
+  </script>
+</body>
+</html>

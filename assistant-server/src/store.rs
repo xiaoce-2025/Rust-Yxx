@@ -13,6 +13,8 @@ mod operations;
 mod tex_cache;
 #[path = "store_note_billing.rs"]
 pub mod note_billing;
+#[path = "store_recharge.rs"]
+mod recharge;
 #[path = "store_video_storage.rs"]
 mod video_storage;
 pub use tex_cache::{tex_hash, reuse_cached_tex, GlobalTexEntry};
@@ -144,7 +146,7 @@ pub struct RegistrationWhitelist {
     pub allowed_emails: Vec<String>,
 }
 
-type StoreError = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type StoreError = Box<dyn std::error::Error + Send + Sync>;
 
 pub struct FileStore {
     tex_cache_lock: tokio::sync::Mutex<()>,

@@ -54,7 +54,7 @@ pub fn duration_seconds(raw: &str) -> Result<i64, StoreError> {
 }
 
 impl FileStore {
-    async fn begin_note_transaction(
+    pub(super) async fn begin_note_transaction(
         &self,
     ) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, StoreError> {
         for attempt in 0..3 {
@@ -111,6 +111,7 @@ impl FileStore {
                 .execute(&mut *tx)
                 .await?;
         }
+        super::recharge::migrate(&mut tx).await?;
         tx.commit().await?;
         Ok(())
     }

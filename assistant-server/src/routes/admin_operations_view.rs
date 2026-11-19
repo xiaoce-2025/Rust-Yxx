@@ -18,7 +18,7 @@ const SCRIPT: &str = r##"
     let operationsGeneration=0;
     const operationsState={};
     const operationKinds={'login':'登录成功','auth.request':'认证请求','ta.attachment':'查看作业附件','admin.read':'后台查看','note.read':'笔记查看 / 下载','admin.change':'后台修改','admin.settings':'后台设置修改','notes.reprocess':'重新处理笔记','notes.batch_item':'批量提交课节','ta.action':'助教操作','ta.ai_start':'启动 AI 批改','ta.ai_cancel':'取消 AI 批改','ta.commit':'同步评分草稿','ta.discard':'丢弃评分草稿','ta.save_bulk':'保存批量评分','ta.save_single':'保存单份评分','user.action':'用户操作'};
-    const creditKinds={ADMIN_GRANT:'管理员发放',JOB_CHARGE:'笔记扣费',ADMIN_ADJUST:'管理员调整'};
+    const creditKinds={ADMIN_GRANT:'管理员发放',JOB_CHARGE:'笔记扣费',ADMIN_ADJUST:'管理员调整',RECHARGE:'希元充值'};
     function operationsLink(key, params){
       return '#'+key+'?'+new URLSearchParams(params);
     }

@@ -4,6 +4,7 @@ pub mod sso;
 pub mod ta;
 pub mod admin;
 pub mod note_credits;
+mod recharge;
 pub mod operations;
 pub mod auth;
 pub mod batch_guard;
@@ -53,6 +54,7 @@ pub fn router(state: AppState) -> Router {
         .merge(teaching_session::routes())
         .merge(iaaa_qr::routes())
         .merge(note_credits::routes())
+        .merge(recharge::routes())
         .merge(admin::routes(state.clone()))
         .merge(operations::routes())
         .merge(sso::routes())

@@ -1,4 +1,5 @@
 pub mod course_parser;
+pub mod recharge;
 pub mod ta;
 pub mod app_replay;
 mod app_replay_auth;

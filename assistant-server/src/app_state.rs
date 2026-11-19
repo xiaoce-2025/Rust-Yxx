@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub recharge: Option<Arc<crate::services::recharge::PaymentCenter>>,
     pub iaaa_qr: Arc<tokio::sync::Mutex<crate::services::iaaa_qr::Transactions>>,
     pub ta_ai: Arc<crate::services::ta_ai::Manager>,
     pub ta_mutations: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
@@ -76,6 +77,13 @@ impl AppState {
     }
     pub fn with_login_cache(settings: Settings, store: Arc<FileStore>, login_cache: Arc<LoginCache>) -> Self {
         let wechat_service = WeChatService::new(settings.wechat.clone());
+        let recharge = match crate::services::recharge::PaymentCenter::from_config(&settings.recharge) {
+            Ok(payment) => payment.map(Arc::new),
+            Err(error) => {
+                tracing::error!(error, "希元充值配置无效");
+                None
+            }
+        };
 
         let pkuvideo_jobs = Arc::new(RwLock::new(HashMap::new()));
         let pkuvideo_fw_jobs = Arc::new(RwLock::new(HashMap::new()));
@@ -83,6 +91,7 @@ impl AppState {
 
 
         let state = Self {
+            recharge,
             iaaa_qr: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             ta_ai: Arc::new(crate::services::ta_ai::Manager::new()),
             ta_mutations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

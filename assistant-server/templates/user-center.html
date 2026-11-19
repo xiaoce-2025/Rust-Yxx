@@ -20,6 +20,9 @@
     dt, small { color: var(--muted); font-size: 13px; }
     dd { margin: 4px 0 0; font-weight: 700; overflow-wrap: anywhere; }
     .priority { color: var(--red); font-size: 34px; font-weight: 700; line-height: 1.2; margin-bottom: 8px; }
+    .credit-balance { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; margin-bottom: 8px; }
+    .credit-balance .priority { margin: 0; }
+    .credit-balance a { color: var(--red); font-weight: 700; text-underline-offset: 4px; }
     fieldset { min-width: 0; border: 0; padding: 0; margin: 0 0 16px; }
     legend { padding: 0; margin-bottom: 8px; font-weight: 700; }
     .choices { display: flex; flex-wrap: wrap; gap: 8px 24px; }
@@ -59,8 +62,11 @@
       </section>
       <section>
         <h2>希元余额</h2>
-        <p id="account-note-credits" class="priority">—</p>
-        <p>成功生成或复用笔记后，课程回放每计费 1 小时扣 1 点希元，每个视频至少扣 1 点。超过整小时的部分在 5 分钟以内（含 5 分钟）按整小时计费，超过 5 分钟则进一小时。希元不足时请联系管理员发放。</p>
+        <div class="credit-balance">
+          <p id="account-note-credits" class="priority">—</p>
+          <a href="/recharge">充值希元 <span aria-hidden="true">→</span></a>
+        </div>
+        <p>成功生成或复用笔记后，课程回放每计费 1 小时扣 1 点希元，每个视频至少扣 1 点。超过整小时的部分在 5 分钟以内（含 5 分钟）按整小时计费，超过 5 分钟则进一小时。</p>
       </section>
       <section>
         <h2>账户优先级</h2>

@@ -27,6 +27,27 @@
 - 后台用户详情包含发放表单、真实负余额及最近流水；任务详情展示计费状态、实际秒数、扣款及失败码。
 - `/pkuvideo` 与 `/pkuvideo_sequence` 的普通、重新生成、单节、批量按钮使用相同的即时余额检查。批量只检查一次，不因余额为 1 而禁止提交多节课。
 
+## 希元充值
+
+用户从「用户中心 → 希元余额 → 充值希元」进入 `/recharge`，选定档位后到严小希支付中心完成微信支付。Plus 为 ¥30 购 30 点，Pro 为 ¥60 购 60 点，Max 为 ¥120 购 120 点。自定义充值以正整数点数购买，每点 ¥2。每笔订单一次性增加余额。
+
+1. 更新严小希支付中心至支持 `quantity`、`expectedAmount` 和 `expectedEnvironment` 的版本。在微信小程序虚拟支付后台发布下面的道具，并在支付中心的 `autonote` 应用配置中填写相同道具 ID 和单价。微信后台与收银台使用同一个 OfferID。
+
+   ```json
+   [
+     { "id": "credits_plus", "title": "Plus · 30 点希元", "amount": 3000 },
+     { "id": "credits_pro", "title": "Pro · 60 点希元", "amount": 6000 },
+     { "id": "credits_max", "title": "Max · 120 点希元", "amount": 12000 },
+     { "id": "credits_custom", "title": "自定义充值 · 希元", "amount": 200, "maxQuantity": 10737418 }
+   ]
+   ```
+
+   `amount` 的单位为分。上面的 `maxQuantity` 是当前协议支持的金额上限除以单价。实际能支付的金额和数量受微信渠道限制。
+
+2. 将支付中心应用的 `webhookUrl` 指向小助手公网 HTTPS 域名下的 `/api/recharge/webhook`，将 `returnUrl` 指向同一站点的 `/recharge`。确保反向代理允许收银台以 `POST` 请求访问 Webhook，且原样转发请求体和 `X-Yxx-Pay-*` 请求头。
+3. 在小助手的服务进程设置 `RECHARGE__APP_ID=autonote`、`RECHARGE__API_KEY` 与 `RECHARGE__WEBHOOK_SECRET`，与支付中心对应应用一致。两种密钥应分别生成，至少 32 字符。默认支付中心地址为 `https://pay.cxxdgc.cn`，可通过 `RECHARGE__BASE_URL` 覆盖。生产使用 `RECHARGE__ENVIRONMENT=0`，沙箱 `1` 使用独立数据库。配置完成后设 `RECHARGE__ENABLED=true` 并重启服务。
+4. 用真机验证固定档位和自定义多点订单的金额、支付和到账。支付中心核对微信实付后发送签名通知，小助手验证签名、订单和金额，将入账记录、余额和订单状态一并提交。重复通知只入账一次，后台可按充值订单号搜索希元流水。
+
 ## 待恢复结果
 
 `note_job_billing` 独立于队列状态。交付快照保存在用户私有目录；结算成功后才显示成功并开放新结果下载。

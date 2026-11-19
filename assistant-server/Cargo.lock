@@ -90,6 +90,8 @@ dependencies = [
  "config",
  "flate2",
  "futures-util",
+ "hex",
+ "hmac",
  "html-escape",
  "http",
  "jsonwebtoken",

@@ -7,6 +7,8 @@ pub struct Settings {
     pub admin: AdminConfig,
     #[serde(default)]
     pub sso: SsoConfig,
+    #[serde(default)]
+    pub recharge: RechargeConfig,
     pub server: ServerConfig,
     pub wechat: WeChatConfig,
     pub security: SecurityConfig,
@@ -19,6 +21,39 @@ pub struct Settings {
     pub pkuvideo: PkuVideoConfig,
     #[serde(default)]
     pub video_translation: VideoTranslationConfig,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default)]
+pub struct RechargeConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub app_id: String,
+    pub api_key: String,
+    pub webhook_secret: String,
+    pub environment: u8,
+}
+
+impl Default for RechargeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: "https://pay.cxxdgc.cn".into(),
+            app_id: "autonote".into(),
+            api_key: String::new(),
+            webhook_secret: String::new(),
+            environment: 0,
+        }
+    }
+}
+
+impl std::fmt::Debug for RechargeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RechargeConfig")
+            .field("enabled", &self.enabled)
+            .field("environment", &self.environment)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

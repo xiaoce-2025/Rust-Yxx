@@ -71,6 +71,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/ta", get(super::ta::page))
         .route("/settings", get(settings_page))
         .route("/user-center", get(user_center_page))
+        .route("/recharge", get(super::recharge::page))
         .route("/task-history", get(task_history_page))
         .route_layer(middleware::from_fn_with_state(state, require_login))
 }
