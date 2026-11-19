@@ -316,11 +316,13 @@ impl AppAuth {
             return Err("无法获取 IAAA RSA 公钥".into());
         }
         let public_key = key["key"].as_str().ok_or("IAAA 未返回公钥")?;
+        let version = super::iaaa_login::key_version(&key)?;
         let encrypted = login_password(public_key, request)?;
         let mut form: BTreeMap<String, String> = [
             ("appid", "resource"),
             ("userName", account),
             ("password", encrypted.as_str()),
+            ("keyVersion", version.as_str()),
             ("randCode", request["randCode"].as_str().unwrap_or("")),
             ("smsCode", request["smsCode"].as_str().unwrap_or("")),
             ("otpCode", request["otpCode"].as_str().unwrap_or("")),
@@ -408,6 +410,9 @@ fn truthy(v: &Value) -> bool {
     }
 }
 fn rejected_message(v: &Value) -> String {
+    if super::iaaa_login::login_limited(v) {
+        return super::iaaa_login::LOGIN_LIMIT_MESSAGE.into();
+    }
     v["errors"]["msg"]
         .as_str()
         .or(v["message"].as_str())

@@ -152,16 +152,20 @@ where F:FnOnce()->Fut, Fut:std::future::Future<Output=Result<PkuLoginResult,Stri
 }
 
 pub async fn login_iaaa_and_get_cookies(username: &str, password: &str) -> Result<PkuLoginResult, String> {
+    login_with_key_version(username, password, None).await
+}
+
+pub async fn login_with_key_version(username: &str, password: &str, key_version: Option<String>) -> Result<PkuLoginResult, String> {
     // The curl transaction is blocking; do not stall the async page/API executor.
     let (username, password) = (username.to_owned(), password.to_owned());
     tokio::task::spawn_blocking(move || {
         let ua = super::user_agents::choose("./user_agents.txt.gz")?;
         // IAAA is rate limited: submit credentials once and return any failure directly.
-        tokio::runtime::Handle::current().block_on(login_with_user_agent(&username, &password, ua))
+        tokio::runtime::Handle::current().block_on(login_with_user_agent(&username, &password, ua, key_version))
     }).await.map_err(|_| "教学网登录任务失败".to_string())?
 }
 
-async fn login_with_user_agent(username: &str, password: &str, user_agent: String) -> Result<PkuLoginResult, String> {
+async fn login_with_user_agent(username: &str, password: &str, user_agent: String, key_version: Option<String>) -> Result<PkuLoginResult, String> {
     let start_time = chrono::Utc::now();
     tracing::info!("IAAA登录流程开始 - 时间: {}", start_time);
 
@@ -185,11 +189,21 @@ async fn login_with_user_agent(username: &str, password: &str, user_agent: Strin
         "https://iaaa.pku.edu.cn/iaaa/oauth.jsp".into()])?;
 
     // Step 1: IAAA oauthlogin -> token
+    let version = match key_version {
+        Some(version) => version,
+        None => {
+            let key: Value = serde_json::from_str(&fetch_with_cookie(
+                &cookie_file_str, &user_agent, "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do",
+            )?).map_err(|_| "IAAA 公钥响应无效".to_string())?;
+            super::iaaa_login::key_version(&key)?
+        }
+    };
     let form_body = format!(
-        "appid={}&userName={}&password={}&randCode=&smsCode=&otpCode=&remTrustChk=false&redirUrl={}",
+        "appid={}&userName={}&password={}&keyVersion={}&randCode=&smsCode=&otpCode=&remTrustChk=false&redirUrl={}",
         urlencoding::encode(BLACKBOARD_APP_ID),
         urlencoding::encode(username),
         urlencoding::encode(password),
+        urlencoding::encode(&version),
         urlencoding::encode(BLACKBOARD_REDIR_URL)
     );
     tracing::debug!("步骤3: 准备OAuth登录请求 - body长度: {}", form_body.len());
@@ -554,6 +568,10 @@ mod session_tests {
 fn parse_token(body: &str) -> Result<String, String> {
     let value: Value = serde_json::from_str(body)
         .map_err(|e| format!("解析 IAAA 登录响应 JSON 失败: {e}"))?;
+
+    if super::iaaa_login::login_limited(&value) {
+        return Err(super::iaaa_login::LOGIN_LIMIT_MESSAGE.into());
+    }
 
     if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
         let msg = value

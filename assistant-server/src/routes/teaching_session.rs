@@ -81,6 +81,7 @@ async fn login(
         .json()
         .await
         .map_err(|_| ApiError::BadRequest("IAAA 公钥响应无效，请稍后重试".into()))?;
+    let version = crate::services::iaaa_login::key_version(&public_key).map_err(ApiError::BadRequest)?;
     let public_key = public_key
         .get("key")
         .and_then(|v| v.as_str())
@@ -91,9 +92,11 @@ async fn login(
             .map_err(|_| ApiError::BadRequest("IAAA 密码加密失败，请稍后重试".into()))?;
     // Always verify submitted credentials using a fresh teaching transaction.
     // Neither input, ciphertext, nor upstream error bodies enter the store or logs.
-    let session = pkulogin::login_iaaa_and_get_cookies(username, &encrypted)
+    let session = pkulogin::login_with_key_version(username, &encrypted, Some(version))
         .await
-        .map_err(|_| ApiError::BadRequest("教学网登录失败，请检查账号密码或稍后重试".into()))?;
+        .map_err(|error| ApiError::BadRequest(if error.contains("次数过多") {
+            crate::services::iaaa_login::LOGIN_LIMIT_MESSAGE.into()
+        } else { "教学网登录失败，请检查账号密码或稍后重试".into() }))?;
     state.login_cache.insert(&key, session).await;
     Ok((
         [(CACHE_CONTROL, "no-store")],

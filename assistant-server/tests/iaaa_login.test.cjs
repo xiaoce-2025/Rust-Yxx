@@ -78,6 +78,24 @@ test('malformed and external redirect targets fall back to the homepage', async 
   }
 });
 
+test('too many IAAA attempts keep the button disabled and block repeat form submission', async () => {
+  for (const pathname of ['/auth/admin', '/teaching-login']) {
+    const {node, calls, location} = environment('', async () => ({
+      ok: false, text: async () => JSON.stringify({error:'IAAA 登录次数过多，请稍后再试'})
+    }), [], pathname);
+    node('iaaaPassword').value = 'secret';
+    await node('iaaaForm').listeners.submit(event);
+    assert.equal(node('iaaaSubmit').disabled, true);
+    assert.match(node('iaaaStatus').textContent, /次数过多/);
+    assert.equal(node('iaaaPassword').value, '');
+    node('iaaaQrTab').listeners.click();
+    node('iaaaAccountTab').listeners.click();
+    await node('iaaaForm').listeners.submit(event);
+    assert.equal(calls.length, 1);
+    assert.equal(location.href, '');
+  }
+});
+
 test('full illustration stays hidden until decoding completes, including cached images', async () => {
   for (const cached of [false, true]) {
     let finishDecoding;

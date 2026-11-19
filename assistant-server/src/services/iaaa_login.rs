@@ -8,6 +8,22 @@ use crate::error::ApiError;
 const IAAA: &str = "https://iaaa.pku.edu.cn/iaaa/";
 const REDIRECT: &str = "http://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin";
 
+/// Preserve the upstream key version exactly, including numeric versions and zero.
+pub(crate) fn key_version(key: &Value) -> Result<String, String> {
+    match key.get("version") {
+        Some(Value::String(version)) if !version.trim().is_empty() => Ok(version.clone()),
+        Some(Value::Number(version)) => Ok(version.to_string()),
+        _ => Err("IAAA 未返回有效公钥版本，请稍后重试".into()),
+    }
+}
+
+pub const LOGIN_LIMIT_MESSAGE: &str = "IAAA 登录次数过多，请稍后再试";
+
+pub(super) fn login_limited(result: &Value) -> bool {
+    result.pointer("/errors/msg").and_then(Value::as_str)
+        .is_some_and(|message| message.contains("次数过多"))
+}
+
 pub async fn verify(username: &str, password: &str) -> Result<(), ApiError> {
     // An isolated cookie jar and a fresh request are essential: cached teaching sessions
     // must never be accepted as proof that the submitted password is correct.
@@ -27,6 +43,7 @@ pub async fn verify(username: &str, password: &str) -> Result<(), ApiError> {
         .send().await.and_then(reqwest::Response::error_for_status)
         .map_err(|source| upstream_error("获取公钥（getPublicKey.do）", source))?
         .json().await.map_err(|source| upstream_error("解析公钥响应", source))?;
+    let version = key_version(&key).map_err(ApiError::Internal)?;
     let key = key.get("key").and_then(Value::as_str)
         .filter(|key| !key.is_empty())
         .ok_or_else(|| ApiError::Internal("无法获取 IAAA 公钥，请稍后重试".into()))?;
@@ -38,7 +55,7 @@ pub async fn verify(username: &str, password: &str) -> Result<(), ApiError> {
         .header("Origin", "https://iaaa.pku.edu.cn")
         .header("X-Requested-With", "XMLHttpRequest")
         .form(&[("appid", "blackboard"), ("userName", username), ("password", encrypted.as_str()),
-            ("randCode", ""), ("smsCode", ""), ("otpCode", ""),
+            ("keyVersion", version.as_str()), ("randCode", ""), ("smsCode", ""), ("otpCode", ""),
             ("remTrustChk", "false"), ("redirUrl", REDIRECT)])
         .send().await.and_then(reqwest::Response::error_for_status)
         .map_err(|source| upstream_error("校验账号密码（oauthlogin.do）", source))?
@@ -82,6 +99,9 @@ fn verify_response(result: &Value) -> Result<(), ApiError> {
         // The one-use upstream token is deliberately discarded, never returned or stored.
         return Ok(());
     }
+    if login_limited(result) {
+        return Err(ApiError::BadRequest(LOGIN_LIMIT_MESSAGE.into()));
+    }
     let code = result.pointer("/errors/code").and_then(Value::as_str)
         .filter(|code| code.len() <= 64 && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'));
     let success = result.get("success").and_then(Value::as_bool);
@@ -111,6 +131,27 @@ fn verify_response(result: &Value) -> Result<(), ApiError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn public_key_version_preserves_strings_and_numbers_and_rejects_missing_values() {
+        assert_eq!(key_version(&json!({"version":"001"})).unwrap(), "001");
+        assert_eq!(key_version(&json!({"version":0})).unwrap(), "0");
+        assert_eq!(key_version(&json!({"version":20261113})).unwrap(), "20261113");
+        for key in [json!({}), json!({"version":null}), json!({"version":" "}), json!({"version":true})] {
+            assert!(key_version(&key).is_err());
+        }
+    }
+
+    #[test]
+    fn login_limit_takes_precedence_over_credential_error_without_echoing_upstream_secrets() {
+        for code in ["E01", "E99"] {
+            let result = json!({"success":false,"errors":{"code":code,"msg":"登录次数过多 secret"}});
+            let error = verify_response(&result).unwrap_err().to_string();
+            assert!(error.contains(LOGIN_LIMIT_MESSAGE));
+            assert!(!error.contains("secret"));
+        }
+        assert!(!login_limited(&json!({"errors":{"msg":null}})));
+    }
 
     #[test]
     fn requires_explicit_success_and_nonempty_token() {

@@ -114,6 +114,7 @@
 
     const iaaaForm = document.getElementById("iaaaForm");
     const iaaaStatus = document.getElementById("iaaaStatus");
+    let iaaaLoginLimited = false;
     function setIaaaTab(qr) {
       iaaaForm.hidden = qr;
       document.getElementById("iaaaQrPanel").hidden = !qr;
@@ -140,11 +141,12 @@
         });
         location.href = next;
       } catch (err) {
+        iaaaLoginLimited ||= err.message.includes("次数过多");
         iaaaStatus.textContent = "登录失败：" + err.message;
       } finally {
         document.getElementById("iaaaPassword").value = "";
         if (teachingLogin) document.getElementById("iaaaUsername").value = "";
-        button.disabled = false;
+        button.disabled = iaaaLoginLimited;
       }
     });
 

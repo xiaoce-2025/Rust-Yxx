@@ -339,6 +339,7 @@
     let currentLessons = [];
     let currentManualAttempts = [];
     let appLoginResolve = null;
+    let appLoginLimited = false;
     let manualAddCourse = null;
     let pendingDeleteLesson = null;
     let isProcessing = false;
@@ -596,7 +597,7 @@
         } catch (error) {
           document.getElementById('appLoginStatus').textContent = error.message;
         } finally {
-          document.getElementById('appLoginSubmit').disabled = false;
+          document.getElementById('appLoginSubmit').disabled = appLoginLimited;
         }
         return await completion;
       } catch (error) {
@@ -625,6 +626,7 @@
     });
     document.getElementById('appLoginForm').addEventListener('submit', async event => {
       event.preventDefault();
+      if (document.getElementById('appLoginSubmit').disabled) return;
       document.getElementById('appLoginSubmit').disabled = true;
       document.getElementById('appLoginCancel').disabled = true;
       document.getElementById('appLoginStatus').textContent = '正在通过统一认证获取 App 会话...';
@@ -635,11 +637,14 @@
           otpCode:document.getElementById('appOtpCode').value});
         finishAppLogin(true);
       } catch (error) {
+        appLoginLimited ||= error.message.includes('次数过多');
         document.getElementById('appLoginStatus').textContent = error.message;
-        try { await prepareAppLogin(); } catch (_) { /* Retain original diagnostic. */ }
+        if (!appLoginLimited) {
+          try { await prepareAppLogin(); } catch (_) { /* Retain original diagnostic. */ }
+        }
       } finally {
 
-        document.getElementById('appLoginSubmit').disabled = false;
+        document.getElementById('appLoginSubmit').disabled = appLoginLimited;
         document.getElementById('appLoginCancel').disabled = false;
       }
     });

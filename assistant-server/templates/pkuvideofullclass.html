@@ -259,6 +259,7 @@
     }
 
     async function handleBind() {
+      if (bindBtnEl.disabled) return;
       const username = document.getElementById("iaaaUsername").value.trim();
       const password = document.getElementById("iaaaPassword").value;
 
@@ -305,6 +306,7 @@
           statusEl.className = "status error";
         }
       } catch (err) {
+        if (err.message.includes("次数过多")) bindBtnEl.disabled = true;
         statusEl.textContent = "绑定失败: " + err.message;
         statusEl.className = "status error";
       }
