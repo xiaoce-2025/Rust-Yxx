@@ -221,6 +221,12 @@ async fn iaaa_login(
         "IAAA login requested; unregistered identities will be checked against the whitelist after authentication");
     crate::services::iaaa_login::verify(username, &req.password).await?;
 
+    complete_iaaa_login(&state, &headers, username).await
+}
+
+pub(super) async fn complete_iaaa_login(state: &AppState, headers: &HeaderMap, username: &str) -> Result<axum::response::Response, ApiError> {
+    let email = iaaa_email(username)?;
+
     // A random local password prevents the university password from becoming the
     // assistant password. Existing passwords and bindings are left intact.
     let now = Utc::now();

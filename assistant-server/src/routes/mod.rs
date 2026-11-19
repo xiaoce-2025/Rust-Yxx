@@ -1,4 +1,5 @@
 pub mod teaching_session;
+mod iaaa_qr;
 pub mod sso;
 pub mod ta;
 pub mod admin;
@@ -50,6 +51,7 @@ pub fn router(state: AppState) -> Router {
         .merge(ui::routes(state.clone()))
         .merge(auth::routes())
         .merge(teaching_session::routes())
+        .merge(iaaa_qr::routes())
         .merge(note_credits::routes())
         .merge(admin::routes(state.clone()))
         .merge(operations::routes())

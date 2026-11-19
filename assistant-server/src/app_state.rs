@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub iaaa_qr: Arc<tokio::sync::Mutex<crate::services::iaaa_qr::Transactions>>,
     pub ta_ai: Arc<crate::services::ta_ai::Manager>,
     pub ta_mutations: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
     pub sso_transactions: Arc<tokio::sync::Mutex<HashMap<String, crate::routes::sso::Transaction>>>,
@@ -82,6 +83,7 @@ impl AppState {
 
 
         let state = Self {
+            iaaa_qr: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             ta_ai: Arc::new(crate::services::ta_ai::Manager::new()),
             ta_mutations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             sso_transactions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

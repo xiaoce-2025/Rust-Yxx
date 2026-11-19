@@ -6,9 +6,9 @@ use serde_json::Value;
 use crate::services::login_cache::LoginCache;
 
 const IAAA_OAUTH_LOGIN_URL: &str = "https://iaaa.pku.edu.cn/iaaa/oauthlogin.do";
-const BLACKBOARD_APP_ID: &str = "blackboard";
+pub(crate) const BLACKBOARD_APP_ID: &str = "blackboard";
 // Match the redirectUrl declared by Blackboard's IAAA form.
-const BLACKBOARD_REDIR_URL: &str =
+pub(crate) const BLACKBOARD_REDIR_URL: &str =
     "http://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin";
 // The browser upgrades that URL locally through HSTS before making a network request.
 const BLACKBOARD_CALLBACK_URL: &str =
@@ -19,6 +19,27 @@ fn campus_login_url(token: &str) -> String {
     url.query_pairs_mut().append_pair("_rand", &format!("{:.16}", rand::random::<f64>()))
         .append_pair("token", token);
     url.into()
+}
+
+/// Consume a QR ticket once, then derive identity from the authenticated server session.
+pub(crate) fn complete_qr_login(session: &PkuLoginResult, token: &str) -> Result<String, String> {
+    let page = fetch_with_cookie(&session.cookie_file.to_string_lossy(), &session.user_agent, &campus_login_url(token))?;
+    validate_page(&page)?;
+    let portal = fetch_page_in_session(session,
+        "https://course.pku.edu.cn/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1")?;
+    if !is_teaching_portal(&portal) { return Err("教学网登录后未返回可识别的门户页面".into()); }
+    let me = request_in_session(session, "https://course.pku.edu.cn/learn/api/public/v1/users/me", &[], None)?;
+    if me.status != 200 { return Err("无法确认扫码账号，请重新扫码".into()); }
+    let identity: Value = serde_json::from_slice(&me.body).map_err(|_| "扫码账号响应无效")?;
+    let username = qr_username(&identity)?;
+    discard_iaaa_cookies(&session.cookie_file)?;
+    Ok(username)
+}
+
+fn qr_username(identity: &Value) -> Result<String, String> {
+    identity.get("userName").and_then(Value::as_str)
+        .filter(|name| name.len() == 10 && name.bytes().all(|b| b.is_ascii_digit()))
+        .map(str::to_owned).ok_or_else(|| "请使用 10 位学号对应的北大账号扫码".into())
 }
 
 /// Keep only the established teaching/replay environment; IAAA's own cookies are not cached.
@@ -352,6 +373,15 @@ fn read_token_from_cookie_file(path: &str) -> Option<String> {
 #[cfg(test)]
 mod session_tests {
     use super::*;
+
+    #[test]
+    fn qr_identity_must_be_a_server_returned_ten_digit_username() {
+        assert_eq!(qr_username(&serde_json::json!({"userName":"2400012345"})).unwrap(), "2400012345");
+        for value in [serde_json::json!({}), serde_json::json!({"userName":"admin"}),
+            serde_json::json!({"studentId":"2400012345"}), serde_json::json!({"userName":"2400012345@evil.test"})] {
+            assert!(qr_username(&value).is_err());
+        }
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Duration;

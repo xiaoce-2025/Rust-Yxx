@@ -7,7 +7,8 @@ const html = fs.readFileSync(path.join(__dirname, '../templates/auth.html'), 'ut
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 function environment(search = '', api = async () => ({ok: true, text: async () => '{}'}), images = [], pathname = '/auth/admin') {
-  const nodes = new Map(), calls = [];
+  const nodes = new Map(), calls = [], timers = new Map(), windowEvents = {};
+  let timerId = 0;
   function node(id) {
     if (!nodes.has(id)) nodes.set(id, {
       hidden: id === 'iaaaQrPanel', value: '', disabled: false, sheet: {disabled: false},
@@ -22,17 +23,86 @@ function environment(search = '', api = async () => ({ok: true, text: async () =
   vm.runInNewContext(script.replace('const teachingCsrf = "";', 'const teachingCsrf = "test-csrf";'), {
     document: {getElementById: node, querySelector: () => node('card'), querySelectorAll: () => images, body: node('body')},
     location, URL, URLSearchParams,
+    setTimeout(fn, ms) {const id = ++timerId; timers.set(id, {fn, ms}); return id;},
+    clearTimeout(id) {timers.delete(id);},
+    addEventListener(name, fn) {windowEvents[name] = fn;},
     fetch: async (url, options) => {
       if (url === '/api/auth/me') return {ok: false};
       calls.push({url, options});
       return api(url, options);
     },
   });
-  return {node, location, calls};
+  return {node, location, calls, timers, windowEvents, async runTimer(ms) {
+    const entry = [...timers].find(([,timer]) => timer.ms === ms);
+    assert.ok(entry, 'expected a timer for ' + ms);
+    timers.delete(entry[0]); await entry[1].fn();
+  }};
 }
 const event = {preventDefault() {}};
+const response = payload => ({ok:true, text:async () => JSON.stringify(payload)});
+const flush = () => new Promise(resolve => setImmediate(resolve));
 
-test('IAAA is the only local login entry and QR remains a placeholder', () => {
+test('QR login polls every three seconds on each entry and redirects only after server authentication', async () => {
+  for (const pathname of ['/auth/admin', '/teaching-login']) {
+    let polls = 0;
+    const base = pathname === '/teaching-login' ? '/api/teaching-session/qr' : '/api/auth/iaaa/qr';
+    const env = environment('?next=%2Fta', async url => {
+      if (url.endsWith('/start')) return response({id:'browser-bound',image:'data:image/png;base64,cXI='});
+      if (url.endsWith('/poll')) return response({status:++polls === 1 ? 'pending' : 'success'});
+      return response({});
+    }, [], pathname);
+    await env.node('iaaaQrTab').listeners.click(); await flush();
+    assert.equal(env.calls[0].url, base + '/start');
+    assert.equal(env.node('iaaaQrImage').src, 'data:image/png;base64,cXI=');
+    assert.equal(env.node('iaaaQrImage').hidden, false);
+    assert.equal(env.location.href, '');
+    await env.runTimer(3000);
+    assert.equal(env.location.href, '');
+    await env.runTimer(3000);
+    assert.equal(env.location.href, '/ta');
+    assert.equal(env.timers.size, 0);
+    assert.deepEqual(JSON.parse(env.calls[1].options.body), {id:'browser-bound'});
+    assert.equal(env.calls[1].options.credentials, 'include');
+    if (pathname === '/teaching-login') assert.equal(env.calls[1].options.headers['X-Teaching-CSRF'], 'test-csrf');
+  }
+});
+
+test('switching tabs cancels QR polling and ignores an in-flight success', async () => {
+  let finish;
+  const env = environment('', async url => {
+    if (url.endsWith('/start')) return response({id:'qr',image:'data:image/png;base64,cXI='});
+    if (url.endsWith('/poll')) return new Promise(resolve => {finish = resolve;});
+    return response({});
+  });
+  env.node('iaaaQrTab').listeners.click(); await flush();
+  const pending = env.runTimer(3000);
+  env.node('iaaaAccountTab').listeners.click();
+  finish(response({status:'success'})); await pending;
+  assert.equal(env.location.href, '');
+  assert.equal(env.timers.size, 0);
+  assert.ok(env.calls.some(call => call.url.endsWith('/cancel')));
+});
+
+test('expired and stopped QR sessions stop polling and can be refreshed', async () => {
+  for (const expired of [false,true]) {
+    let starts = 0;
+    const env = environment('', async url => url.endsWith('/start')
+      ? response({id:'qr-' + ++starts,image:'data:image/png;base64,cXI='})
+      : response({status:'stopped',message:'二维码已失效'}));
+    env.node('iaaaQrTab').listeners.click(); await flush();
+    await env.runTimer(expired ? 180000 : 3000);
+    assert.equal(env.timers.size, 0);
+    assert.equal(env.node('iaaaQrImage').hidden, true);
+    assert.match(env.node('iaaaQrStatus').textContent, /失效|过期/);
+    await env.node('iaaaQrRefresh').listeners.click();
+    assert.equal(starts, 2);
+    assert.equal(env.node('iaaaQrImage').hidden, false);
+    env.windowEvents.pagehide();
+    assert.equal(env.timers.size, 0);
+  }
+});
+
+test('IAAA is the only local login entry and QR tab starts a server session', () => {
   const {node, calls} = environment();
   assert.match(html, /id="iaaaView" class="main auth-layout">/);
   assert.doesNotMatch(html, /accountView|useAccount|loginForm|registerForm|\/api\/auth\/(login|register)/);
@@ -42,10 +112,10 @@ test('IAAA is the only local login entry and QR remains a placeholder', () => {
   assert.equal(node('iaaaForm').hidden, true);
   assert.equal(node('iaaaQrPanel').hidden, false);
   assert.equal(node('iaaaQrTab').attributes['aria-selected'], 'true');
-  assert.match(html, /敬请期待/);
+  assert.match(html, /请使用北京大学 App 扫码/);
   node('iaaaAccountTab').listeners.click();
   assert.equal(node('iaaaForm').hidden, false);
-  assert.equal(calls.length, 0);
+  assert.equal(calls[0].url, '/api/auth/iaaa/qr/start');
 });
 
 test('IAAA submission preserves password, uses cookie session and redirects locally', async () => {
@@ -91,7 +161,7 @@ test('too many IAAA attempts keep the button disabled and block repeat form subm
     node('iaaaQrTab').listeners.click();
     node('iaaaAccountTab').listeners.click();
     await node('iaaaForm').listeners.submit(event);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.filter(call => call.url === (pathname === '/teaching-login' ? '/api/teaching-session' : '/api/auth/iaaa')).length, 1);
     assert.equal(location.href, '');
   }
 });

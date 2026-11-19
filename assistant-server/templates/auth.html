@@ -21,7 +21,9 @@
     .auth-layout .row-title button { border: 0; background: transparent; color: #222; font-size: 18px; padding: 0; cursor: pointer; }
     .auth-layout .row-title button.current { color: #9b0000; }
     .auth-layout .auth-note { font-size: 13px; line-height: 1.8; margin: 8px 0; }
-    .auth-layout .coming-soon { min-height: 220px; padding-top: 55px; }
+    .auth-layout .qr-login { min-height: 260px; padding: 18px 0; text-align: center; }
+    .auth-layout .qr-login img { width: 200px; height: 200px; object-fit: contain; display: block; margin: 0 auto 12px; }
+    .auth-layout .qr-refresh { background: #fff; color: #9b0000; border: 1px solid #9b0000; padding: 6px 16px; cursor: pointer; }
     .auth-status, #iaaaStatus { min-height: 20px; font-size: 13px; line-height: 1.6; margin: 6px 0; overflow-wrap: anywhere; }
     .auth-layout .lx_info { width: auto; text-align: center; }
     .auth-layout :focus-visible { outline: 2px solid #9b0000; outline-offset: 3px; }
@@ -57,7 +59,14 @@
           <div class="row-thin"><p class="tip auth-note">使用北京大学 IAAA 账号密码认证，成功后登录对应学号邮箱账户。首次使用须通过注册白名单校验。</p></div>
           <div class="row"><button class="input-btn-row" id="iaaaSubmit" type="submit">通过IAAA登录</button></div>
         </form>
-        <div id="iaaaQrPanel" role="tabpanel" aria-labelledby="iaaaQrTab" hidden><div class="row center coming-soon"><p class="pku-red">敬请期待</p><p class="tip">严小希小助手扫码登录即将上线</p></div></div>
+        <div id="iaaaQrPanel" role="tabpanel" aria-labelledby="iaaaQrTab" hidden>
+          <div class="qr-login">
+            <img id="iaaaQrImage" alt="北京大学 IAAA 登录二维码" hidden />
+            <p class="tip auth-note">请使用北京大学 App 扫码，并在手机上确认登录。</p>
+            <p id="iaaaQrStatus" role="status" aria-live="polite" class="pku-red"></p>
+            <button type="button" id="iaaaQrRefresh" class="qr-refresh">刷新二维码</button>
+          </div>
+        </div>
         <div class="row-thin"><p id="iaaaStatus" role="status" aria-live="polite" class="pku-red"></p></div>
       </section>
     </div>
@@ -98,12 +107,12 @@
     const teachingLogin = location.pathname === "/teaching-login";
     const teachingCsrf = "";
 
-    async function callApi(path, body) {
+    async function callApi(path, body, options = {}) {
       const res = await fetch(path, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json", ...(teachingLogin ? {"X-Teaching-CSRF": teachingCsrf} : {}) },
-        body: JSON.stringify(body)
+        body: JSON.stringify(body), ...options
       });
       const txt = await res.text();
       let payload = {};
@@ -115,6 +124,61 @@
     const iaaaForm = document.getElementById("iaaaForm");
     const iaaaStatus = document.getElementById("iaaaStatus");
     let iaaaLoginLimited = false;
+    const qrBase = teachingLogin ? "/api/teaching-session/qr" : "/api/auth/iaaa/qr";
+    const qrImage = document.getElementById("iaaaQrImage");
+    const qrStatus = document.getElementById("iaaaQrStatus");
+    const qrRefresh = document.getElementById("iaaaQrRefresh");
+    let qrGeneration = 0, qrId = null, qrPollTimer = null, qrExpiryTimer = null;
+    function stopQr() {
+      qrGeneration++;
+      clearTimeout(qrPollTimer); clearTimeout(qrExpiryTimer);
+      const id = qrId; qrId = null;
+      qrImage.hidden = true; qrImage.src = "";
+      if (id) callApi(qrBase + "/cancel", {id}, {keepalive:true}).catch(() => {});
+    }
+    async function startQr() {
+      stopQr();
+      const generation = qrGeneration;
+      qrRefresh.disabled = true;
+      qrStatus.textContent = "正在获取二维码…";
+      try {
+        const result = await callApi(qrBase + "/start", {});
+        if (generation !== qrGeneration) {
+          callApi(qrBase + "/cancel", {id:result.id}).catch(() => {});
+          return;
+        }
+        qrId = result.id; qrImage.src = result.image; qrImage.hidden = false;
+        qrStatus.textContent = "等待扫码确认，二维码 3 分钟内有效";
+        qrExpiryTimer = setTimeout(() => {
+          stopQr(); qrStatus.textContent = "二维码已过期，请刷新后重新扫码";
+        }, 180000);
+        qrPollTimer = setTimeout(() => pollQr(generation), 3000);
+      } catch (error) {
+        if (generation === qrGeneration) qrStatus.textContent = error.message;
+      } finally {
+        if (generation === qrGeneration) qrRefresh.disabled = false;
+      }
+    }
+    async function pollQr(generation) {
+      if (generation !== qrGeneration || !qrId) return;
+      try {
+        const result = await callApi(qrBase + "/poll", {id:qrId});
+        if (generation !== qrGeneration) return;
+        if (result.status === "success") {
+          qrId = null; stopQr();
+          qrStatus.textContent = "认证成功，正在跳转…";
+          location.href = next;
+        } else if (result.status === "stopped") {
+          stopQr(); qrStatus.textContent = result.message;
+        } else {
+          qrPollTimer = setTimeout(() => pollQr(generation), 3000);
+        }
+      } catch (error) {
+        if (generation === qrGeneration) { stopQr(); qrStatus.textContent = error.message; }
+      }
+    }
+    qrRefresh.addEventListener("click", () => { if (!qrRefresh.disabled) return startQr(); });
+    globalThis.addEventListener?.("pagehide", stopQr);
     function setIaaaTab(qr) {
       iaaaForm.hidden = qr;
       document.getElementById("iaaaQrPanel").hidden = !qr;
@@ -125,6 +189,8 @@
       }
       document.getElementById("iaaaPassword").value = "";
       iaaaStatus.textContent = "";
+      if (qr) return startQr();
+      stopQr();
     }
     document.getElementById("iaaaAccountTab").addEventListener("click", () => setIaaaTab(false));
     document.getElementById("iaaaQrTab").addEventListener("click", () => setIaaaTab(true));
