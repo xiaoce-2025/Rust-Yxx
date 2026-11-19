@@ -333,6 +333,7 @@ async fn action(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,
+    audit: Option<axum::Extension<super::operations::AuditId>>,
     Form(form): Form<Vec<(String, String)>>,
 ) -> Response {
     let expected = csrf_token(&headers, user.id);
@@ -342,6 +343,26 @@ async fn action(
     let mut selection = selection_from(&form);
     if matches!(field(&form, "action"), "commit" | "discard") {
         selection.review = "1".into();
+    }
+    if let Some(axum::Extension(id)) = audit {
+        let operation = match field(&form, "action") {
+            "ai_start" => "ta.ai_start",
+            "ai_cancel" => "ta.ai_cancel",
+            "commit" => "ta.commit",
+            "discard" => "ta.discard",
+            "save_bulk" | "full_bulk" => "ta.save_bulk",
+            "save_single" | "save_single_next" => "ta.save_single",
+            _ => "ta.action",
+        };
+        let detail = serde_json::json!({
+            "course": ta::valid_id(&selection.course).ok(),
+            "column": ta::valid_id(&selection.column).ok(),
+            "attempt": ta::valid_id(&selection.attempt).ok(),
+        });
+        if let Err(error) = state.store.describe_audit(id.0, operation, &detail).await {
+            tracing::error!(%error, audit_id=id.0, "助教操作目标登记失败");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
     }
     let lock = state.ta_mutation(user.id).await;
     let _guard = lock.lock().await;
@@ -359,12 +380,6 @@ async fn action(
         return ([(header::CACHE_CONTROL, "no-store")], Html(html)).into_response();
     }
     let result = mutate(&state, &user, &form, &mut selection).await;
-    let operation=match field(&form,"action") {
-        "ai_start"=>"ta.ai_start","ai_cancel"=>"ta.ai_cancel","commit"=>"ta.commit","discard"=>"ta.discard",
-        "save_bulk"|"full_bulk"=>"ta.save_bulk","save_single"|"save_single_next"=>"ta.save_single",_=>"ta.unknown"
-    };
-    let target=if ta::valid_id(&selection.course).is_ok() && ta::valid_id(&selection.column).is_ok(){format!("{}/{}",selection.course,selection.column)}else{"invalid-selection".into()};
-    if state.store.record_event(Some(user.id),operation,&target,if result.is_ok(){200}else{400}).await.is_err(){tracing::warn!(target:"teaching_ta","助教操作记录保存失败");}
     if matches!(field(&form,"action"), "ai_start" | "ai_cancel") && headers.get("x-ta-partial").is_some_and(|v|v=="1") {
         return match result {
             Ok(message) => {

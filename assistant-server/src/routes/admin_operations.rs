@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     services::{course_storage, lesson_storage},
-    store::{SiteFeatures, FEATURES_PATH},
+    store::{OperationsQuery, SiteFeatures, FEATURES_PATH},
 };
 use axum::extract::Query;
 use std::{
@@ -12,11 +12,7 @@ use std::{
 #[derive(Default, Deserialize)]
 pub(super) struct ListQuery {
     #[serde(default)]
-    kind: String,
-    #[serde(default)]
     q: String,
-    #[serde(default)]
-    status: String,
     #[serde(default)]
     user: String,
     #[serde(default)]
@@ -24,19 +20,21 @@ pub(super) struct ListQuery {
 }
 pub(super) async fn records(
     State(state): State<AppState>,
-    Query(q): Query<ListQuery>,
+    Query(q): Query<OperationsQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    if !matches!(q.kind.as_str(), "ai_jobs" | "activity")
+    if !matches!(q.kind.as_str(), "ai_jobs" | "activity" | "credits")
         || q.q.len() > 300
         || q.status.len() > 40
-        || q.user.len() > 40
+        || q.event.len() > 40
+        || (!q.user.is_empty() && Uuid::parse_str(&q.user).is_err())
+        || matches!((q.from, q.before), (Some(from), Some(before)) if from >= before)
     {
         return Err(ApiError::BadRequest("查询参数无效".into()));
     }
     Ok(Json(
         state
             .store
-            .operations_page(&q.kind, &q.q, &q.status, &q.user, q.page)
+            .operations_page(&q)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?,
     ))

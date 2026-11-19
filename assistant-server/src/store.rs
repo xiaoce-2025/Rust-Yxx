@@ -17,7 +17,7 @@ pub mod note_billing;
 mod video_storage;
 pub use tex_cache::{tex_hash, reuse_cached_tex, GlobalTexEntry};
 pub(crate) use tex_cache::{atomic_tex, valid_tex};
-pub use operations::{SiteFeatures, FEATURES_PATH};
+pub use operations::{OperationsQuery, SiteFeatures, FEATURES_PATH};
 
 
 
@@ -220,28 +220,39 @@ impl FileStore {
         result
     }
 
-    pub async fn admin_update_user(&self, id: Uuid, active: bool, storage: i32, _processing: i64, priority: u32) -> Result<(), crate::error::ApiError> {
+    pub async fn admin_update_user(&self, id: Uuid, active: bool, storage: i32, priority: u32, audit_id: Option<i64>) -> Result<(), crate::error::ApiError> {
         use crate::error::ApiError;
         let mut users = self.users.write().await;
         let mut updated = users.clone();
         let user = updated.get_mut(&id).ok_or(ApiError::NotFound)?;
+        let before = serde_json::json!({"is_active":user.is_active,"storage_quota":user.storage_quota,"processing_priority":user.processing_priority});
         user.is_active = active;
         user.storage_quota = storage;
         user.processing_priority = priority;
         user.updated_at = Utc::now();
-        self.save_collection("users", &updated).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+        let detail = serde_json::json!({"before":before,"after":{"is_active":active,"storage_quota":storage,"processing_priority":priority}});
+        self.save_admin_collection("users", &updated, audit_id, detail).await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
         *users = updated;
         Ok(())
     }
 
-    pub async fn admin_revoke_sessions(&self, user_id: Uuid) -> Result<usize, StoreError> {
+    pub async fn admin_revoke_sessions(&self, user_id: Uuid, audit_id: Option<i64>) -> Result<usize, StoreError> {
         let mut sessions = self.sessions.write().await;
         let mut updated = sessions.clone();
         updated.retain(|_, s| s.user_id != user_id);
         let count = sessions.len() - updated.len();
-        self.save_collection("sessions", &updated).await?;
+        self.save_admin_collection("sessions", &updated, audit_id, serde_json::json!({"revoked_sessions":count})).await?;
         *sessions = updated;
         Ok(count)
+    }
+
+    async fn save_admin_collection<T: Serialize>(&self, name: &str, value: &T, audit_id: Option<i64>, detail: serde_json::Value) -> Result<(), StoreError> {
+        let mut tx = self.db.begin().await?;
+        write_collection(&mut tx, name, &serde_json::to_string(value)?).await?;
+        operations::audit_detail(&mut tx, audit_id, detail).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn admin_session_counts(&self) -> HashMap<Uuid, usize> {

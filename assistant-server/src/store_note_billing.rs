@@ -6,6 +6,21 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
+pub(super) fn ledger_entry(row: &sqlx::sqlite::SqliteRow) -> Value {
+    json!({
+        "id": row.get::<String, _>("id"),
+        "job_id": row.get::<Option<String>, _>("job_id"),
+        "event_type": row.get::<String, _>("event_type"),
+        "delta": row.get::<i64, _>("delta"),
+        "balance_after": row.get::<i64, _>("balance_after"),
+        "duration_seconds": row.get::<Option<i64>, _>("duration_seconds"),
+        "cost_units": row.get::<Option<i64>, _>("cost_units"),
+        "reason": row.get::<Option<String>, _>("reason"),
+        "actor_id": row.get::<Option<String>, _>("actor_id"),
+        "created_at": row.get::<String, _>("created_at"),
+    })
+}
+
 pub const INSUFFICIENT: &str = "INSUFFICIENT_NOTE_CREDITS";
 pub const INSUFFICIENT_MESSAGE: &str = "希元余额不足，请联系管理员发放希元";
 
@@ -168,6 +183,7 @@ impl FileStore {
         amount: i64,
         reason: &str,
         key: &str,
+        audit_id: Option<i64>,
     ) -> Result<Value, StoreError> {
         if amount <= 0
             || reason.trim().is_empty()
@@ -179,9 +195,10 @@ impl FileStore {
         }
         let key = format!("grant:{actor}:{key}");
         let mut tx = self.begin_note_transaction().await?;
-        if let Some(row) = sqlx::query("SELECT user_id,delta,balance_after,reason FROM note_credit_ledger WHERE idempotency_key=?").bind(&key).fetch_optional(&mut *tx).await? {
+        if let Some(row) = sqlx::query("SELECT id,user_id,delta,balance_after,reason FROM note_credit_ledger WHERE idempotency_key=?").bind(&key).fetch_optional(&mut *tx).await? {
             if row.get::<String,_>("user_id") != user.to_string() || row.get::<i64,_>("delta") != amount || row.get::<String,_>("reason") != reason.trim() { return Err("IdempotencyConflict".into()); }
             let after: i64=row.get("balance_after");
+            super::operations::audit_detail(&mut tx, audit_id, json!({"ledger_id":row.get::<String,_>("id"),"idempotent_replay":true})).await?;
             tx.commit().await?;
             return Ok(json!({"balance_before":after-amount,"balance_after":after,"granted":amount}));
         }
@@ -200,8 +217,10 @@ impl FileStore {
         .bind(user.to_string())
         .execute(&mut *tx)
         .await?;
+        let ledger_id = Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO note_credit_ledger(id,user_id,event_type,delta,balance_after,actor_id,reason,idempotency_key,created_at) VALUES(?,?,'ADMIN_GRANT',?,?,?,?,?,?)")
-            .bind(Uuid::new_v4().to_string()).bind(user.to_string()).bind(amount).bind(after).bind(actor.to_string()).bind(reason.trim()).bind(key).bind(now).execute(&mut *tx).await?;
+            .bind(&ledger_id).bind(user.to_string()).bind(amount).bind(after).bind(actor.to_string()).bind(reason.trim()).bind(key).bind(now).execute(&mut *tx).await?;
+        super::operations::audit_detail(&mut tx, audit_id, json!({"ledger_id":ledger_id,"idempotent_replay":false})).await?;
         tx.commit().await?;
         Ok(json!({"balance_before":before,"balance_after":after,"granted":amount}))
     }
@@ -316,7 +335,7 @@ impl FileStore {
     ) -> Result<Value, StoreError> {
         let rows=sqlx::query("SELECT * FROM note_credit_ledger WHERE user_id=? AND (? IS NULL OR (created_at || '/' || id) < ?) ORDER BY created_at DESC,id DESC LIMIT ?")
             .bind(user.to_string()).bind(cursor).bind(cursor).bind(limit.clamp(1,100)).fetch_all(&self.db).await?;
-        let entries:Vec<Value>=rows.iter().map(|r|json!({"id":r.get::<String,_>("id"),"job_id":r.get::<Option<String>,_>("job_id"),"event_type":r.get::<String,_>("event_type"),"delta":r.get::<i64,_>("delta"),"balance_after":r.get::<i64,_>("balance_after"),"duration_seconds":r.get::<Option<i64>,_>("duration_seconds"),"cost_units":r.get::<Option<i64>,_>("cost_units"),"reason":r.get::<Option<String>,_>("reason"),"actor_id":r.get::<Option<String>,_>("actor_id"),"created_at":r.get::<String,_>("created_at")})).collect();
+        let entries: Vec<Value> = rows.iter().map(ledger_entry).collect();
         let next = rows.last().map(|r| {
             format!(
                 "{}/{}",
@@ -456,20 +475,20 @@ mod tests {
         assert!(store.charge_note_job(c, 60).await.is_err());
         let actor = Uuid::new_v4();
         let g = store
-            .grant_note_credits(user, actor, 10, "添加额度", "same")
+            .grant_note_credits(user, actor, 10, "添加额度", "same", None)
             .await
             .unwrap();
         assert_eq!(g["balance_before"], -4);
         assert_eq!(g["balance_after"], 6);
         assert_eq!(
             store
-                .grant_note_credits(user, actor, 10, "添加额度", "same")
+                .grant_note_credits(user, actor, 10, "添加额度", "same", None)
                 .await
                 .unwrap(),
             g
         );
         assert!(store
-            .grant_note_credits(user, actor, 11, "添加额度", "same")
+            .grant_note_credits(user, actor, 11, "添加额度", "same", None)
             .await
             .is_err());
         assert_eq!(store.note_balance(user).await.unwrap(), 6);
@@ -491,7 +510,7 @@ mod tests {
         assert!(!store.check_note_start(b.id, user).await.unwrap());
         assert_eq!(store.note_balance(user).await.unwrap(), -1);
         assert_eq!(store.get_user(user).await.unwrap().processing_quota, -1);
-        store.admin_update_user(user, true, 7, 99, 2).await.unwrap();
+        store.admin_update_user(user, true, 7, 2, None).await.unwrap();
         assert_eq!(store.get_user(user).await.unwrap().processing_quota, -1);
     }
     #[tokio::test]
@@ -501,7 +520,7 @@ mod tests {
         assert!(store.check_note_start(a.id, user).await.unwrap());
         let (charged, grant) = tokio::join!(
             store.charge_note_job(a.clone(), 7200),
-            store.grant_note_credits(user, Uuid::new_v4(), 10, "manual", "race")
+            store.grant_note_credits(user, Uuid::new_v4(), 10, "manual", "race", None)
         );
         charged.unwrap();
         grant.unwrap();
@@ -532,7 +551,7 @@ mod tests {
         let a = job(&store, user).await;
         assert!(store.check_note_start(a.id, user).await.unwrap());
         assert!(store
-            .grant_note_credits(user, Uuid::new_v4(), 1, "overflow", "overflow")
+            .grant_note_credits(user, Uuid::new_v4(), 1, "overflow", "overflow", None)
             .await
             .is_err());
         assert!(store.charge_note_job(a.clone(), 0).await.is_err());
@@ -575,7 +594,7 @@ mod tests {
         let store = FileStore::new(temp.path().into()).await.unwrap();
         assert_eq!(store.note_balance(user).await.unwrap(), -3);
         store
-            .grant_note_credits(user, user, 10, "grant", "migration")
+            .grant_note_credits(user, user, 10, "grant", "migration", None)
             .await
             .unwrap();
         store.db.close().await;

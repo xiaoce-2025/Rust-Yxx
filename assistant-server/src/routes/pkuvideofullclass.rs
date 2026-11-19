@@ -530,6 +530,7 @@ async fn refresh_courses(
 
 async fn batch_submit(
     State(state): State<AppState>, current_user: CurrentUser,
+    audit: Option<axum::Extension<super::operations::AuditId>>,
     Json(req): Json<BatchSubmitRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     use crate::services::batch_submission::{CourseSubmitter, BatchSubmitter};
@@ -551,7 +552,9 @@ async fn batch_submit(
             && !state.lesson_busy(current_user.id,&req.course_id,&lesson.id).await { ids.push(lesson.id); }
     }
     if ids.is_empty() { return Err(ApiError::BadRequest("没有需要提交的课节，已处理或已入队的课节会自动跳过".into())); }
-    let submitter: std::sync::Arc<dyn BatchSubmitter> = std::sync::Arc::new(CourseSubmitter { state:state.clone(),user_id:current_user.id });
+    let submitter: std::sync::Arc<dyn BatchSubmitter> = std::sync::Arc::new(CourseSubmitter {
+        state:state.clone(), user_id:current_user.id, parent_audit_id:audit.map(|axum::Extension(id)| id.0),
+    });
     let batch = state.batch_submissions.start(current_user.id,req.course_id,ids,submitter).await.map_err(ApiError::Conflict)?;
     Ok(Json(serde_json::json!({"success":true,"batch":batch})))
 }
@@ -569,11 +572,12 @@ async fn process_lesson(
     axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
     Json(req): Json<ProcessLessonRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     if req.regenerate && !state.store.site_features().await.map_err(ApiError::Internal)?.show_reprocess {
         return Err(ApiError::Forbidden("管理员已关闭课节重新处理功能".into()));
     }
-    crate::services::lesson_submission::submit_lesson_mode(state, current_user.id, course_id, video_id, req.manual_key, req.regenerate).await
+    crate::services::lesson_submission::submit_lesson_mode(state, current_user.id, course_id, video_id, req.manual_key, req.regenerate)
+        .await.map(super::operations::submitted_note)
 }
 
 async fn get_process_status(
@@ -1066,13 +1070,13 @@ async fn reprocess_lesson(
     State(state): State<AppState>,
     axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     if !state.store.site_features().await.map_err(ApiError::Internal)?.show_reprocess {
         return Err(ApiError::Forbidden("管理员已关闭课节重新处理功能".into()));
     }
     crate::services::lesson_submission::submit_lesson_mode(
         state, current_user.id, course_id, video_id, None, true,
-    ).await
+    ).await.map(super::operations::submitted_note)
 }
 
 // A course TeX may be physically installed before its final billing transaction.

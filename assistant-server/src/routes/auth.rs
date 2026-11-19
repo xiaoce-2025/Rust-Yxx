@@ -154,11 +154,16 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
 async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit: Option<axum::Extension<super::operations::AuditId>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<axum::response::Response, ApiError> {
     let user = state.store.get_user_by_email(req.email.trim()).await
         .ok_or(ApiError::Unauthorized)?;
 
+    if let Some(axum::Extension(audit)) = audit {
+        state.store.attribute_audit(audit.0, None, Some(user.id)).await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
     if !user.is_active {
         return Err(ApiError::Forbidden("用户未激活".to_string()));
     }

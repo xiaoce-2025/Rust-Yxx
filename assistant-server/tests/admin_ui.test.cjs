@@ -6,8 +6,10 @@ const { test } = require('node:test');
 
 const html = fs.readFileSync(path.join(__dirname, '../templates/admin.html'), 'utf8');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+const operationsSource = fs.readFileSync(path.join(__dirname, '../src/routes/admin_operations_view.rs'), 'utf8');
+const operationsScript = operationsSource.match(/const SCRIPT: &str = r##"([\s\S]*?)"##;/)[1];
 
-function harness() {
+function harness(operationResponse) {
   const elements = new Map();
   function node(id) {
     if (!elements.has(id)) elements.set(id, {
@@ -39,8 +41,10 @@ function harness() {
   const context = vm.createContext({
     document: { getElementById: node, querySelectorAll: () => [], querySelector: () => actionButton, addEventListener() {} },
     window: { addEventListener() {} }, location: { hash: '#index' }, history: { replaceState() {} },
+    URLSearchParams,
     fetch: async (url, options) => {
       requests.push({ url, options });
+      if (url.startsWith('/api/admin/records?')) return { ok: true, json: async () => operationResponse };
       if (!options.method) return { ok: true, json: async () => structuredClone(snapshot) };
       assert.equal(options.headers['X-Admin-Request'], '1');
       const body = JSON.parse(options.body);
@@ -55,9 +59,28 @@ function harness() {
     },
   });
   vm.runInContext(script, context);
+  if (operationResponse) vm.runInContext(operationsScript, context);
   const run = code => vm.runInContext(code, context);
   return { node, snapshot, requests, run };
 }
+
+test('audit links select the target user and safely render a pending event', async () => {
+  const h = harness({
+    records: [{id: 7, user_id: 'admin', subject_id: 'user-1', kind: 'admin.change', status: 0,
+      created_at: '2026-11-19T00:00:00Z', target: '<img src=x>', detail: {ledger_id: 'ledger-1'}}],
+    total: 1, page: 1, page_size: 50,
+  });
+  await h.run('fetchData()');
+  await h.run("models.activity={name:'登录与操作记录'}; model='activity'; location.hash='#activity?user=user-1&q=%237'; applyOperationsLink(); renderOperations()");
+  const url = new URL(h.requests.at(-1).url, 'https://example.test');
+  assert.equal(url.searchParams.get('q'), '#7');
+  assert.equal(url.searchParams.get('user'), 'user-1');
+  const view = h.node('view').innerHTML;
+  assert.match(view, /待核对/);
+  assert.match(view, /#credits\?q=ledger-1/);
+  assert.match(view, /&lt;img src=x&gt;/);
+  assert.doesNotMatch(view, /<img src=x/);
+});
 
 test('entry is a model directory without dashboard or welcome widgets', async () => {
   const h = harness(); await h.run('fetchData()'); h.run('route()');

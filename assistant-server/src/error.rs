@@ -30,9 +30,9 @@ struct ErrorBody {
     error: String,
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let status = match self {
+impl ApiError {
+    pub fn status(&self) -> StatusCode {
+        match self {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
@@ -42,8 +42,13 @@ impl IntoResponse for ApiError {
             ApiError::Http(_) | ApiError::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
-        };
+        }
+    }
+}
 
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = self.status();
         let message = match &self {
             ApiError::Http(error) => format!("上游请求失败（HTTP {:?}，超时：{}）", error.status().map(|s|s.as_u16()), error.is_timeout()),
             _ => self.to_string(),

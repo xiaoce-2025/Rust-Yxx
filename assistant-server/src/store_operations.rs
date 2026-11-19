@@ -17,6 +17,31 @@ impl Default for SiteFeatures {
 }
 pub const FEATURES_PATH: &str = "admin/site_features.json";
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct OperationsQuery {
+    pub kind: String,
+    pub q: String,
+    pub status: String,
+    pub user: String,
+    pub event: String,
+    pub from: Option<chrono::DateTime<Utc>>,
+    pub before: Option<chrono::DateTime<Utc>>,
+    pub page: u32,
+}
+
+pub(super) async fn audit_detail(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: Option<i64>,
+    detail: Value,
+) -> Result<(), StoreError> {
+    if let Some(id) = id {
+        sqlx::query("UPDATE admin_events SET detail=json_patch(detail,?) WHERE id=? AND status=0")
+            .bind(detail.to_string()).bind(id).execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
 impl FileStore {
     pub(super) async fn init_operations(&self) -> Result<(), StoreError> {
         for statement in [
@@ -36,6 +61,14 @@ impl FileStore {
         {
             sqlx::query("ALTER TABLE admin_events ADD COLUMN detail TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail))").execute(&self.db).await?;
         }
+        if !columns.iter().any(|r| r.get::<String, _>("name") == "subject") {
+            sqlx::query("ALTER TABLE admin_events ADD COLUMN subject TEXT")
+                .execute(&self.db).await?;
+        }
+        sqlx::query("CREATE INDEX IF NOT EXISTS admin_events_subject ON admin_events(subject, id DESC)")
+            .execute(&self.db).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS note_credit_ledger_time ON note_credit_ledger(created_at DESC,id DESC)")
+            .execute(&self.db).await?;
         // Existing sessions provide a known login timestamp. Do not invent dates for older users.
         for session in self.sessions.read().await.values() {
             sqlx::query("INSERT INTO user_activity VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET last_login_at=max(last_login_at,excluded.last_login_at)")
@@ -105,7 +138,8 @@ impl FileStore {
         *sessions = next;
         Ok(())
     }
-    pub async fn record_event(
+    #[cfg(test)]
+    async fn record_event(
         &self,
         actor: Option<Uuid>,
         kind: &str,
@@ -122,6 +156,51 @@ impl FileStore {
         .bind(Utc::now().to_rfc3339())
         .execute(&self.db)
         .await?;
+        Ok(())
+    }
+
+    pub async fn begin_audit(
+        &self,
+        actor: Option<Uuid>,
+        subject: Option<Uuid>,
+        kind: &str,
+        target: &str,
+        detail: &Value,
+    ) -> Result<i64, StoreError> {
+        Ok(sqlx::query("INSERT INTO admin_events(actor,subject,kind,target,status,created_at,detail) VALUES (?,?,?,?,0,?,?)")
+            .bind(actor.map(|id| id.to_string()))
+            .bind(subject.map(|id| id.to_string()))
+            .bind(kind)
+            .bind(target)
+            .bind(Utc::now().to_rfc3339())
+            .bind(detail.to_string())
+            .execute(&self.db).await?.last_insert_rowid())
+    }
+
+    pub async fn attribute_audit(&self, id: i64, actor: Option<Uuid>, subject: Option<Uuid>) -> Result<(), StoreError> {
+        sqlx::query("UPDATE admin_events SET actor=coalesce(?,actor),subject=coalesce(?,subject) WHERE id=? AND status=0")
+            .bind(actor.map(|id| id.to_string())).bind(subject.map(|id| id.to_string()))
+            .bind(id).execute(&self.db).await?;
+        Ok(())
+    }
+
+    pub async fn describe_audit(&self, id: i64, kind: &str, detail: &Value) -> Result<(), StoreError> {
+        sqlx::query("UPDATE admin_events SET kind=?,detail=json_patch(detail,?) WHERE id=? AND status=0")
+            .bind(kind).bind(detail.to_string()).bind(id).execute(&self.db).await?;
+        Ok(())
+    }
+
+    pub async fn finish_audit(
+        &self,
+        id: i64,
+        status: u16,
+        detail: &Value,
+    ) -> Result<(), StoreError> {
+        sqlx::query("UPDATE admin_events SET status=?,detail=json_patch(detail,?) WHERE id=? AND status=0")
+            .bind(i32::from(status))
+            .bind(detail.to_string())
+            .bind(id)
+            .execute(&self.db).await?;
         Ok(())
     }
     async fn archive_ai(
@@ -162,64 +241,76 @@ impl FileStore {
             .map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())
     }
-    pub async fn operations_page(
-        &self,
-        kind: &str,
-        q: &str,
-        status: &str,
-        user: &str,
-        page: u32,
-    ) -> Result<Value, StoreError> {
-        let offset = (page.max(1) as i64 - 1) * 50;
-        let query = format!("%{q}%");
-        let (table, search, owner) = if kind == "ai_jobs" {
-            ("admin_ai_jobs", "payload", "user_id")
-        } else {
-            (
-                "admin_events",
-                "(kind || ' ' || target || ' ' || ifnull(actor,''))",
-                "actor",
-            )
+    pub async fn operations_page(&self, query: &OperationsQuery) -> Result<Value, StoreError> {
+        let (table, search, owner, subject, status, event, order, projection) = match query.kind.as_str() {
+            "ai_jobs" => ("admin_ai_jobs", "payload", "user_id", "NULL", "status", "NULL", "updated_at DESC,id",
+                "id,created_at,completed_at,json_remove(payload,'$.failures') AS payload"),
+            "credits" => ("note_credit_ledger",
+                "id || ' ' || coalesce(job_id,'') || ' ' || user_id || ' ' || coalesce(actor_id,'') || ' ' || coalesce(reason,'')",
+                "user_id", "actor_id", "event_type", "NULL", "created_at DESC,id DESC", "*"),
+            _ => ("admin_events",
+                "'#' || id || ' ' || kind || ' ' || target || ' ' || coalesce(actor,'') || ' ' || coalesce(subject,'') || ' ' || detail",
+                "actor", "subject", "status", "kind", "id DESC", "*"),
         };
-        // Only constants above form SQL identifiers; all user-supplied values remain bound parameters.
-        let predicate =
-            format!(" WHERE {search} LIKE ? AND (?='' OR status=?) AND (?='' OR {owner}=?)");
-        let total: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}{predicate}"))
-            .bind(&query)
-            .bind(status)
-            .bind(status)
-            .bind(user)
-            .bind(user)
-            .fetch_one(&self.db)
-            .await?;
-        let order = if kind == "ai_jobs" {
-            "updated_at DESC,id"
-        } else {
-            "id DESC"
+        let filtered = |select, suffix| {
+            let mut sql = sqlx::QueryBuilder::<Sqlite>::new(format!("SELECT {select} FROM {table} WHERE 1=1"));
+            if let Some(id) = query.q.strip_prefix('#').and_then(|id| id.parse::<i64>().ok())
+                .filter(|_| query.kind == "activity") {
+                sql.push(" AND id=").push_bind(id);
+            } else if !query.q.is_empty() {
+                sql.push(format!(" AND instr(lower({search}), lower("))
+                    .push_bind(query.q.as_str()).push("))>0");
+            }
+            if !query.status.is_empty() {
+                sql.push(format!(" AND {status}=")).push_bind(query.status.as_str());
+            }
+            if !query.event.is_empty() {
+                sql.push(format!(" AND {event}=")).push_bind(query.event.as_str());
+            }
+            if !query.user.is_empty() {
+                sql.push(format!(" AND ({owner}=")).push_bind(query.user.as_str())
+                    .push(format!(" OR {subject}=")).push_bind(query.user.as_str()).push(")");
+            }
+            if let Some(from) = query.from {
+                sql.push(" AND julianday(created_at)>=julianday(").push_bind(from.to_rfc3339()).push(")");
+            }
+            if let Some(before) = query.before {
+                sql.push(" AND julianday(created_at)<julianday(").push_bind(before.to_rfc3339()).push(")");
+            }
+            sql.push(suffix);
+            sql
         };
-        let projection = if kind == "ai_jobs" {
-            "id,created_at,completed_at,json_remove(payload,'$.failures') AS payload"
-        } else {
-            "*"
-        };
-        let rows = sqlx::query(&format!(
-            "SELECT {projection} FROM {table}{predicate} ORDER BY {order} LIMIT 50 OFFSET ?"
-        ))
-        .bind(query)
-        .bind(status)
-        .bind(status)
-        .bind(user)
-        .bind(user)
-        .bind(offset)
-        .fetch_all(&self.db)
-        .await?;
-        let records:Vec<Value>=rows.into_iter().map(|r| {
-            if kind=="ai_jobs" {
-                let mut value:Value=serde_json::from_str(r.get::<&str,_>("payload")).unwrap_or(json!({}));
-                value["created_at"]=json!(r.get::<String,_>("created_at"));value["completed_at"]=json!(r.get::<Option<String>,_>("completed_at"));value
-            } else {json!({"id":r.get::<i64,_>("id"),"user_id":r.get::<Option<String>,_>("actor"),"kind":r.get::<String,_>("kind"),"target":r.get::<String,_>("target"),"status":r.get::<i64,_>("status"),"created_at":r.get::<String,_>("created_at"),"detail":serde_json::from_str::<Value>(r.get::<&str,_>("detail")).unwrap_or(json!({}))})}
+        let mut tx = self.db.begin().await?;
+        let total: i64 = filtered("count(*)", "").build_query_scalar().fetch_one(&mut *tx).await?;
+        let page = query.page.max(1).min(((total + 49) / 50).max(1) as u32);
+        let order = format!(" ORDER BY {order} LIMIT 50 OFFSET ");
+        let rows = filtered(projection, order.as_str()).push_bind(i64::from(page - 1) * 50)
+            .build().fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        let records: Vec<Value> = rows.into_iter().map(|row| match query.kind.as_str() {
+            "ai_jobs" => {
+                let mut value: Value = serde_json::from_str(row.get::<&str, _>("payload")).unwrap_or(json!({}));
+                value["created_at"] = json!(row.get::<String, _>("created_at"));
+                value["completed_at"] = json!(row.get::<Option<String>, _>("completed_at"));
+                value
+            }
+            "credits" => {
+                let mut value = super::note_billing::ledger_entry(&row);
+                value["user_id"] = json!(row.get::<String, _>("user_id"));
+                value
+            }
+            _ => json!({
+                "id": row.get::<i64, _>("id"),
+                "user_id": row.get::<Option<String>, _>("actor"),
+                "subject_id": row.get::<Option<String>, _>("subject"),
+                "kind": row.get::<String, _>("kind"),
+                "target": row.get::<String, _>("target"),
+                "status": row.get::<i64, _>("status"),
+                "created_at": row.get::<String, _>("created_at"),
+                "detail": serde_json::from_str::<Value>(row.get::<&str, _>("detail")).unwrap_or(json!({})),
+            }),
         }).collect();
-        Ok(json!({"records":records,"total":total,"page":page.max(1),"page_size":50}))
+        Ok(json!({"records":records,"total":total,"page":page,"page_size":50}))
     }
     pub async fn site_features(&self) -> Result<SiteFeatures, String> {
         Ok(self
@@ -269,6 +360,39 @@ impl FileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query(kind: &str, q: &str, status: &str, user: &str, page: u32) -> OperationsQuery {
+        OperationsQuery {
+            kind: kind.into(), q: q.into(), status: status.into(), user: user.into(), page,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn unfinished_request_survives_restart_and_supports_exact_lookup() {
+        let tmp = tempdir::TempDir::new("audit-pending").unwrap();
+        let actor = Uuid::new_v4();
+        let subject = Uuid::new_v4();
+        let store = FileStore::new(tmp.path().into()).await.unwrap();
+        let id = store.begin_audit(Some(actor), Some(subject), "admin.change", "POST /example", &json!({}))
+            .await.unwrap();
+        drop(store);
+        let store = FileStore::new(tmp.path().into()).await.unwrap();
+        let mut filters = query("activity", &format!("#{id}"), "0", &subject.to_string(), 1);
+        filters.event = "admin.change".into();
+        filters.from = Some(Utc::now() - chrono::Duration::minutes(1));
+        filters.before = Some(Utc::now() + chrono::Duration::minutes(1));
+        let pending = store.operations_page(&filters).await.unwrap();
+        assert_eq!(pending["total"], 1);
+        assert_eq!(pending["records"][0]["user_id"], actor.to_string());
+        store.finish_audit(id, 403, &json!({"duration_ms": 12})).await.unwrap();
+        assert_eq!(store.operations_page(&filters).await.unwrap()["total"], 0);
+        filters.status = "403".into();
+        assert_eq!(store.operations_page(&filters).await.unwrap()["records"][0]["detail"]["duration_ms"], 12);
+        filters.before = filters.from;
+        assert_eq!(store.operations_page(&filters).await.unwrap()["total"], 0);
+    }
+
     use chrono::Duration;
     #[tokio::test]
     async fn login_history_survives_session_revocation_and_settings_are_audited_atomically() {
@@ -295,7 +419,7 @@ mod tests {
         store.insert_session(session.clone()).await.unwrap();
         assert_eq!(
             store
-                .operations_page("activity", "login", "", &user.to_string(), 1)
+                .operations_page(&query("activity", "login", "", &user.to_string(), 1))
                 .await
                 .unwrap()["total"],
             1
@@ -304,7 +428,7 @@ mod tests {
         session.created_at = Utc::now();
         let last = session.created_at.to_rfc3339();
         store.insert_session(session).await.unwrap();
-        store.admin_revoke_sessions(user).await.unwrap();
+        store.admin_revoke_sessions(user, None).await.unwrap();
         store
             .save_admin_setting(
                 user,
@@ -314,7 +438,7 @@ mod tests {
             .await
             .unwrap();
         let settings = store
-            .operations_page("activity", "admin.settings", "", "", 1)
+            .operations_page(&query("activity", "admin.settings", "", "", 1))
             .await
             .unwrap();
         assert_eq!(
@@ -328,7 +452,7 @@ mod tests {
         );
         assert!(!restored.site_features().await.unwrap().show_reprocess);
         let history = restored
-            .operations_page("activity", "login", "", &user.to_string(), 1)
+            .operations_page(&query("activity", "login", "", &user.to_string(), 1))
             .await
             .unwrap();
         assert_eq!(history["total"], 2);
@@ -343,14 +467,14 @@ mod tests {
                 .unwrap();
         }
         let page = restored
-            .operations_page("activity", "note.read", "200", &user.to_string(), 2)
+            .operations_page(&query("activity", "note.read", "200", &user.to_string(), 2))
             .await
             .unwrap();
         assert_eq!(page["total"], 61);
         assert_eq!(page["records"].as_array().unwrap().len(), 11);
         assert_eq!(
             restored
-                .operations_page("activity", "' OR 1=1 --", "", "", 1)
+                .operations_page(&query("activity", "' OR 1=1 --", "", "", 1))
                 .await
                 .unwrap()["total"],
             0
@@ -377,7 +501,7 @@ mod tests {
         store.save_ta_ai_job(user, &path, &job).await.unwrap();
         let restored = FileStore::new(tmp.path().into()).await.unwrap();
         let records = restored
-            .operations_page("ai_jobs", "", "", &user.to_string(), 1)
+            .operations_page(&query("ai_jobs", "", "", &user.to_string(), 1))
             .await
             .unwrap();
         assert_eq!(records["total"], 2);
@@ -391,7 +515,7 @@ mod tests {
         assert_eq!(first["created_at"], "2026-11-14T01:00:00+00:00");
         assert_eq!(
             restored
-                .operations_page("ai_jobs", "", "interrupted", "", 1)
+                .operations_page(&query("ai_jobs", "", "interrupted", "", 1))
                 .await
                 .unwrap()["total"],
             1
@@ -407,7 +531,7 @@ mod tests {
         let migrated = FileStore::new(tmp.path().into()).await.unwrap();
         assert_eq!(
             migrated
-                .operations_page("ai_jobs", "", "", "", 1)
+                .operations_page(&query("ai_jobs", "", "", "", 1))
                 .await
                 .unwrap()["total"],
             3

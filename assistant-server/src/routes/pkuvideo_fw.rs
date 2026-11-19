@@ -6,6 +6,7 @@ use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{self, HeaderMap, StatusCode},
+    response::Response,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -105,7 +106,7 @@ async fn submit(
     State(state): State<AppState>,
     current_user: CurrentUser,
     Json(req): Json<SubmitRequest>,
-) -> Result<Json<SubmitResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let slot = state.fw_slot(current_user.id).await;
     let _guard = slot.lock().await;
     validate_input(&req.video_url)?;
@@ -181,10 +182,10 @@ async fn submit(
         }
     });
 
-    Ok(Json(SubmitResponse {
+    Ok(super::operations::job_response(job_id, Json(SubmitResponse {
         job_id,
         status: "queued".to_string(),
-    }))
+    })))
 }
 
 #[derive(Deserialize)]
@@ -197,7 +198,7 @@ async fn submit_lesson_replay(
     State(state): State<AppState>,
     current: CurrentUser,
     Json(request): Json<LessonReplayRequest>,
-) -> Result<Json<SubmitResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let slot = state.fw_slot(current.id).await;
     let _guard = slot.lock().await;
     let user = state
@@ -322,10 +323,10 @@ async fn submit_lesson_replay(
             }
         }
     });
-    Ok(Json(SubmitResponse {
+    Ok(super::operations::job_response(id, Json(SubmitResponse {
         job_id: id,
         status: "queued".into(),
-    }))
+    })))
 }
 
 async fn check_m3u8(

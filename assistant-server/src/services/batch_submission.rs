@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use rand::Rng;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
@@ -17,20 +17,35 @@ pub trait BatchSubmitter: Send + Sync + 'static {
 pub struct CourseSubmitter {
     pub state: AppState,
     pub user_id: Uuid,
+    pub parent_audit_id: Option<i64>,
 }
 #[async_trait]
 impl BatchSubmitter for CourseSubmitter {
     async fn submit(&self, course_id: &str, video_id: &str) -> Result<Value, String> {
-        super::lesson_submission::submit_lesson(
+        let store = &self.state.store;
+        let id = store.begin_audit(
+            Some(self.user_id), None, "notes.batch_item", "批量提交课节",
+            &json!({"course_id":course_id,"video_id":video_id,"parent_audit_id":self.parent_audit_id}),
+        ).await.map_err(|error| {
+            tracing::error!(%error, "批量课节提交审计写入失败");
+            "操作记录暂不可用，课节未提交".to_owned()
+        })?;
+        let result = super::lesson_submission::submit_lesson(
             self.state.clone(),
             self.user_id,
             course_id.into(),
             video_id.into(),
             None,
         )
-        .await
-        .map(|axum::Json(value)| value)
-        .map_err(|e| e.to_string())
+        .await;
+        let (status, detail) = match &result {
+            Ok(value) => (200, json!({"result_job_id":value.0["job_id"]})),
+            Err(error) => (error.status().as_u16(), json!({})),
+        };
+        if let Err(error) = store.finish_audit(id, status, &detail).await {
+            tracing::error!(%error, audit_id=id, "批量课节提交结果写入失败");
+        }
+        result.map(|axum::Json(value)| value).map_err(|e| e.to_string())
     }
 }
 

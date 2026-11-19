@@ -74,8 +74,9 @@ pub fn routes() -> Router<AppState> {
 
 async fn submit_api(
     State(state): State<AppState>,
+    audit: Option<axum::Extension<super::operations::AuditId>>,
     Json(req): Json<SubmitApiRequest>,
-) -> Result<Json<SubmitResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     validate_input(&req.video_url)?;
 
     let user = state
@@ -84,8 +85,12 @@ async fn submit_api(
         .await
         .ok_or(ApiError::Unauthorized)?;
 
-    if !verify_password(req.platform_password.trim(), &user.password_hash)? {
+    if !user.is_active || !verify_password(req.platform_password.trim(), &user.password_hash)? {
         return Err(ApiError::Unauthorized);
+    }
+    if let Some(axum::Extension(audit)) = audit {
+        state.store.attribute_audit(audit.0, Some(user.id), None).await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
     // This API also supports password authentication without a session cookie.
@@ -106,18 +111,18 @@ async fn submit_api(
     )
     .await?;
 
-    Ok(Json(SubmitResponse {
+    Ok(super::operations::job_response(job_id, Json(SubmitResponse {
         job_id,
         status: "queued".to_string(),
         status_url: format!("/api/pkuvideo/jobs/{job_id}"),
-    }))
+    })))
 }
 
 async fn submit_web(
     State(state): State<AppState>,
     current_user: CurrentUser,
     Json(req): Json<SubmitWebRequest>,
-) -> Result<Json<SubmitResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     validate_input(&req.video_url)?;
 
     let job_id = enqueue_job(
@@ -131,11 +136,11 @@ async fn submit_web(
     )
     .await?;
 
-    Ok(Json(SubmitResponse {
+    Ok(super::operations::job_response(job_id, Json(SubmitResponse {
         job_id,
         status: "queued".to_string(),
         status_url: format!("/api/pkuvideo/jobs/{job_id}"),
-    }))
+    })))
 }
 
 async fn check_m3u8(
@@ -246,7 +251,7 @@ struct ReexecuteStepRequest {
 async fn reexecute_step(
     State(state): State<AppState>, current_user: CurrentUser, Path(id): Path<Uuid>,
     Json(req): Json<ReexecuteStepRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     if req.step > 4 { return Err(ApiError::BadRequest("无效的步骤索引".into())); }
     let job = state.pkuvideo_jobs.read().await.get(&id).cloned().ok_or(ApiError::NotFound)?;
     if job.user_id != current_user.id { return Err(ApiError::Forbidden("无权访问".into())); }
@@ -258,8 +263,8 @@ async fn reexecute_step(
     let job_id = enqueue_job(state, current_user.id, job.video_url,
         user.email.split('@').next().unwrap_or_default().into(),
         user.iaaa_encrypted_password.unwrap_or_default(), req.manual_key, true).await?;
-    Ok(Json(serde_json::json!({"success":true,"job_id":job_id,"status":"queued",
-        "status_url":format!("/api/pkuvideo/jobs/{job_id}"),"message":"已加入重新生成队列"})))
+    Ok(super::operations::job_response(job_id, Json(serde_json::json!({"success":true,"job_id":job_id,"status":"queued",
+        "status_url":format!("/api/pkuvideo/jobs/{job_id}"),"message":"已加入重新生成队列"}))))
 }
 
 async fn delete_job(

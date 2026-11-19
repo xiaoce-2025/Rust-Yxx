@@ -103,28 +103,28 @@ async fn management_data(State(state): State<AppState>, current: CurrentUser) ->
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UserUpdate { is_active: bool, storage_quota: i32, #[serde(default)] processing_quota: Option<i64>, processing_priority: u32 }
+struct UserUpdate { is_active: bool, storage_quota: i32, #[serde(default, rename = "processing_quota")] _processing_quota: Option<i64>, processing_priority: u32 }
 
-async fn update_user(State(state): State<AppState>, Path(id): Path<Uuid>, Json(input): Json<UserUpdate>) -> Result<Json<Value>, ApiError> {
+async fn update_user(State(state): State<AppState>, Path(id): Path<Uuid>, audit: Option<axum::Extension<super::operations::AuditId>>, Json(input): Json<UserUpdate>) -> Result<Json<Value>, ApiError> {
     if !input.is_active && state.settings.admin.user_ids.contains(&id) {
         return Err(ApiError::BadRequest("不能停用管理员账户，请先在服务配置中移除其管理员权限".into()));
     }
     if input.storage_quota < 0 || !(1..=100).contains(&input.processing_priority) {
         return Err(ApiError::BadRequest("配额必须为非负整数，优先级范围为 1–100".into()));
     }
-    state.store.admin_update_user(id, input.is_active, input.storage_quota, input.processing_quota.unwrap_or(0), input.processing_priority).await?;
+    state.store.admin_update_user(id, input.is_active, input.storage_quota, input.processing_priority, audit.map(|axum::Extension(id)| id.0)).await?;
     Ok(Json(json!({"success":true})))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreditGrant { amount:i64, reason:String, idempotency_key:String }
-async fn grant_note_credits(State(state):State<AppState>,current:CurrentUser,Path(id):Path<Uuid>,Json(input):Json<CreditGrant>)->Result<Json<Value>,ApiError> {
+async fn grant_note_credits(State(state):State<AppState>,current:CurrentUser,Path(id):Path<Uuid>,audit:Option<axum::Extension<super::operations::AuditId>>,Json(input):Json<CreditGrant>)->Result<Json<Value>,ApiError> {
     if input.amount<=0 || input.reason.trim().is_empty() || input.reason.len()>1000 || input.idempotency_key.is_empty() || input.idempotency_key.len()>128 {
         return Err(ApiError::BadRequest("请填写正整数的希元点数、发放原因和幂等标识".into()));
     }
     state.store.get_user(id).await.ok_or(ApiError::NotFound)?;
-    let value=state.store.grant_note_credits(id,current.id,input.amount,&input.reason,&input.idempotency_key).await.map_err(|e| {
+    let value=state.store.grant_note_credits(id,current.id,input.amount,&input.reason,&input.idempotency_key,audit.map(|axum::Extension(id)| id.0)).await.map_err(|e| {
         if matches!(e.to_string().as_str(),"Overflow"|"IdempotencyConflict"|"InvalidGrant") {ApiError::BadRequest(e.to_string())} else {ApiError::Internal(e.to_string())}
     })?;
     Ok(Json(value))
@@ -134,10 +134,10 @@ async fn note_credit_ledger(State(state):State<AppState>,Path(id):Path<Uuid>,axu
     Ok(Json(state.store.note_ledger(id,query.limit.unwrap_or(30),query.cursor.as_deref()).await.map_err(|e|ApiError::Internal(e.to_string()))?))
 }
 
-async fn revoke_sessions(State(state): State<AppState>, current: CurrentUser, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
+async fn revoke_sessions(State(state): State<AppState>, current: CurrentUser, Path(id): Path<Uuid>, audit: Option<axum::Extension<super::operations::AuditId>>) -> Result<Json<Value>, ApiError> {
     if id == current.id { return Err(ApiError::BadRequest("请通过退出登录结束自己的会话".into())); }
     state.store.get_user(id).await.ok_or(ApiError::NotFound)?;
-    let count = state.store.admin_revoke_sessions(id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    let count = state.store.admin_revoke_sessions(id, audit.map(|axum::Extension(id)| id.0)).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({"success":true,"revoked":count})))
 }
 
@@ -240,13 +240,23 @@ mod tests {
         assert!(!inventory.to_string().contains("PRIVATE_NOTE_BODY")&&!inventory.to_string().contains("SECRET_VIDEO_URL"));
         let note_url=format!("{base}/api/admin/note?owner={member}&course={course}&lesson=_l_1&format=tex");
         assert_eq!(client.get(&note_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
-        let note=client.get(&note_url).bearer_auth(tokens[0]).send().await.unwrap();assert_eq!(note.headers()["cache-control"],"no-store");assert_eq!(note.text().await.unwrap(),"PRIVATE_NOTE_BODY");
+        let note=client.get(format!("{note_url}&ignored=SECRET_QUERY")).bearer_auth(tokens[0]).send().await.unwrap();
+        assert_eq!(note.headers()["cache-control"],"no-store");
+        let note_audit = note.headers()["x-audit-id"].to_str().unwrap().parse::<i64>().unwrap();
+        assert_eq!(note.text().await.unwrap(),"PRIVATE_NOTE_BODY");
         assert_eq!(client.get(format!("{base}/api/admin/note?owner={member}&course=..&lesson=_l_1&format=tex")).bearer_auth(tokens[0]).send().await.unwrap().status(),400);
         let audit_url=format!("{base}/api/admin/records?kind=activity&q=note.read");
         assert_eq!(client.get(&audit_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
         let reads:Value=client.get(&audit_url).bearer_auth(tokens[0]).send().await.unwrap().json().await.unwrap();
         assert!(reads["records"].as_array().unwrap().iter().any(|r|r["user_id"]==admin.to_string()&&r["status"]==200));
         assert!(!reads.to_string().contains("PRIVATE_NOTE_BODY")&&!reads.to_string().contains(&tokens[0].to_string()));
+        let exact: Value = client.get(format!("{base}/api/admin/records?kind=activity&q=%23{note_audit}&user={member}&event=note.read&status=200"))
+            .bearer_auth(tokens[0]).send().await.unwrap().json().await.unwrap();
+        assert_eq!(exact["total"], 1);
+        assert_eq!(exact["records"][0]["id"], note_audit);
+        assert_eq!(exact["records"][0]["subject_id"], member.to_string());
+        assert_eq!(exact["records"][0]["detail"]["lesson"], "_l_1");
+        assert!(!exact.to_string().contains("SECRET_QUERY"));
         assert_eq!(client.get(format!("{base}/admin")).send().await.unwrap().status(),303);
         assert_eq!(client.get(format!("{base}/api/admin/data")).send().await.unwrap().status(),401);
         for path in ["/admin","/api/admin/data"] {
@@ -254,6 +264,8 @@ mod tests {
         }
         let page = client.get(format!("{base}/admin")).bearer_auth(tokens[0]).send().await.unwrap();
         assert_eq!(page.status(),200); assert_eq!(page.headers()[CACHE_CONTROL],"no-store");
+        let rendered = page.text().await.unwrap();
+        assert!(rendered.contains("data-model=\"credits\"") && rendered.contains("applyOperationsLink(); if (data)"));
         let snapshot = client.get(format!("{base}/api/admin/data")).bearer_auth(tokens[0]).send().await.unwrap().text().await.unwrap();
         assert!(!snapshot.contains("SECRET_")); assert!(!snapshot.contains(&tokens[0].to_string()));
         assert_eq!(serde_json::from_str::<Value>(&snapshot).unwrap()["users"].as_array().unwrap().len(),2);
@@ -309,6 +321,18 @@ mod tests {
         assert_eq!(client.get(format!("{url}/note-credits/ledger")).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
         let ledger:Value=client.get(format!("{base}/api/note-credits/ledger?user_id={admin}")).bearer_auth(tokens[1]).send().await.unwrap().json().await.unwrap();
         assert_eq!(ledger["entries"].as_array().unwrap().len(),1);
+        let global_ledger_url = format!("{base}/api/admin/records?kind=credits&user={member}&status=ADMIN_GRANT");
+        assert_eq!(client.get(&global_ledger_url).bearer_auth(tokens[1]).send().await.unwrap().status(), 403);
+        let global_ledger: Value = client.get(&global_ledger_url).bearer_auth(tokens[0]).send().await.unwrap().json().await.unwrap();
+        assert_eq!(global_ledger["total"], 1);
+        let ledger_id = global_ledger["records"][0]["id"].as_str().unwrap();
+        assert_eq!(global_ledger["records"][0]["actor_id"], admin.to_string());
+        assert!(!global_ledger.to_string().contains("api-retry"));
+        let grant_history: Value = client.get(format!("{base}/api/admin/records?kind=activity&q={ledger_id}&status=200"))
+            .bearer_auth(tokens[0]).send().await.unwrap().json().await.unwrap();
+        assert_eq!(grant_history["total"], 3);
+        assert!(grant_history["records"].as_array().unwrap().iter()
+            .any(|record| record["detail"]["idempotent_replay"] == false));
         let admin_ledger:Value=client.get(format!("{base}/api/note-credits/ledger?user_id={member}")).bearer_auth(tokens[0]).send().await.unwrap().json().await.unwrap();
         assert!(admin_ledger["entries"].as_array().unwrap().is_empty());
         assert_eq!(client.post(&url).bearer_auth(tokens[0]).header("x-admin-request","1").json(&update).send().await.unwrap().status(),200);
