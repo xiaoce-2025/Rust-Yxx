@@ -13,20 +13,25 @@ async function checkPage(name) {
   let detectionError = false;
   const context = vm.createContext({
     document: { getElementById(id) { assert.ok(elements.has(id), `Missing element: ${id}`); return elements.get(id); } },
+    window: {},
     fetch: async (url, options) => {
       requests.push({url, body: options.body && JSON.parse(options.body)});
+      if (url === '/api/note-credits/me') return {ok: true, json: async () => ({balance: 2})};
+      if (url === '/api/pkuvideo/standalone-jobs') return {ok: true, text: async () => '[]'};
       const payload = url.endsWith('/check-m3u8')
         ? (detectionError ? {error: 'playlist unavailable'} : {is_m3u8: true, key_uri: 'https://example.invalid/key'})
         : {job_id: 'job-1', status: 'pending'};
       return {ok: true, text: async () => JSON.stringify(payload)};
     },
-    setInterval() { return 1; }, clearInterval() {}, TextEncoder, URL, URLSearchParams, location: {}, console
+    setInterval() { return 1; }, clearInterval() {}, clearTimeout() {}, TextEncoder, URL, URLSearchParams, location: {}, console
   });
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1]
     .replace('checkLogin().then(() => openLessonReplay());', '')
-    .replace(/    checkLogin\(\);/, '');
+    .replace('checkLogin().then(loadHistory);', '');
+  if (name === 'pkuvideo') {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../templates/note-credits.js'), 'utf8'), context);
+  }
   vm.runInContext(script, context);
-  if (name === 'pkuvideo') vm.runInContext('processingQuota = 2;', context);
   elements.get('videoUrl').value = 'https://example.invalid/video.m3u8';
   await vm.runInContext('checkM3u8AndSubmit()', context);
   assert.equal(elements.get('keyModal').style.display, 'flex');
@@ -44,15 +49,14 @@ async function checkPage(name) {
   requests.length = 0;
   elements.get('videoUrl').value = 'https://example.invalid/video.mp4';
   await vm.runInContext('checkM3u8AndSubmit()', context);
-  assert.deepEqual(requests[0].body, {video_url: 'https://example.invalid/video.mp4'});
+  assert.deepEqual(requests.find(r => /\/submit(?:-web)?$/.test(r.url)).body, {video_url: 'https://example.invalid/video.mp4'});
   requests.length = 0;
-  if (name === 'pkuvideo') vm.runInContext('processingQuota = 5;', context);
   const key = 'hex:000102030405060708090a0b0c0d0e0f';
   elements.get('videoUrl').value = 'https://example.invalid/video.m3u8?token=a%20b%2Fc&enc_key=' + encodeURIComponent(key) + '&v=1';
   await vm.runInContext('checkM3u8AndSubmit()', context);
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(!requests.some(r => r.url.endsWith('/check-m3u8')), 'embedded key must skip manual key detection');
-  assert.deepEqual(requests[0].body, {video_url: 'https://example.invalid/video.m3u8?token=a%20b%2Fc&v=1', manual_key: key});
+  assert.deepEqual(requests.find(r => /\/submit(?:-web)?$/.test(r.url)).body, {video_url: 'https://example.invalid/video.m3u8?token=a%20b%2Fc&v=1', manual_key: key});
   requests.length = 0;
   elements.get('videoUrl').value = 'https://example.invalid/video.m3u8?enc_key=short';
   await vm.runInContext('checkM3u8AndSubmit()', context);

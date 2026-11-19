@@ -7,14 +7,17 @@ use sqlx::Row;
 use uuid::Uuid;
 
 pub const INSUFFICIENT: &str = "INSUFFICIENT_NOTE_CREDITS";
-pub const INSUFFICIENT_MESSAGE: &str = "课堂笔记处理额度不足，请联系管理员添加额度";
+pub const INSUFFICIENT_MESSAGE: &str = "希元余额不足，请联系管理员发放希元";
 
 pub fn cost_units(seconds: i64) -> Result<i64, StoreError> {
     if seconds <= 0 {
         return Err("InvalidDuration".into());
     }
-    // Division before addition supports even i64::MAX without intermediate overflow.
-    Ok(seconds / 3600 + i64::from(seconds % 3600 != 0))
+    const SECONDS_PER_HOUR: i64 = 60 * 60;
+    const GRACE_SECONDS: i64 = 5 * 60;
+    let whole_hours = seconds / SECONDS_PER_HOUR;
+    let extra_hour = i64::from(seconds % SECONDS_PER_HOUR > GRACE_SECONDS);
+    Ok((whole_hours + extra_hour).max(1))
 }
 
 /// Parse ffprobe's decimal seconds without rounding through floating point.
@@ -112,7 +115,7 @@ impl FileStore {
                 Some(user)
             }
             Err(error) => {
-                tracing::error!(user_id=%user.id,%error,"读取笔记额度失败");
+                tracing::error!(user_id=%user.id,%error,"读取希元余额失败");
                 None
             }
         }
@@ -365,11 +368,17 @@ mod tests {
     #[test]
     fn durations_and_overflow_boundaries() {
         for (seconds, units) in [
+            (1, 1),
+            (180, 1),
             (1799, 1),
             (3599, 1),
             (3600, 1),
-            (3601, 2),
+            (3601, 1),
+            (3900, 1),
+            (3901, 2),
             (7200, 2),
+            (7500, 2),
+            (7501, 3),
             (9000, 3),
             (i64::MAX, i64::MAX / 3600 + 1),
         ] {
@@ -381,6 +390,8 @@ mod tests {
         for (raw, seconds) in [
             ("3600.1", 3601),
             ("3600.000", 3600),
+            ("7500.0", 7500),
+            ("7500.001", 7501),
             ("0.01", 1),
             ("59.9", 60),
         ] {
@@ -590,13 +601,13 @@ mod tests {
         store.db.close().await;
         drop(store);
         let store = FileStore::new(temp.path().into()).await.unwrap();
-        let charged = store.charge_note_job(a.clone(), 3601).await.unwrap();
+        let charged = store.charge_note_job(a.clone(), 3901).await.unwrap();
         assert_eq!(charged.status, PipelineStatus::Succeeded);
         store.db.close().await;
         drop(store);
         let store = FileStore::new(temp.path().into()).await.unwrap();
         assert_eq!(
-            store.charge_note_job(a, 3601).await.unwrap().charged_units,
+            store.charge_note_job(a, 3901).await.unwrap().charged_units,
             2
         );
         assert_eq!(store.note_balance(user).await.unwrap(), -1);

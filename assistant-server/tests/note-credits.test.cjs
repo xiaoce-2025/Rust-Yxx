@@ -30,7 +30,7 @@ for(const balance of [0,-3]) {
       await vm.runInContext(kind==='direct'?'submitJob()':"handleProcessLesson('lesson',null,true)",f.context);
       assert.equal(f.submissions(),0);assert.equal(f.checks(),1);
       const dialog=f.document.body.children[0];assert.equal(dialog.open,true);
-      assert.match(dialog.querySelector('p').textContent,new RegExp(String(balance)));
+      assert.match(dialog.querySelector('p').textContent,new RegExp(`${balance} 点希元`));
     }
   });
 }
@@ -38,7 +38,7 @@ test('balance API errors stop submissions',async()=>{
   for(const kind of ['direct','lesson']) {
     const f=fixture(1,true);kind==='direct'?loadDirect(f):loadLesson(f);
     await vm.runInContext(kind==='direct'?'submitJob()':"handleProcessLesson('lesson')",f.context);
-    assert.equal(f.submissions(),0);assert.match(f.document.body.children[0].querySelector('h2').textContent,/暂时无法获取额度/);
+    assert.equal(f.submissions(),0);assert.match(f.document.body.children[0].querySelector('h2').textContent,/暂时无法获取希元余额/);
   }
 });
 test('rapid direct and lesson clicks submit once without reserving credits',async()=>{

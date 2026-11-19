@@ -33,7 +33,7 @@ async fn balance(State(state): State<AppState>, user: CurrentUser) -> Result<Res
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(no_store(
-        json!({"balance":balance,"unit":"hour_credit","can_start_new_job":balance>0}),
+        json!({"balance":balance,"unit":"hour_credit","unit_label":"希元","can_start_new_job":balance>0}),
     ))
 }
 async fn ledger(

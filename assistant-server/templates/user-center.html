@@ -58,9 +58,9 @@
         <p id="account-status" role="status"></p>
       </section>
       <section>
-        <h2>笔记处理额度</h2>
+        <h2>希元余额</h2>
         <p id="account-note-credits" class="priority">—</p>
-        <p>成功生成或复用笔记后按视频时长向上取整扣除小时额度。额度不足请联系管理员添加。</p>
+        <p>成功生成或复用笔记后，课程回放每计费 1 小时扣 1 点希元，每个视频至少扣 1 点。超过整小时的部分在 5 分钟以内（含 5 分钟）按整小时计费，超过 5 分钟则进一小时。希元不足时请联系管理员发放。</p>
       </section>
       <section>
         <h2>账户优先级</h2>
@@ -122,7 +122,7 @@
       document.getElementById('account-email').textContent = account.email || '未设置';
       document.getElementById('account-created').textContent = new Date(account.created_at).toLocaleDateString('zh-CN');
       document.getElementById('account-priority').textContent = account.processing_priority;
-      document.getElementById('account-note-credits').textContent = `${account.processing_quota} 小时`;
+      document.getElementById('account-note-credits').textContent = `${account.processing_quota} 点希元`;
     });
 
     const form = document.getElementById('api-form');

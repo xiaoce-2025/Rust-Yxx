@@ -18,21 +18,21 @@ window.NoteCredits = (() => {
   }
   async function balance() {
     const response=await fetch('/api/note-credits/me',{cache:'no-store',headers:{'Cache-Control':'no-store'},credentials:'same-origin'});
-    if (!response.ok) throw new Error('额度查询失败');
+    if (!response.ok) throw new Error('希元余额查询失败');
     const value=await response.json();
-    if (typeof value.balance!=='number' || !Number.isFinite(value.balance)) throw new Error('额度响应无效');
+    if (typeof value.balance!=='number' || !Number.isFinite(value.balance)) throw new Error('希元余额响应无效');
     return value;
   }
   async function check() {
     try {
       const value=await balance();
       if (value.balance<=0) {
-        show('课堂笔记处理额度不足',`当前剩余额度：${value.balance} 小时。请联系管理员添加额度后再提交任务。`);
+        show('希元余额不足',`当前余额为 ${value.balance} 点希元。请联系管理员发放希元后再提交任务。`);
         return false;
       }
       return true;
     } catch {
-      show('暂时无法获取额度','暂时无法获取额度，请稍后重试');return false;
+      show('暂时无法获取希元余额','暂时无法获取希元余额，请稍后重试');return false;
     }
   }
   return {check,balance};

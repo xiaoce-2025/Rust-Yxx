@@ -225,7 +225,7 @@ fn public_job(job: &PkuVideoJob) -> serde_json::Value {
     })).collect();
     serde_json::json!({"id":job.id,"created_at":job.created_at,"updated_at":job.updated_at,
         "status":job.status,"artifacts_deleted_at":job.artifacts_deleted_at,"steps":steps,"error":job.error.as_ref().map(|_| match job.failure_code.as_deref() {
-            Some("INSUFFICIENT_NOTE_CREDITS")=>"处理失败 · 额度不足：课堂笔记处理额度不足，请联系管理员添加额度",
+            Some(crate::store::note_billing::INSUFFICIENT)=>crate::store::note_billing::INSUFFICIENT_MESSAGE,
             Some("DURATION_UNAVAILABLE"|"BILLING_COMMIT_FAILED")=>"结果交付中，正在等待计费恢复",
             _=>"处理失败，请重试或联系管理员"
         }),"billing_state":job.billing_state,"charged_units":job.charged_units,"billing_duration_seconds":job.billing_duration_seconds,"failure_code":job.failure_code,

@@ -190,10 +190,10 @@ mod tests {
         assert_eq!(store.get_user(user).await.unwrap().storage_quota, 10);
         let archived = store.get_pkuvideo_job(a.id).await.unwrap();
         assert_eq!(archived.status, PipelineStatus::Succeeded);
-        assert_eq!(archived.charged_units, 2);
+        assert_eq!(archived.charged_units, 1);
         assert!(!archived.is_stored_standalone());
         assert!(archived.artifacts_deleted_at.is_some());
-        assert_eq!(store.note_balance(user).await.unwrap(), 8);
+        assert_eq!(store.note_balance(user).await.unwrap(), 9);
         assert_eq!(
             store.note_ledger(user, 30, None).await.unwrap()["entries"]
                 .as_array()

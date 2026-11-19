@@ -121,7 +121,7 @@ async fn update_user(State(state): State<AppState>, Path(id): Path<Uuid>, Json(i
 struct CreditGrant { amount:i64, reason:String, idempotency_key:String }
 async fn grant_note_credits(State(state):State<AppState>,current:CurrentUser,Path(id):Path<Uuid>,Json(input):Json<CreditGrant>)->Result<Json<Value>,ApiError> {
     if input.amount<=0 || input.reason.trim().is_empty() || input.reason.len()>1000 || input.idempotency_key.is_empty() || input.idempotency_key.len()>128 {
-        return Err(ApiError::BadRequest("请填写正整数额度、备注和幂等标识".into()));
+        return Err(ApiError::BadRequest("请填写正整数的希元点数、发放原因和幂等标识".into()));
     }
     state.store.get_user(id).await.ok_or(ApiError::NotFound)?;
     let value=state.store.grant_note_credits(id,current.id,input.amount,&input.reason,&input.idempotency_key).await.map_err(|e| {

@@ -589,6 +589,8 @@ async fn get_process_status(
             PipelineStatus::Pending => ("queued", "队列等待中".to_string()),
             PipelineStatus::Running => ("processing", if job.postprocessing {"正在保存课节笔记"} else {"正在处理视频"}.to_string()),
             PipelineStatus::Succeeded => ("completed", "处理完成".to_string()),
+            PipelineStatus::Failed if job.failure_code.as_deref() == Some(crate::store::note_billing::INSUFFICIENT) =>
+                ("failed", crate::store::note_billing::INSUFFICIENT_MESSAGE.to_string()),
             PipelineStatus::Failed => ("failed", job.error.clone().unwrap_or_default()),
         };
         return Ok(Json(serde_json::json!({"status":status,"message":message,"job_id":job.id,"priority":job.priority,"steps":job.steps,"postprocessing":job.postprocessing,"billing_state":job.billing_state,"charged_units":job.charged_units,"billing_duration_seconds":job.billing_duration_seconds,"failure_code":job.failure_code,"result":if job.status==PipelineStatus::Succeeded {job.course_notes_path.clone()} else {None}})));

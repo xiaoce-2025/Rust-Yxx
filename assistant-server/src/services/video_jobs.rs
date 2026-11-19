@@ -740,7 +740,7 @@ mod tests {
         let (user,name,_cleanup)=cache_user(&state).await;
         let key=crate::store::tex_hash(b"https://classroom.invalid/video?identity=exact");
         state.store.publish_tex(&key,b"\\section{Billing cached}",Uuid::new_v4()).await.unwrap();
-        state.store.set_tex_duration(&key,3601).await.unwrap();
+        state.store.set_tex_duration(&key,7500).await.unwrap();
         for (regenerate,expected_balance) in [(false,8),(true,6)] {
             if regenerate {
                 state.store.publish_tex(&key,b"\\section{New cached version}",Uuid::new_v4()).await.unwrap();
@@ -773,7 +773,7 @@ mod tests {
         assert_eq!(pending.billing_state.as_deref(),Some("BILLING_PENDING"));assert_eq!(pending.failure_code.as_deref(),Some("DURATION_UNAVAILABLE"));
         assert_eq!(state.store.note_balance(user).await.unwrap(),10);
         assert!(!lesson_storage::load_lessons(&state.store,&name,"course").await.unwrap()[0].is_processed);
-        save_duration(&state,id,Some(3601)).await.unwrap();
+        save_duration(&state,id,Some(3901)).await.unwrap();
         retry_pending_billing(&state).await;
         retry_pending_billing(&state).await;
         assert_eq!(state.store.note_balance(user).await.unwrap(),8);
