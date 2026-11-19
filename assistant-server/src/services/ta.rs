@@ -133,7 +133,6 @@ impl Blackboard {
         if !login.cookie_file.is_file() {
             return Err("无法读取教学网缓存，请在用户中心检查教学网绑定".into());
         }
-        tracing::info!(target: "teaching_ta", transport="curl", "助教客户端复用教学网回放的缓存会话与请求逻辑");
         Ok(Self {
             base: Url::parse(BASE).unwrap(),
             login: Some(login),
@@ -289,7 +288,7 @@ impl Blackboard {
         }
         Err("教学网重定向过多".into())
     }
-    async fn get(&self, path: &str) -> Result<Vec<u8>, String> {
+    pub(super) async fn get(&self, path: &str) -> Result<Vec<u8>, String> {
         self.cached_get(path, self.cached.as_ref().is_some_and(|c| c.fresh)).await
     }
     async fn json(&self, path: &str) -> Result<Value, String> {

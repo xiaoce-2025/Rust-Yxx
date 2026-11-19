@@ -216,7 +216,7 @@ pub(crate) fn site_page(source: &str, active_path: &str) -> Html<String> {
         &format!("href=\"{active_path}\" aria-current=\"page\""),
         1,
     );
-    let teaching_script = if matches!(active_path, "/ta" | "/pkuvideo_sequence") {
+    let teaching_script = if matches!(active_path, "/" | "/ta" | "/pkuvideo_sequence") {
         "<script src=\"/teaching-session.js\"></script>"
     } else { "" };
     Html(source
@@ -272,7 +272,11 @@ mod tests {
         let state = AppState::new(settings, Arc::new(FileStore::new(temp.path().into()).await.unwrap()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let app = routes(state.clone()).merge(super::super::ta::routes()).with_state(state.clone());
+        let app = routes(state.clone())
+            .merge(super::super::ta::routes())
+            .merge(super::super::assignments::routes())
+            .merge(super::super::pkuvideofullclass::routes())
+            .with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
         assert_eq!(client.get(format!("{base}/api/ta/workspace")).send().await.unwrap().status(), 401);
@@ -321,8 +325,52 @@ mod tests {
                 assert!(!cookie.contains("Expires="));
                 let html = response.text().await.unwrap();
                 assert!(html.contains("<h1>用户中心</h1>"));
+                assert!(html.contains("隐藏已完成的作业"));
                 assert!(html.contains("href=\"/user-center\" aria-current=\"page\""));
                 assert!(!html.contains("<html lang=\"zh-CN\" data-batch-waiting>"));
+
+                let cookie = format!("assistant_token={token}");
+                let home = client.get(format!("{base}/")).header("cookie", &cookie)
+                    .send().await.unwrap().text().await.unwrap();
+                assert!(home.contains("<script src=\"/teaching-session.js\">"));
+                assert!(home.contains("登录教学网账号，查看近期的ddl"));
+                let assignments_url = format!("{base}/api/assignments");
+                let reminders: serde_json::Value = client.get(assignments_url).header("cookie", &cookie)
+                    .send().await.unwrap().json().await.unwrap();
+                assert_eq!(reminders["login_required"], true);
+                assert_eq!(reminders["attempted_at"], serde_json::Value::Null);
+                let preference = format!("{base}/api/user/assignment-preferences");
+                let saved: serde_json::Value = client.get(&preference).header("cookie", &cookie)
+                    .send().await.unwrap().json().await.unwrap();
+                assert_eq!(saved["hide_completed"], true);
+                client.put(&preference).header("cookie", &cookie).json(&json!({"hide_completed":false}))
+                    .send().await.unwrap().error_for_status().unwrap();
+                let saved: serde_json::Value = client.get(&preference).header("cookie", &cookie)
+                    .send().await.unwrap().json().await.unwrap();
+                assert_eq!(saved["hide_completed"], false);
+
+                use crate::services::{course_parser::CourseInfo, course_storage, lesson_storage};
+                let username = id.to_string();
+                let course_id = "_replay_fixture_1";
+                course_storage::save_courses(&state.store, &username, &[CourseInfo {
+                    key: course_id.into(), name:"数据库课程".into(), term:"26-27学年第1学期".into(),
+                }]).await.unwrap();
+                let lessons = serde_json::from_value::<Vec<lesson_storage::LessonInfo>>(json!([{
+                    "id":"lesson", "video_url":"", "play_url":"", "date":"2026-11-19", "time":"10:00",
+                    "day_of_week":"周四", "is_processed":true, "tex_filename":"已有笔记.tex"
+                }])).unwrap();
+                lesson_storage::save_lessons(&state.store, &username, course_id, &lessons).await.unwrap();
+                let courses_path = format!("{base}/api/pkuvideofullclass/courses");
+                let courses: serde_json::Value = client.get(&courses_path).header("cookie", &cookie)
+                    .send().await.unwrap().json().await.unwrap();
+                assert_eq!(courses["courses"][0]["name"], "数据库课程");
+                let cached: serde_json::Value = client.get(format!("{courses_path}/{course_id}/videos"))
+                    .header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
+                assert_eq!(cached["lessons"][0]["tex_filename"], "已有笔记.tex");
+                let refresh = client.post(format!("{courses_path}/refresh")).header("cookie", &cookie)
+                    .send().await.unwrap();
+                assert_eq!(refresh.status(), 400);
+                assert!(refresh.text().await.unwrap().contains("尚未绑定教学网"));
 
                 let once = client.get(format!("{base}/teaching-login?next=%2Fta"))
                     .header("cookie", format!("assistant_token={token}")).send().await.unwrap();

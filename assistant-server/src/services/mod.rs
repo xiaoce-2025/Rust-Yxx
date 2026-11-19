@@ -35,3 +35,4 @@ pub mod user_agents;
 pub mod ta_ai;
 
 pub mod teaching_session;
+pub mod assignments;

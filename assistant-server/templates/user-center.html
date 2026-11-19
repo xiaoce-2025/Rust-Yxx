@@ -75,6 +75,11 @@
         <p>可在<a href="/task-history">历史任务</a>中用加速券把一个排队任务提升至 2 级。</p>
       </section>
       <section>
+        <h2 id="assignment-preferences">首页作业提醒</h2>
+        <label><input id="hide-completed-assignments" type="checkbox" checked disabled> 隐藏已完成的作业</label>
+        <p id="assignment-preferences-status" role="status"></p>
+      </section>
+      <section>
         <h2>API 配置</h2>
         <form id="api-form">
           <fieldset id="api-fields" disabled>
@@ -120,6 +125,40 @@
     </div>
   </main>
   <script>
+    const hideCompleted = document.getElementById('hide-completed-assignments');
+    const assignmentPreferenceStatus = document.getElementById('assignment-preferences-status');
+    const assignmentPreferencesUrl = '/api/user/assignment-preferences';
+    async function loadAssignmentPreferences() {
+      try {
+        const response = await fetch(assignmentPreferencesUrl, {cache: 'no-store'});
+        if (!response.ok) throw new Error();
+        hideCompleted.checked = (await response.json()).hide_completed;
+        hideCompleted.disabled = false;
+      } catch {
+        assignmentPreferenceStatus.textContent = '作业提醒设置加载失败。';
+      }
+    }
+    hideCompleted.addEventListener('change', async () => {
+      const checked = hideCompleted.checked;
+      hideCompleted.disabled = true;
+      assignmentPreferenceStatus.textContent = '正在保存…';
+      try {
+        const response = await fetch(assignmentPreferencesUrl, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({hide_completed: checked})
+        });
+        if (!response.ok) throw new Error();
+        assignmentPreferenceStatus.textContent = '已保存。';
+      } catch {
+        hideCompleted.checked = !checked;
+        assignmentPreferenceStatus.textContent = '保存失败，请重试。';
+      } finally {
+        hideCompleted.disabled = false;
+      }
+    });
+    loadAssignmentPreferences();
+
     window.siteAccount.then(account => {
       if (!account) {
         document.getElementById('account-status').textContent = '账户资料加载失败，请刷新页面重试。';

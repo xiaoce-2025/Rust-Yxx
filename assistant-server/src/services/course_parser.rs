@@ -12,7 +12,7 @@ pub fn parse_courses(html_content: &str) -> Vec<CourseInfo> {
     let mut courses = Vec::new();
     
     // 查找所有课程链接
-    let re = regex::Regex::new(r#"<a\s+[^>]*href="/webapps/blackboard/execute/launcher\?type=Course&id=PkId\{key=([^,]+)[^>]*>\s*([^<]+)\s*</a>"#).unwrap();
+    let re = regex::Regex::new(r#"<a\s+[^>]*href="/webapps/blackboard/execute/launcher\?type=Course&(?:amp;)?id=PkId\{key=([^,]+)[^>]*>\s*([^<]+)\s*</a>"#).unwrap();
     
     for cap in re.captures_iter(html_content) {
         let key = cap[1].trim().to_string();

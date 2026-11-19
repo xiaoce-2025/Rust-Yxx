@@ -331,6 +331,7 @@
     let selectedCourse = null;
     let selectedCourseName = null;
     let allCourses = [];
+    let submittedBatch = false;
     let showReprocess = false;
     async function loadFeatures() {
       try { const flags = await api('/api/site/features'); showReprocess = flags.show_reprocess === true; }
@@ -373,33 +374,18 @@
       try { payload = txt ? JSON.parse(txt) : {}; } catch { payload = { raw: txt }; }
       if (!res.ok) {
         const message = payload.error || payload.raw || ("HTTP " + res.status);
-        void window.TeachingSession.handleError(message);
+        if (method !== "GET") void window.TeachingSession.handleError(message);
         throw new Error(message);
       }
       return payload;
     }
 
     async function checkLogin() {
-      try {
-        await api("/api/auth/me");
-      } catch {
+      if (!(await window.siteAccount)) {
         location.href = "/auth?next=/pkuvideo_sequence";
-      }
-    }
-
-    async function checkBinding() {
-      try {
-        const ready = await window.TeachingSession.ensure();
-        if (!ready) {
-          statusEl.textContent = "可选择绑定账号或一次性登录后刷新课程。";
-          if (!allCourses.length) courseListEl.innerHTML = '<div class="status">登录教学网后可查看课程。</div>';
-        }
-        return ready;
-      } catch (err) {
-        statusEl.textContent = "检测教学网登录状态失败: " + err.message;
-        statusEl.className = "status error";
         return false;
       }
+      return true;
     }
 
     async function loadCourseList() {
@@ -1010,8 +996,11 @@
       setProcessing(true);
       try {
         if (!(await window.NoteCredits.check())) return;
+        submittedBatch = true;
         await window.BatchSubmission.start({course_id:selectedCourse});
       } catch (error) {
+        submittedBatch = false;
+        void window.TeachingSession.handleError(error.message);
         statusEl.textContent = '批量提交失败: ' + error.message;
         statusEl.className = 'status error';
       } finally { setProcessing(false); }
@@ -1019,6 +1008,8 @@
     window.addEventListener('batchsubmissioncomplete', async event => {
       const batch=event.detail;
       if (!batch.id) return;
+      const initiatedHere = submittedBatch;
+      submittedBatch = false;
       if (selectedCourse && selectedCourse===batch.course_id) {
         await selectCourse(selectedCourse, selectedCourseName);
       }
@@ -1033,6 +1024,9 @@
         results.appendChild(row);
       }
       results.hidden=!results.childElementCount;
+      if (initiatedHere) {
+        void window.TeachingSession.handleError([batch.error, ...(batch.results || []).map(item => item.message)].join(' '));
+      }
     });
 
     downloadAllBtnEl.addEventListener("click", handleDownloadCoursePdf);
@@ -1099,7 +1093,7 @@
     }
 
     async function refreshCourseList() {
-      if (isProcessing || !(await checkBinding())) return;
+      if (isProcessing || refreshBtnEl.disabled) return;
       refreshBtnEl.disabled = true;
       statusEl.textContent = "正在刷新课程列表...";
       statusEl.className = "status loading";
@@ -1199,8 +1193,7 @@
       document.getElementById("replayAnnouncement").hidden = true;
     });
 
-    checkLogin();
-    checkBinding().then(ready => { if (ready) return loadFeatures().then(loadCourseList); });
+    checkLogin().then(ready => { if (ready) return loadFeatures().then(loadCourseList); });
   </script>
 </body>
 </html>

@@ -29,13 +29,19 @@ const vm = require('node:vm');
     form.elements[key] = control();
   }
   const status = { removeAttribute() {}, setAttribute() {} };
-  const elements = { 'api-form': form, 'api-fields': {}, 'api-status': status, 'custom-settings': {} };
+  const elements = {
+    'api-form': form, 'api-fields': {}, 'api-status': status, 'custom-settings': {},
+    'hide-completed-assignments': control(), 'assignment-preferences-status': {},
+  };
   const config = { ai_mode: 'custom', mimo_model: 'saved-tts', mimo_api_key_set: true };
   const requests = [];
   const context = vm.createContext({
     window: { siteAccount: { then() {} } },
     document: { getElementById: id => elements[id] },
     fetch: async (url, options) => {
+      if (url === '/api/user/assignment-preferences') {
+        return { ok: true, json: async () => ({ hide_completed: true }) };
+      }
       assert.equal(url, '/api/user/api-config');
       if (options.method === 'POST') {
         const body = JSON.parse(options.body);

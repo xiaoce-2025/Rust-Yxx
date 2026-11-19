@@ -252,6 +252,9 @@ async fn poll(
                 ApiError::BadRequest("无法确认扫码账号或教学网登录失败，请重新扫码".into())
             })?;
             if let Some(owner) = owner {
+                let refresh_lock = super::assignments::refresh_lock(&state, owner).await;
+                let _refresh_guard = refresh_lock.lock().await;
+                super::assignments::clear_snapshot(&state.store, owner).await?;
                 state
                     .login_cache
                     .insert(&teaching_session::cache_key(owner), session)

@@ -185,12 +185,15 @@ async fn bind(
             tracing::info!("IAAA authentication succeeded for user {}, token obtained", req.username);
 
             drop(login_result);
+            let refresh_lock = super::assignments::refresh_lock(&state, current_user.id).await;
+            let _refresh_guard = refresh_lock.lock().await;
             let username = current_user.email.split('@').next().unwrap_or_default();
             let login_lock = state.login_cache.login_lock(username).await;
             let _login_guard = login_lock.lock().await;
             let temporary_key = crate::services::teaching_session::cache_key(current_user.id);
             let temporary_lock = state.login_cache.login_lock(&temporary_key).await;
             let _temporary_guard = temporary_lock.lock().await;
+            super::assignments::clear_snapshot(&state.store, current_user.id).await?;
             state.login_cache.invalidate(username).await;
             state.login_cache.invalidate(&temporary_key).await;
 
@@ -227,12 +230,15 @@ async fn unbind(
     State(state): State<AppState>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let refresh_lock = super::assignments::refresh_lock(&state, current_user.id).await;
+    let _refresh_guard = refresh_lock.lock().await;
     let username = current_user.email.split('@').next().unwrap_or_default();
     let login_lock = state.login_cache.login_lock(username).await;
     let _login_guard = login_lock.lock().await;
     let temporary_key = crate::services::teaching_session::cache_key(current_user.id);
     let temporary_lock = state.login_cache.login_lock(&temporary_key).await;
     let _temporary_guard = temporary_lock.lock().await;
+    super::assignments::clear_snapshot(&state.store, current_user.id).await?;
     state.login_cache.invalidate(username).await;
     state.login_cache.invalidate(&temporary_key).await;
     crate::services::app_replay::clear_binding(&state.store, current_user.id).await.map_err(ApiError::Internal)?;
@@ -547,11 +553,28 @@ async fn batch_submit(
         return Err(ApiError::BadRequest("批量提交包含不存在的课节".into()));
     }
     let mut ids = Vec::new();
+    let mut needs_teaching = false;
     for lesson in lessons {
         if (requested.is_empty() || requested.contains(&lesson.id)) && !lesson.is_processed
-            && !state.lesson_busy(current_user.id,&req.course_id,&lesson.id).await { ids.push(lesson.id); }
+            && !state.lesson_busy(current_user.id,&req.course_id,&lesson.id).await {
+            needs_teaching |= lesson.manual_replay.is_none()
+                && (lesson.video_url.is_empty() || lesson.enc_key.is_none());
+            ids.push(lesson.id);
+        }
     }
     if ids.is_empty() { return Err(ApiError::BadRequest("没有需要提交的课节，已处理或已入队的课节会自动跳过".into())); }
+    if needs_teaching && user.iaaa_encrypted_password.as_deref().is_none_or(str::is_empty)
+        && crate::services::teaching_session::cached(&state, &user).await.is_none()
+    {
+        let has_app_session = match state.app_replay_client(current_user.id).await {
+            Ok(client) => client.lock().await.request(serde_json::json!({"action":"status"})).await
+                .is_ok_and(|status| status["data"]["logged_in"] == true),
+            Err(_) => false,
+        };
+        if !has_app_session {
+            return Err(ApiError::BadRequest(crate::services::teaching_session::LOGIN_REQUIRED.into()));
+        }
+    }
     let submitter: std::sync::Arc<dyn BatchSubmitter> = std::sync::Arc::new(CourseSubmitter {
         state:state.clone(), user_id:current_user.id, parent_audit_id:audit.map(|axum::Extension(id)| id.0),
     });

@@ -68,6 +68,8 @@ async fn login(
         return Err(ApiError::BadRequest("请输入有效的 IAAA 密码".into()));
     }
     let key = teaching_session::cache_key(user.id);
+    let refresh_lock = super::assignments::refresh_lock(&state, user.id).await;
+    let _refresh_guard = refresh_lock.lock().await;
     let lock = state.login_cache.login_lock(&key).await;
     let _guard = lock.lock().await;
     let response = reqwest::Client::new()
@@ -97,6 +99,7 @@ async fn login(
         .map_err(|error| ApiError::BadRequest(if error.contains("次数过多") {
             crate::services::iaaa_login::LOGIN_LIMIT_MESSAGE.into()
         } else { "教学网登录失败，请检查账号密码或稍后重试".into() }))?;
+    super::assignments::clear_snapshot(&state.store, user.id).await?;
     state.login_cache.insert(&key, session).await;
     Ok((
         [(CACHE_CONTROL, "no-store")],
