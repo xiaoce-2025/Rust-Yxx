@@ -116,8 +116,19 @@ impl AppState {
     }
 
     pub async fn load_pkuvideo_jobs(&self) {
+        use crate::services::{
+            pkuvideo::PipelineStatus, prepared_media::PreparedMedia, video_jobs::enqueue_prepared_job,
+        };
         let mut jobs = self.store.get_all_pkuvideo_jobs().await;
+        let mut accelerated = Vec::new();
         for job in jobs.values_mut() {
+            if job.status == PipelineStatus::Pending
+                && job.acceleration_used
+                && job.result_tex_sha256.is_none()
+            {
+                accelerated.push(job.clone());
+                continue;
+            }
             if matches!(job.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running)
                 && job.result_tex_sha256.is_none() && job.failure_code.as_deref()!=Some("BILLING_SYSTEM_UNAVAILABLE") {
                 job.status = crate::services::pkuvideo::PipelineStatus::Failed;
@@ -131,10 +142,22 @@ impl AppState {
             }
         }
         *self.pkuvideo_jobs.write().await = jobs.clone();
-        // Exact private snapshots survive publication/installation failures. Retry only
-        // delivery, never run AI again or silently declare an interrupted generation done.
         use crate::services::video_queue::TaskHandler;
         let handler = crate::services::video_jobs::VideoTaskHandler { state: self.clone() };
+        accelerated.sort_by_key(|job| (job.created_at, job.id));
+        for job in accelerated {
+            let path = std::path::PathBuf::from("note_billing_media").join(job.id.to_string());
+            let result = match self.store.load_sidecar::<PreparedMedia>(&path).await {
+                Ok(Some(media)) => enqueue_prepared_job(self, job.id, job.user_id, media).await,
+                Ok(None) => Err("已加速任务缺少恢复所需的视频信息".into()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                handler.failed(job.id, error).await;
+            }
+        }
+        // Exact private snapshots survive publication/installation failures;
+        // retry delivery without regenerating the note.
         let mut deliveries: Vec<_> = jobs.into_values().filter(|j|
             j.status != crate::services::pkuvideo::PipelineStatus::Succeeded && j.result_tex_sha256.is_some()
                 && (j.postprocessing || matches!(j.status, crate::services::pkuvideo::PipelineStatus::Pending | crate::services::pkuvideo::PipelineStatus::Running))

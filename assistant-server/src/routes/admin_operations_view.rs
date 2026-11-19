@@ -1,10 +1,10 @@
 //! Extend the existing administration shell without a second frontend runtime.
 pub(super) fn page(html: String) -> String {
-    html.replace("    </nav>","<section class=\"nav-group\"><h2>运行记录与功能</h2><a href=\"#ai_jobs\" data-model=\"ai_jobs\">助教 AI 批改任务</a><a href=\"#note_files\" data-model=\"note_files\">全部笔记</a><a href=\"#activity\" data-model=\"activity\">登录与操作记录</a><a href=\"#credits\" data-model=\"credits\">希元流水</a><a href=\"#features\" data-model=\"features\">页面功能开关</a></section>    </nav>")
+    html.replace("    </nav>","<section class=\"nav-group\"><h2>运行记录与功能</h2><a href=\"#ai_jobs\" data-model=\"ai_jobs\">助教 AI 批改任务</a><a href=\"#note_files\" data-model=\"note_files\">全部笔记</a><a href=\"#activity\" data-model=\"activity\">登录与操作记录</a><a href=\"#credits\" data-model=\"credits\">希元流水</a><a href=\"#features\" data-model=\"features\">页面功能开关</a><a href=\"#acceleration\" data-model=\"acceleration\">加速券</a></section>    </nav>")
         .replace("['notes','replay','translation'].includes(key)","['notes','replay','translation','ai_jobs','note_files','activity','credits'].includes(key)")
-        .replace("const models = {","const models = {ai_jobs:{name:'助教 AI 批改任务',app:'运行记录与功能'},note_files:{name:'全部笔记',app:'运行记录与功能'},activity:{name:'登录与操作记录',app:'运行记录与功能'},credits:{name:'希元流水',app:'运行记录与功能'},features:{name:'页面功能开关',app:'运行记录与功能'},")
+        .replace("const models = {","const models = {ai_jobs:{name:'助教 AI 批改任务',app:'运行记录与功能'},note_files:{name:'全部笔记',app:'运行记录与功能'},activity:{name:'登录与操作记录',app:'运行记录与功能'},credits:{name:'希元流水',app:'运行记录与功能'},features:{name:'页面功能开关',app:'运行记录与功能'},acceleration:{name:'加速券',app:'运行记录与功能'},")
         .replace("'课程回放','助教批改'].map","'课程回放','助教批改','运行记录与功能'].map")
-        .replace("else if (model==='ta_ai') renderTaAi();","else if (['ai_jobs','note_files','activity','credits','features'].includes(model)) renderOperations(); else if (model==='ta_ai') renderTaAi();")
+        .replace("else if (model==='ta_ai') renderTaAi();","else if (['ai_jobs','note_files','activity','credits','features','acceleration'].includes(model)) renderOperations(); else if (model==='ta_ai') renderTaAi();")
         .replace("+sortHeading('created_at','创建时间'):","+sortHeading('created_at','创建时间')+sortHeading('last_login_at','最后登录'):")
         .replace("${escapeHTML(new Date(record.created_at).toLocaleDateString('zh-CN'))}</td>`:","${escapeHTML(new Date(record.created_at).toLocaleDateString('zh-CN'))}</td><td>${escapeHTML(date(record.last_login_at))}</td>`:")
         .replace("${readonlyRow('创建时间',date(user.created_at))}","${readonlyRow('创建时间',date(user.created_at))}${readonlyRow('最后登录时间',user.last_login_at?date(user.last_login_at):'暂无记录')}${readonlyRow('账户更新时间',date(user.updated_at))}")
@@ -18,7 +18,7 @@ const SCRIPT: &str = r##"
     let operationsGeneration=0;
     const operationsState={};
     const operationKinds={'login':'登录成功','auth.request':'认证请求','ta.attachment':'查看作业附件','admin.read':'后台查看','note.read':'笔记查看 / 下载','admin.change':'后台修改','admin.settings':'后台设置修改','notes.reprocess':'重新处理笔记','notes.batch_item':'批量提交课节','ta.action':'助教操作','ta.ai_start':'启动 AI 批改','ta.ai_cancel':'取消 AI 批改','ta.commit':'同步评分草稿','ta.discard':'丢弃评分草稿','ta.save_bulk':'保存批量评分','ta.save_single':'保存单份评分','user.action':'用户操作'};
-    const creditKinds={ADMIN_GRANT:'管理员发放',JOB_CHARGE:'笔记扣费',ADMIN_ADJUST:'管理员调整',RECHARGE:'希元充值'};
+    const creditKinds={ADMIN_GRANT:'管理员发放',JOB_CHARGE:'笔记扣费',ADMIN_ADJUST:'管理员调整',RECHARGE:'希元充值',ACCELERATION_PURCHASE:'购买加速券'};
     function operationsLink(key, params){
       return '#'+key+'?'+new URLSearchParams(params);
     }
@@ -45,11 +45,52 @@ const SCRIPT: &str = r##"
       delete operationsState[model];
       Object.assign(operationsQuery(),{q:params.get('q')||'',user:params.get('user')||''});
     }
+    function renderAccelerationForm(settings){
+      const fields=[['min','下界（分钟）',0,10080,1],['max','上界（分钟）',0,10080,1],
+        ['mean','均值（分钟）',0,10080,'any'],['variance','方差（分钟²）',0.000001,100000000,'any']];
+      const row=(name,label,value,min,max,step)=>`<div class="form-row"><label for="${name}">${label}</label><input id="${name}" name="${name}" type="number" min="${min}" max="${max}" step="${step}" value="${escapeHTML(value)}" required></div>`;
+      const profile=(key,label)=>`<fieldset><h2 class="fieldset-title">${label}</h2>${fields.map(([name,title,min,max,step])=>row(key+'-'+name,title,settings[key][name],min,max,step)).join('')}</fieldset>`;
+      $('view').innerHTML=`<form id="acceleration-form" class="change-form">
+        <p class="errornote" role="alert" hidden></p>
+        <fieldset><h2 class="fieldset-title">商品</h2>${row('price','每张售价（希元点）',settings.price,1,1000000,1)}</fieldset>
+        <p class="help">等待时间按设定区间内的正态分布权重抽样，单位为整分钟。加速后下界须小于或等于加速前下界，且加速后的抽样值最多等于本次加速前的估计值。</p>
+        ${profile('normal','加速前预计等待')}${profile('accelerated','加速后预计等待')}
+        <div class="submit-row"><button class="button default" type="submit">保存</button></div>
+      </form>`;
+      const form=$('acceleration-form');
+      form.addEventListener('input',()=>formDirty=true);
+      form.addEventListener('submit',async event=>{
+        event.preventDefault();
+        if(submitting)return;
+        const button=form.querySelector('button');
+        const errorMessage=form.querySelector('[role="alert"]');
+        const read=key=>form.elements.namedItem(key).valueAsNumber;
+        const distribution=key=>Object.fromEntries(fields.map(([name])=>[name,read(key+'-'+name)]));
+        submitting=true;
+        button.disabled=true;
+        errorMessage.hidden=true;
+        try{
+          await api('/api/admin/acceleration',{price:read('price'),normal:distribution('normal'),accelerated:distribution('accelerated')});
+          if(form.isConnected){formDirty=false;notice('加速券设置已保存。','success');}
+        }catch(error){
+          errorMessage.textContent=error.message;
+          errorMessage.hidden=false;
+        }finally{
+          submitting=false;
+          button.disabled=false;
+        }
+      });
+    }
     async function renderOperations(){
       const current=++operationsGeneration,key=model;
       $('page-title').textContent=models[key].name;
       $('view').textContent='正在加载…';
       try{
+        if(key==='acceleration'){
+          const settings=await api('/api/admin/acceleration');
+          if(model===key&&current===operationsGeneration)renderAccelerationForm(settings);
+          return;
+        }
         if(key==='features'){
           const flags=await api('/api/admin/features');if(model!==key||current!==operationsGeneration)return;
           $('view').innerHTML=`<form id="feature-form" class="change-form"><p id="feature-error" class="errornote" role="alert" hidden></p><fieldset><h2 class="fieldset-title">课程回放批量处理</h2><div class="form-row"><label for="show-reprocess">显示“重新处理”按钮：</label><div><input id="show-reprocess" type="checkbox" ${flags.show_reprocess?'checked':''}><p class="help">关闭后，所有用户的课节列表隐藏此按钮，服务端也拒绝重新处理请求。保存后刷新课程回放页面生效；不影响查看和下载已有笔记。</p></div></div></fieldset><div class="submit-row"><button class="button default" type="submit">保存</button></div></form>`;

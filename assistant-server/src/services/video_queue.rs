@@ -1,5 +1,7 @@
 //! Data-only task queue. Producers submit and return; fixed consumers execute work and completion events.
 use super::prepared_media::PreparedMedia;
+use super::acceleration::ACCELERATED_PRIORITY;
+use crate::error::ApiError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
@@ -189,6 +191,29 @@ impl VideoQueue {
         drop(inner);
         self.notify.notify_one();
         Ok(id)
+    }
+
+    pub async fn acceleratable_jobs(&self, user: Uuid) -> HashSet<Uuid> {
+        self.inner.lock().await.pending.iter()
+            .filter(|entry| entry.task.user_id == user && entry.task.priority > ACCELERATED_PRIORITY)
+            .map(|entry| entry.task.id)
+            .collect()
+    }
+
+    pub async fn accelerate(
+        &self,
+        user: Uuid,
+        id: Uuid,
+        persist: impl std::future::Future<Output = Result<(), ApiError>>,
+    ) -> Result<(), ApiError> {
+        // A worker cannot claim this task between debiting the ticket and updating its rank.
+        let mut inner = self.inner.lock().await;
+        let entry = inner.pending.iter_mut().find(|entry|
+            entry.task.id == id && entry.task.user_id == user && entry.task.priority > ACCELERATED_PRIORITY
+        ).ok_or_else(|| ApiError::Conflict("任务已离开队列或已加速，请刷新历史记录".into()))?;
+        persist.await?;
+        entry.task.priority = ACCELERATED_PRIORITY;
+        Ok(())
     }
 }
 

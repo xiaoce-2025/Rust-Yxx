@@ -65,13 +65,14 @@
         <div class="credit-balance">
           <p id="account-note-credits" class="priority">—</p>
           <a href="/recharge">充值希元 <span aria-hidden="true">→</span></a>
+          <a href="/recharge#acceleration">购买加速券 <span aria-hidden="true">→</span></a>
         </div>
         <p>成功生成或复用笔记后，课程回放每计费 1 小时扣 1 点希元，每个视频至少扣 1 点。超过整小时的部分在 5 分钟以内（含 5 分钟）按整小时计费，超过 5 分钟则进一小时。</p>
       </section>
       <section>
-        <h2>账户优先级</h2>
-        <p id="account-priority" class="priority">—</p>
-        <p>课堂笔记任务排队时，数值越小越优先。优先级由系统管理。</p>
+        <h2>课堂笔记任务默认优先级</h2>
+        <p class="priority">4 级</p>
+        <p>可在<a href="/task-history">历史任务</a>中用加速券把一个排队任务提升至 2 级。</p>
       </section>
       <section>
         <h2>API 配置</h2>
@@ -127,7 +128,6 @@
       document.getElementById('account-name').textContent = account.username;
       document.getElementById('account-email').textContent = account.email || '未设置';
       document.getElementById('account-created').textContent = new Date(account.created_at).toLocaleDateString('zh-CN');
-      document.getElementById('account-priority').textContent = account.processing_priority;
       document.getElementById('account-note-credits').textContent = `${account.processing_quota} 点希元`;
     });
 

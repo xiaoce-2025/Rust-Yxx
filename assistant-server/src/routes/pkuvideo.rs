@@ -210,6 +210,7 @@ async fn standalone_job_list(State(state):State<AppState>,current:CurrentUser)->
 }
 
 async fn task_history(State(state):State<AppState>,current:CurrentUser)->Json<Vec<serde_json::Value>> {
+    let acceleratable=state.video_queue.acceleratable_jobs(current.id).await;
     let jobs=state.pkuvideo_jobs.read().await;
     let mut jobs:Vec<_>=jobs.values().filter(|job|job.user_id==current.id).collect();
     jobs.sort_by_key(|job|std::cmp::Reverse(job.created_at));
@@ -217,6 +218,8 @@ async fn task_history(State(state):State<AppState>,current:CurrentUser)->Json<Ve
         let mut record=public_job(job);
         if let Some(record)=record.as_object_mut() {
             for key in ["pdf_path","tex_url","video_url","steps"] {record.remove(key);}
+            record.insert("can_accelerate".into(), serde_json::json!(job.status == PipelineStatus::Pending && acceleratable.contains(&job.id)));
+            record.insert("acceleration_used".into(), serde_json::json!(job.acceleration_used));
         }
         record
     }).collect())
@@ -455,7 +458,7 @@ mod history_tests {
     use chrono::{Duration,Utc};
     use std::sync::Arc;
     #[tokio::test]
-    async fn history_is_private_read_only_and_standalone_list_excludes_course_and_deleted() {
+    async fn history_is_private_and_standalone_list_excludes_course_and_deleted() {
         let temp=tempdir::TempDir::new("task-history-api").unwrap();
         let settings:Settings=serde_json::from_value(serde_json::json!({
             "server":{"address":"127.0.0.1","port":0},
@@ -490,7 +493,7 @@ mod history_tests {
         }
         let page=client.get(format!("{base}/task-history")).bearer_auth(token).send().await.unwrap();
         assert_eq!(page.status(),200);assert_eq!(page.headers()["cache-control"],"no-store");
-        let html=page.text().await.unwrap();assert!(html.contains("此页面仅供查询"));
+        let html=page.text().await.unwrap();assert!(html.contains("使用加速券"));
         assert!(!html.contains("downloadPdf")&&!html.contains("deleteJob")&&!html.contains("/download-tex"));
         let history:Vec<serde_json::Value>=client.get(format!("{base}/api/video-task-history?user_id={stranger}")).bearer_auth(token).send().await.unwrap().json().await.unwrap();
         assert_eq!(history.len(),3);

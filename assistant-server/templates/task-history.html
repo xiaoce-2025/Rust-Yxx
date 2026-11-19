@@ -37,13 +37,25 @@
     .empty { padding:32px; text-align:center; color:var(--muted); }
     .pager { display:flex; align-items:center; justify-content:flex-end; gap:12px; margin-top:12px; color:var(--muted); font-size:12px; }
     #feedback { color:#a0414b; margin:8px 0; }
+    .priority { display:block; margin:4px 0; color:var(--muted); font-size:12px; white-space:nowrap; }
+    .primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+    dialog { width:min(440px,calc(100% - 32px)); padding:24px; border:1px solid var(--line); border-radius:12px; color:var(--ink); }
+    dialog::backdrop { background:#33252a66; }
+    dialog h2 { margin:0 0 8px; font-size:20px; }
+    .wait-times { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:0; }
+    .wait-times div { background:#f8efed; border-radius:8px; padding:12px; }
+    .wait-times dt { color:var(--muted); font-size:12px; }
+    .wait-times dd { margin:0; font-size:18px; font-weight:700; }
+    .savings { color:var(--accent); font-size:24px; font-weight:700; margin:12px 0; }
+    .dialog-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
+    #acceleration-error { color:#a0414b; }
     @media(max-width:600px) { main { width:calc(100% - 20px); margin-top:20px; } th,td { padding:8px; } #summary { width:100%;margin-left:0; } }
   </style>
 </head>
 <body>
   <main>
-    <div class="heading"><h1>历史任务</h1><button id="refresh" type="button">刷新记录</button></div>
-    <p class="intro">查看当前账户的全部课堂笔记队列记录，包括直链、课程课节、批量提交和重新生成。此页面仅供查询。</p>
+    <div class="heading"><h1>历史任务</h1><div><a href="/recharge#acceleration">购买加速券</a>　<button id="refresh" type="button">刷新记录</button></div></div>
+    <p class="intro">查看课堂笔记队列记录，或对指定的排队任务使用加速券。</p>
     <div class="filters">
       <input id="search" type="search" placeholder="搜索任务 ID、课程名称或日期" aria-label="搜索历史任务">
       <select id="source" aria-label="任务来源"><option value="all">全部来源</option><option value="direct">直链任务</option><option value="course">课程课节</option></select>
@@ -51,16 +63,38 @@
       <span id="summary" role="status">正在读取记录…</span>
     </div>
     <p id="feedback" role="alert" hidden></p>
+    <p id="acceleration-result" role="status" hidden></p>
     <div class="table-wrap"><table>
       <thead><tr><th>提交时间</th><th>任务 / 来源</th><th>状态</th><th>完成时间</th><th>视频时长</th><th>已扣希元（点）</th><th>文件状态</th></tr></thead>
       <tbody id="records"><tr><td class="empty" colspan="7">正在读取记录…</td></tr></tbody>
     </table></div>
     <div class="pager"><button id="previous" type="button">上一页</button><span id="page">1 / 1</span><button id="next" type="button">下一页</button></div>
   </main>
+  <dialog id="acceleration-dialog" aria-labelledby="acceleration-title">
+    <h2 id="acceleration-title">使用加速券</h2>
+    <p id="acceleration-task"></p>
+    <p id="acceleration-loading" role="status">正在读取排队预估…</p>
+    <div id="acceleration-quote" hidden>
+      <dl class="wait-times">
+        <div><dt>当前预计排队</dt><dd id="wait-current"></dd></div>
+        <div><dt>加速后预计排队</dt><dd id="wait-accelerated"></dd></div>
+      </dl>
+      <p class="savings" id="wait-saved"></p>
+      <p class="intro">实际等待时间取决于队列处理进度。使用 1 张可将此任务提升至 2 级。</p>
+      <p id="acceleration-balance"></p>
+      <a id="acceleration-buy" href="/recharge#acceleration" hidden>购买加速券</a>
+    </div>
+    <p id="acceleration-error" role="alert" hidden></p>
+    <form method="dialog" class="dialog-actions">
+      <button id="acceleration-cancel" autofocus>取消</button>
+      <button id="acceleration-confirm" type="button" class="primary" disabled>确认使用 1 张</button>
+    </form>
+  </dialog>
   <!-- site-footer -->
   <script>
     const $=id=>document.getElementById(id);
     let records=[],page=1,loading=false;
+    let quoteRequest=0,selectedJob=null,redeeming=false;
     const pageSize=25;
     const escapeHTML=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const date=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—';
@@ -81,10 +115,78 @@
         const subject=job.course_id?(job.course_name||'课程课节'):'直链任务';
         const source=job.course_id?`课程课节${job.course_date?' · '+job.course_date:''}`:'课堂笔记生成 / 直链';
         const reason=job.error||job.failure_code||'';
-        return `<tr><td class="time">${escapeHTML(date(job.created_at))}</td><td class="subject">${escapeHTML(subject)}${job.regenerate?' · 重新生成':''}<small>${escapeHTML(source)}</small><span class="task-id">${escapeHTML(job.id)}</span></td><td><span class="state ${escapeHTML(job.status)}">${escapeHTML(label)}</span>${reason?`<span class="reason">${escapeHTML(reason)}</span>`:''}</td><td class="time">${escapeHTML(date(job.finished_at))}</td><td class="number">${duration(job.billing_duration_seconds)}</td><td class="number">${escapeHTML(job.charged_units||0)}</td><td>${job.course_id?'课程页面管理':job.artifacts_deleted_at?'已删除文件':'直链页面管理'}</td></tr>`;
+        const priority=Number.isInteger(job.priority)?`<small class="priority">${job.priority} 级${job.acceleration_used?' · 已加速':''}</small>`:'';
+        const accelerate=job.can_accelerate?`<button type="button" data-accelerate="${escapeHTML(job.id)}">使用加速券</button>`:'';
+        return `<tr><td class="time">${escapeHTML(date(job.created_at))}</td><td class="subject">${escapeHTML(subject)}${job.regenerate?' · 重新生成':''}<small>${escapeHTML(source)}</small><span class="task-id">${escapeHTML(job.id)}</span></td><td><span class="state ${escapeHTML(job.status)}">${escapeHTML(label)}</span>${priority}${accelerate}${reason?`<span class="reason">${escapeHTML(reason)}</span>`:''}</td><td class="time">${escapeHTML(date(job.finished_at))}</td><td class="number">${duration(job.billing_duration_seconds)}</td><td class="number">${escapeHTML(job.charged_units||0)}</td><td>${job.course_id?'课程页面管理':job.artifacts_deleted_at?'已删除文件':'直链页面管理'}</td></tr>`;
       }).join('')||'<tr><td class="empty" colspan="7">暂无匹配的任务记录</td></tr>';
       $('page').textContent=`${page} / ${pages}`;$('previous').disabled=page<=1;$('next').disabled=page>=pages;
     }
+    const dialog=$('acceleration-dialog');
+    const endpoint=id=>'/api/video-task-history/'+encodeURIComponent(id)+'/acceleration';
+    async function accelerationApi(url,options={}) {
+      const response=await fetch(url,{cache:'no-store',...options});
+      if (response.status===401) throw new Error('登录已失效，请重新登录');
+      const data=await response.json();
+      if (!response.ok) throw new Error(data.error||'加速券请求失败，请稍后重试');
+      return data;
+    }
+    function showAccelerationError(error) {
+      $('acceleration-error').textContent=error.message;
+      $('acceleration-error').hidden=false;
+    }
+    $('records').addEventListener('click',async event=>{
+      const id=event.target.closest('[data-accelerate]')?.dataset.accelerate;
+      const job=records.find(job=>job.id===id);
+      if (!job?.can_accelerate||dialog.open) return;
+      const request=++quoteRequest;
+      selectedJob=id;
+      $('acceleration-task').textContent=[job.course_name||'直链任务',job.course_date,id].filter(Boolean).join(' · ');
+      $('acceleration-result').hidden=true;
+      $('acceleration-error').hidden=true;
+      $('acceleration-quote').hidden=true;
+      $('acceleration-loading').hidden=false;
+      $('acceleration-confirm').disabled=true;
+      dialog.showModal();
+      try {
+        const [estimate,wallet]=await Promise.all([accelerationApi(endpoint(id)),accelerationApi('/api/acceleration/tickets')]);
+        if (!dialog.open||request!==quoteRequest) return;
+        $('wait-current').textContent=estimate.current_minutes+' 分钟';
+        $('wait-accelerated').textContent=estimate.accelerated_minutes+' 分钟';
+        $('wait-saved').textContent='预计节省 '+estimate.saved_minutes+' 分钟';
+        $('acceleration-balance').textContent='持有 '+wallet.tickets+' 张加速券';
+        $('acceleration-buy').hidden=wallet.tickets>0;
+        $('acceleration-quote').hidden=false;
+        $('acceleration-confirm').disabled=wallet.tickets<=0;
+      } catch(error) {
+        if (dialog.open&&request===quoteRequest) showAccelerationError(error);
+        refresh();
+      } finally {
+        if (request===quoteRequest) $('acceleration-loading').hidden=true;
+      }
+    });
+    dialog.addEventListener('cancel',event=>{if (redeeming) event.preventDefault();});
+    $('acceleration-confirm').addEventListener('click',async ()=>{
+      if (!dialog.open||redeeming||$('acceleration-confirm').disabled) return;
+      redeeming=true;
+      $('acceleration-error').hidden=true;
+      $('acceleration-confirm').disabled=true;
+      $('acceleration-cancel').disabled=true;
+      try {
+        await accelerationApi(endpoint(selectedJob),{method:'POST',headers:{'Content-Type':'application/json'},body:'null'});
+        const job=records.find(job=>job.id===selectedJob);
+        if (job) Object.assign(job,{priority:2,acceleration_used:true,can_accelerate:false});
+        render();
+        dialog.close();
+        $('acceleration-result').textContent='已使用 1 张加速券，任务优先级已提升至 2 级。';
+        $('acceleration-result').hidden=false;
+      } catch(error) {
+        showAccelerationError(error);
+      } finally {
+        redeeming=false;
+        $('acceleration-cancel').disabled=false;
+        refresh();
+      }
+    });
     async function refresh() {
       if (loading) return;loading=true;$('refresh').disabled=true;
       try {

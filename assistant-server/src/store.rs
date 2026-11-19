@@ -7,6 +7,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+#[path = "store_acceleration.rs"]
+pub(crate) mod acceleration;
 #[path = "store_operations.rs"]
 mod operations;
 #[path = "store_tex_cache.rs"]

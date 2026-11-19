@@ -63,6 +63,8 @@ pub struct PkuVideoJob {
     #[serde(default = "crate::store::default_processing_priority")]
     pub priority: u32,
     #[serde(default)]
+    pub acceleration_used: bool,
+    #[serde(default)]
     pub postprocessing: bool,
     #[serde(default)]
     pub course_notes_path: Option<String>,
@@ -137,7 +139,8 @@ impl PkuVideoJob {
             failure_code: None,
             course_id: None,
             lesson_id: None,
-            priority: 5,
+            priority: super::acceleration::MANUAL_PRIORITY,
+            acceleration_used: false,
             regenerate: false,
             share_cache: false,
             course_name: None,

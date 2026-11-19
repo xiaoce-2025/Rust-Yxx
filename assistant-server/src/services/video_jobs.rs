@@ -178,7 +178,6 @@ pub async fn enqueue_prepared_job(
     media: PreparedMedia,
 ) -> Result<Uuid, String> {
     let user = state.store.get_user(user_id).await.ok_or("用户不存在")?;
-    let priority = user.processing_priority;
     if state.pkuvideo_jobs.read().await.get(&job_id).is_none_or(|job|job.user_id!=user_id) {
         return Err("任务不存在或无权提交".into());
     }
@@ -190,7 +189,6 @@ pub async fn enqueue_prepared_job(
         if job.user_id != user_id {
             return Err("无权提交此任务".into());
         }
-        job.priority = priority;
         job.billing_state=Some("QUEUED".into());
         job.video_url = media.url.clone();
         job.url_key = Some(crate::store::tex_hash(media.url.as_bytes()));
@@ -217,7 +215,7 @@ pub async fn enqueue_prepared_job(
         VideoTask {
             id: job_id,
             user_id,
-            priority,
+            priority: job.priority,
             submitted_at: job.created_at,
             media,
             completion,

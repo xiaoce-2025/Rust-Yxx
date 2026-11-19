@@ -36,6 +36,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/admin/notes", get(operations::notes))
         .route("/api/admin/note", get(operations::note))
         .route("/api/admin/features", get(operations::features).post(operations::save_features))
+        .route("/api/admin/acceleration", get(super::acceleration::admin_get).post(super::acceleration::admin_save))
         .route("/api/admin/tex-cache", get(tex_cache::list))
         .route("/api/admin/tex-cache/:key", get(tex_cache::detail))
         .route("/api/admin/tex-cache/:key/tex", get(tex_cache::tex))

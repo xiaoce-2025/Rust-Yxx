@@ -3,6 +3,7 @@ mod iaaa_qr;
 pub mod sso;
 pub mod ta;
 pub mod admin;
+mod acceleration;
 pub mod note_credits;
 mod recharge;
 pub mod operations;
@@ -55,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .merge(iaaa_qr::routes())
         .merge(note_credits::routes())
         .merge(recharge::routes())
+        .merge(acceleration::routes())
         .merge(admin::routes(state.clone()))
         .merge(operations::routes())
         .merge(sso::routes())

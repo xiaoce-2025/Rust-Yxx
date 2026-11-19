@@ -112,6 +112,7 @@ impl FileStore {
                 .await?;
         }
         super::recharge::migrate(&mut tx).await?;
+        super::acceleration::migrate(&mut tx).await?;
         tx.commit().await?;
         Ok(())
     }

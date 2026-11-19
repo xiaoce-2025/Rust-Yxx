@@ -45,6 +45,8 @@
     .recharge #checkout-status:not(:empty) { margin-top: 10px; color: var(--red); }
     .recharge-result p { margin-bottom: 14px; }
     .recharge-result button { margin-right: 12px; }
+    #acceleration { margin-top:24px; scroll-margin-top:80px; }
+    #acceleration-status:not(:empty) { margin-top:10px; }
     @media (max-width: 640px) {
       .recharge-plans { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .recharge-plan { padding: 12px; }
@@ -105,6 +107,19 @@
         <p id="checkout-status" role="status"></p>
         <p {{unavailable_hidden}}>充值暂未开放。</p>
       </form>
+      <section id="acceleration" aria-labelledby="acceleration-product-title">
+        <h2 id="acceleration-product-title">加速券</h2>
+        <div class="recharge-summary">
+          <div>
+            <p>每张 <strong id="acceleration-price">—</strong></p>
+            <small>可在历史任务中将一个排队任务提升至 2 级。<a href="/task-history">前往历史任务</a></small>
+            <small>课堂笔记仍按视频时长扣除希元。</small>
+            <small id="acceleration-count">正在读取持有数量…</small>
+          </div>
+          <button type="button" id="acceleration-purchase" disabled>购买 1 张</button>
+        </div>
+        <p id="acceleration-status" role="status"></p>
+      </section>
     </div>
   </main>
   <!-- site-footer -->
@@ -120,9 +135,67 @@
     const checkoutEnabled = !submit.disabled;
     let submitting = false;
     let confirmed = false;
+    const purchaseButton = document.getElementById('acceleration-purchase');
+    const purchaseStatus = document.getElementById('acceleration-status');
+    let ticketPrice;
+
+    async function ticketApi(options) {
+      const response = await fetch('/api/acceleration/tickets', {cache:'no-store', ...options});
+      const data = await response.json();
+      if (!response.ok) {
+        const error = new Error(data.error || '暂时无法处理加速券，请稍后重试。');
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    }
+    function showTickets(wallet) {
+      document.getElementById('acceleration-count').textContent = '持有 ' + wallet.tickets + ' 张';
+      balanceLabel.textContent = wallet.balance + ' 点希元';
+    }
+    async function loadTickets() {
+      ticketPrice = undefined;
+      const wallet = await ticketApi();
+      ticketPrice = wallet.price;
+      document.getElementById('acceleration-price').textContent = ticketPrice + ' 点希元';
+      showTickets(wallet);
+      purchaseButton.disabled = false;
+    }
+    purchaseButton.addEventListener('click', async () => {
+      let attempt = history.state?.accelerationPurchase;
+      if (purchaseButton.disabled) return;
+      if (!attempt) {
+        if (!window.confirm('花费 ' + ticketPrice + ' 点希元购买 1 张加速券？')) return;
+        attempt = {request_id: crypto.randomUUID(), expected_price: ticketPrice};
+        history.replaceState({...history.state, accelerationPurchase: attempt}, '');
+      }
+      purchaseButton.disabled = true;
+      purchaseStatus.textContent = '正在确认购买…';
+      try {
+        const wallet = await ticketApi({method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(attempt)});
+        history.replaceState({...history.state, accelerationPurchase:null}, '');
+        showTickets(wallet);
+        purchaseStatus.textContent = '已购得 1 张加速券。';
+      } catch (error) {
+        purchaseStatus.textContent = error.message;
+        if (error.status === 400 || error.status === 409) {
+          history.replaceState({...history.state, accelerationPurchase:null}, '');
+          try { await loadTickets(); }
+          catch (error) { purchaseStatus.textContent = error.message; }
+        }
+      } finally {
+        purchaseButton.textContent = history.state?.accelerationPurchase ? '重试上次购买' : '购买 1 张';
+        purchaseButton.disabled = ticketPrice === undefined && !history.state?.accelerationPurchase;
+      }
+    });
+    if (history.state?.accelerationPurchase) purchaseButton.textContent = '重试上次购买';
+    loadTickets().catch(error => {
+      document.getElementById('acceleration-count').textContent = '暂时无法读取持有数量';
+      purchaseStatus.textContent = error.message;
+    });
 
     window.siteAccount.then(account => {
-      if (account && !confirmed) balanceLabel.textContent = account.processing_quota + ' 点希元';
+      if (account && !confirmed && ticketPrice === undefined) balanceLabel.textContent = account.processing_quota + ' 点希元';
     });
 
     function updateTotal() {
