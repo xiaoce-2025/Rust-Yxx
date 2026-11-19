@@ -1,11 +1,11 @@
 use super::{FileStore, StoreError};
 use crate::error::ApiError;
 use crate::services::{
-    acceleration::{AccelerationSettings, ACCELERATED_PRIORITY},
+    acceleration::{AccelerationSettings, WaitDistribution, ACCELERATED_PRIORITY},
     pkuvideo::PipelineStatus,
 };
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Sqlite, Transaction};
 use std::path::Path;
 use uuid::Uuid;
@@ -38,6 +38,28 @@ pub(super) async fn migrate(tx: &mut Transaction<'_, Sqlite>) -> Result<(), Stor
 
 const SETTINGS_KEY: &str = "acceleration_settings";
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredSettings {
+    Current(AccelerationSettings),
+    Legacy {
+        price: i64,
+        normal: WaitDistribution,
+    },
+}
+
+impl From<StoredSettings> for AccelerationSettings {
+    fn from(settings: StoredSettings) -> Self {
+        match settings {
+            StoredSettings::Current(settings) => settings,
+            StoredSettings::Legacy { price, normal } => Self {
+                price,
+                processing_time: normal,
+            },
+        }
+    }
+}
+
 #[derive(Serialize, sqlx::FromRow)]
 pub struct AccelerationWallet {
     pub balance: i64,
@@ -56,9 +78,10 @@ pub(crate) fn storage_error(error: impl std::fmt::Display) -> ApiError {
 impl FileStore {
     pub async fn acceleration_settings(&self) -> Result<AccelerationSettings, ApiError> {
         Ok(self
-            .load_sidecar(Path::new(SETTINGS_KEY))
+            .load_sidecar::<StoredSettings>(Path::new(SETTINGS_KEY))
             .await
             .map_err(storage_error)?
+            .map(Into::into)
             .unwrap_or_default())
     }
 
@@ -108,9 +131,10 @@ impl FileStore {
                     .map_err(storage_error)?;
             let settings: AccelerationSettings = raw
                 .as_deref()
-                .map(serde_json::from_str)
+                .map(serde_json::from_str::<StoredSettings>)
                 .transpose()
                 .map_err(storage_error)?
+                .map(Into::into)
                 .unwrap_or_default();
             if settings.price != expected_price {
                 return Err(ApiError::Conflict("售价已更新，请重新确认购买".into()));

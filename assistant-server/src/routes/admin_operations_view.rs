@@ -47,14 +47,14 @@ const SCRIPT: &str = r##"
     }
     function renderAccelerationForm(settings){
       const fields=[['min','下界（分钟）',0,10080,1],['max','上界（分钟）',0,10080,1],
-        ['mean','均值（分钟）',0,10080,'any'],['variance','方差（分钟²）',0.000001,100000000,'any']];
+        ['mean','均值（分钟）',0,10080,'any'],['variance','方差（分钟²）',0,100000000,'any']];
       const row=(name,label,value,min,max,step)=>`<div class="form-row"><label for="${name}">${label}</label><input id="${name}" name="${name}" type="number" min="${min}" max="${max}" step="${step}" value="${escapeHTML(value)}" required></div>`;
-      const profile=(key,label)=>`<fieldset><h2 class="fieldset-title">${label}</h2>${fields.map(([name,title,min,max,step])=>row(key+'-'+name,title,settings[key][name],min,max,step)).join('')}</fieldset>`;
       $('view').innerHTML=`<form id="acceleration-form" class="change-form">
         <p class="errornote" role="alert" hidden></p>
         <fieldset><h2 class="fieldset-title">商品</h2>${row('price','每张售价（希元点）',settings.price,1,1000000,1)}</fieldset>
-        <p class="help">等待时间按设定区间内的正态分布权重抽样，单位为整分钟。加速后下界须小于或等于加速前下界，且加速后的抽样值最多等于本次加速前的估计值。</p>
-        ${profile('normal','加速前预计等待')}${profile('accelerated','加速后预计等待')}
+        <fieldset><h2 class="fieldset-title">单个任务处理耗时</h2>
+        ${fields.map(([name,title,min,max,step])=>row(name,title,settings.processing_time[name],min,max,step)).join('')}
+        <p class="help">每个任务按设定区间抽取一次处理耗时。加速前后按各自的队列顺序和可用处理位计算等待时间。</p></fieldset>
         <div class="submit-row"><button class="button default" type="submit">保存</button></div>
       </form>`;
       const form=$('acceleration-form');
@@ -65,12 +65,12 @@ const SCRIPT: &str = r##"
         const button=form.querySelector('button');
         const errorMessage=form.querySelector('[role="alert"]');
         const read=key=>form.elements.namedItem(key).valueAsNumber;
-        const distribution=key=>Object.fromEntries(fields.map(([name])=>[name,read(key+'-'+name)]));
         submitting=true;
         button.disabled=true;
         errorMessage.hidden=true;
         try{
-          await api('/api/admin/acceleration',{price:read('price'),normal:distribution('normal'),accelerated:distribution('accelerated')});
+          const processing_time=Object.fromEntries(fields.map(([name])=>[name,read(name)]));
+          await api('/api/admin/acceleration',{price:read('price'),processing_time});
           if(form.isConnected){formDirty=false;notice('加速券设置已保存。','success');}
         }catch(error){
           errorMessage.textContent=error.message;

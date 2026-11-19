@@ -10,13 +10,12 @@ use crate::{
     app_state::AppState,
     auth::CurrentUser,
     error::ApiError,
-    services::{assignments, pkulogin, ta::Blackboard, teaching_session},
+    services::{assignments, ta::Blackboard, teaching_session},
     store::FileStore,
 };
 
 #[derive(Default, Serialize, Deserialize)]
 struct Snapshot {
-    attempted_at: Option<DateTime<Utc>>,
     refreshed_at: Option<DateTime<Utc>>,
     reminders: Vec<assignments::Reminder>,
     refresh_failed: bool,
@@ -113,10 +112,6 @@ async fn list(
         .get_user(user.id)
         .await
         .ok_or(ApiError::Unauthorized)?;
-    let bound = stored
-        .iaaa_encrypted_password
-        .as_deref()
-        .is_some_and(|password| !password.is_empty());
     let snapshot_path = path(user.id, "snapshot.json");
     let mut snapshot: Snapshot = state
         .store
@@ -124,40 +119,25 @@ async fn list(
         .await
         .map_err(ApiError::Internal)?
         .unwrap_or_default();
-    let now = Utc::now();
-    let mut login_required = !bound && teaching_session::cached(&state, &stored).await.is_none();
-    if !login_required && refresh_due(snapshot.attempted_at, now) {
-        snapshot.attempted_at = Some(now);
-        snapshot.refresh_failed = true;
-        save(&state.store, snapshot_path.clone(), &snapshot).await?;
-        let refresh = async {
-            let session = teaching_session::login(&state, &stored).await?;
-            let result = assignments::fetch(&Blackboard::from_session(session)?).await;
-            if bound
-                && result
-                    .as_ref()
-                    .is_err_and(|error| pkulogin::is_auth_error(error))
-            {
-                let session = teaching_session::login(&state, &stored).await?;
-                return assignments::fetch(&Blackboard::from_session(session)?).await;
-            }
-            result
-        };
-        let result = tokio::time::timeout(Duration::from_secs(120), refresh).await;
-        let finished_at = Utc::now();
-        snapshot.attempted_at = Some(finished_at);
-        match result {
+    let session = teaching_session::cached(&state, &stored).await;
+    let mut login_required = session.is_none();
+    if let Some(session) = session.filter(|_| snapshot.refresh_due(Utc::now())) {
+        let refresh = async { assignments::fetch(&Blackboard::from_session(session)?).await };
+        match tokio::time::timeout(Duration::from_secs(120), refresh).await {
             Ok(Ok(reminders)) => {
                 snapshot.reminders = reminders;
-                snapshot.refreshed_at = Some(finished_at);
+                snapshot.refreshed_at = Some(Utc::now());
                 snapshot.refresh_failed = false;
             }
             Ok(Err(error)) => {
-                login_required =
-                    !bound && teaching_session::cached(&state, &stored).await.is_none();
+                snapshot.refresh_failed = true;
+                login_required = teaching_session::cached(&state, &stored).await.is_none();
                 tracing::warn!(user_id = %user.id, error, "刷新教学网作业失败");
             }
-            Err(_) => tracing::warn!(user_id = %user.id, "刷新教学网作业超时"),
+            Err(_) => {
+                snapshot.refresh_failed = true;
+                tracing::warn!(user_id = %user.id, "刷新教学网作业超时");
+            }
         }
         save(&state.store, snapshot_path, &snapshot).await?;
     }
@@ -175,15 +155,17 @@ async fn list(
         Json(serde_json::json!({
             "reminders": reminders,
             "login_required": login_required,
-            "attempted_at": snapshot.attempted_at,
             "refreshed_at": snapshot.refreshed_at,
             "refresh_failed": snapshot.refresh_failed,
         })),
     ))
 }
 
-fn refresh_due(attempted_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
-    attempted_at.is_none_or(|last| now - last > chrono::Duration::hours(4))
+impl Snapshot {
+    fn refresh_due(&self, now: DateTime<Utc>) -> bool {
+        self.refreshed_at
+            .is_none_or(|last| now - last > chrono::Duration::hours(4))
+    }
 }
 
 #[cfg(test)]
@@ -194,13 +176,29 @@ mod tests {
     fn refresh_requires_strictly_more_than_four_hours() {
         let now = Utc::now();
         let four_hours_ago = now - chrono::Duration::hours(4);
-        assert!(refresh_due(None, now));
-        assert!(!refresh_due(Some(now), now));
-        assert!(!refresh_due(Some(four_hours_ago), now));
-        assert!(refresh_due(
-            Some(four_hours_ago - chrono::Duration::seconds(1)),
-            now
-        ));
+        let mut snapshot = Snapshot::default();
+        assert!(snapshot.refresh_due(now));
+        snapshot.refreshed_at = Some(now);
+        assert!(!snapshot.refresh_due(now));
+        snapshot.refreshed_at = Some(four_hours_ago);
+        assert!(!snapshot.refresh_due(now));
+        snapshot.refreshed_at = Some(four_hours_ago - chrono::Duration::seconds(1));
+        assert!(snapshot.refresh_due(now));
         assert!(Preferences::default().hide_completed);
+    }
+
+    #[test]
+    fn legacy_failed_attempt_does_not_postpone_the_next_pull() {
+        let now = Utc::now();
+        let last_pull = now - chrono::Duration::hours(5);
+        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "attempted_at": now,
+            "refreshed_at": last_pull,
+            "refresh_failed": true,
+            "reminders": [],
+        }))
+        .unwrap();
+        assert_eq!(snapshot.refreshed_at, Some(last_pull));
+        assert!(snapshot.refresh_due(now));
     }
 }

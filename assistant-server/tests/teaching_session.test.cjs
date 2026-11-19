@@ -137,12 +137,16 @@ test('replay loads stored lessons without checking the teaching session and prom
   const values = {
     '/api/site/features': {},
     [courses]: {success: true, courses: [{key: '_course_1', name: '缓存课程', term}]},
-    [courses + '/_course_1/videos']: {lessons: [{id: 'cached', is_processed: true, tex_filename: 'note.tex'}]},
+    [courses + '/_course_1/videos']: {
+      lessons: [{id: 'cached', is_processed: true, tex_filename: 'note.tex'}, {id: 'queued'}],
+      processing_tasks: [{job_id: 'queued-job', lesson_id: 'queued', status: 'pending', estimated_wait_minutes: 12}]
+    },
     [courses + '/refresh']: {error: '尚未绑定教学网'},
   };
   vm.runInNewContext(pageScript('pkuvideo_sequence'), {
     document: {getElementById, querySelectorAll: () => []},
     Option: class {},
+    setTimeout() {},
     window: {
       siteAccount: Promise.resolve({username: 'student'}),
       addEventListener() {},
@@ -158,6 +162,7 @@ test('replay loads stored lessons without checking the teaching session and prom
   assert.deepEqual(requests, ['/api/site/features', courses, courses + '/_course_1/videos']);
   assert.match(getElementById('courseList').innerHTML, /缓存课程/);
   assert.match(getElementById('lessonList').innerHTML, /下载PDF/);
+  assert.match(getElementById('lessonList').innerHTML, /排队中 · 预计等待 12 分钟/);
   assert.deepEqual(errors, []);
   await getElementById('refreshBtn').click();
   assert.deepEqual(errors, ['尚未绑定教学网']);

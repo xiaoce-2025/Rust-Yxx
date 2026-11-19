@@ -177,14 +177,18 @@ async fn job_detail(
     current_user: CurrentUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let jobs = state.pkuvideo_jobs.read().await;
-    let job = jobs.get(&id).cloned().ok_or(ApiError::NotFound)?;
+    let job = state.pkuvideo_jobs.read().await.get(&id).cloned().ok_or(ApiError::NotFound)?;
 
     if job.user_id != current_user.id {
         return Err(ApiError::Forbidden("无权访问".to_string()));
     }
 
-    Ok(Json(public_job(&job)))
+    let mut record = public_job(&job);
+    if job.status == PipelineStatus::Pending {
+        let waits = super::acceleration::queue_waits(&state, current_user.id).await.unwrap_or_default();
+        record["estimated_wait_minutes"] = serde_json::json!(waits.get(&id).map(|wait| wait.minutes));
+    }
+    Ok(Json(record))
 }
 
 async fn job_list(
@@ -209,20 +213,22 @@ async fn standalone_job_list(State(state):State<AppState>,current:CurrentUser)->
     Json(jobs.into_iter().map(public_job).collect())
 }
 
-async fn task_history(State(state):State<AppState>,current:CurrentUser)->Json<Vec<serde_json::Value>> {
-    let acceleratable=state.video_queue.acceleratable_jobs(current.id).await;
+async fn task_history(State(state):State<AppState>,current:CurrentUser)->Result<Json<Vec<serde_json::Value>>,ApiError> {
+    let waits = super::acceleration::queue_waits(&state, current.id).await?;
     let jobs=state.pkuvideo_jobs.read().await;
     let mut jobs:Vec<_>=jobs.values().filter(|job|job.user_id==current.id).collect();
     jobs.sort_by_key(|job|std::cmp::Reverse(job.created_at));
-    Json(jobs.into_iter().map(|job| {
+    Ok(Json(jobs.into_iter().map(|job| {
         let mut record=public_job(job);
         if let Some(record)=record.as_object_mut() {
             for key in ["pdf_path","tex_url","video_url","steps"] {record.remove(key);}
-            record.insert("can_accelerate".into(), serde_json::json!(job.status == PipelineStatus::Pending && acceleratable.contains(&job.id)));
+            let wait = waits.get(&job.id).filter(|_| job.status == PipelineStatus::Pending);
+            record.insert("can_accelerate".into(), serde_json::json!(wait.is_some_and(|entry| entry.can_accelerate)));
+            record.insert("estimated_wait_minutes".into(), serde_json::json!(wait.map(|entry| entry.minutes)));
             record.insert("acceleration_used".into(), serde_json::json!(job.acceleration_used));
         }
         record
-    }).collect())
+    }).collect()))
 }
 
 // Never serialize internal URLs, keys or local filesystem paths to normal users.

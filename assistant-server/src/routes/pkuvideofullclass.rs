@@ -184,18 +184,17 @@ async fn bind(
         Ok(login_result) => {
             tracing::info!("IAAA authentication succeeded for user {}, token obtained", req.username);
 
-            drop(login_result);
             let refresh_lock = super::assignments::refresh_lock(&state, current_user.id).await;
             let _refresh_guard = refresh_lock.lock().await;
             let username = current_user.email.split('@').next().unwrap_or_default();
             let login_lock = state.login_cache.login_lock(username).await;
             let _login_guard = login_lock.lock().await;
-            let temporary_key = crate::services::teaching_session::cache_key(current_user.id);
-            let temporary_lock = state.login_cache.login_lock(&temporary_key).await;
-            let _temporary_guard = temporary_lock.lock().await;
+            let session_key = crate::services::teaching_session::cache_key(current_user.id);
+            let session_lock = state.login_cache.login_lock(&session_key).await;
+            let _session_guard = session_lock.lock().await;
             super::assignments::clear_snapshot(&state.store, current_user.id).await?;
             state.login_cache.invalidate(username).await;
-            state.login_cache.invalidate(&temporary_key).await;
+            state.login_cache.invalidate(&session_key).await;
 
             crate::services::app_replay::clear_binding(&state.store, current_user.id).await.map_err(ApiError::Internal)?;
             if let Some(password) = req.password.as_ref() {
@@ -211,6 +210,7 @@ async fn bind(
                     tracing::error!("Failed to save IAAA binding for user {}: {}", current_user.id, e);
                     ApiError::Internal(format!("Failed to save binding: {}", e))
                 })?;
+            state.login_cache.insert(&session_key, login_result).await;
 
             tracing::info!("IAAA binding saved successfully for user {}", current_user.id);
 
@@ -320,10 +320,19 @@ async fn get_course_videos(
     let manual_attempts = lesson_storage::load_manual_attempts(&state.store, username, &course_id).await.map_err(ApiError::Internal)?;
 
     // 检查当前是否有正在处理的课节
-    let processing_tasks: Vec<_> = state.pkuvideo_jobs.read().await.values()
+    let active_jobs: Vec<_> = state.pkuvideo_jobs.read().await.values()
         .filter(|j|j.user_id == current_user.id && j.course_id.as_deref() == Some(&course_id)
             && matches!(j.status, PipelineStatus::Pending | PipelineStatus::Running))
-        .map(|j|serde_json::json!({"job_id":j.id,"lesson_id":j.lesson_id})).collect();
+        .map(|j| (j.id, j.lesson_id.clone(), j.status.clone())).collect();
+    let waits = if active_jobs.iter().any(|(_, _, status)| *status == PipelineStatus::Pending) {
+        super::acceleration::queue_waits(&state, current_user.id).await.unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    let processing_tasks: Vec<_> = active_jobs.into_iter().map(|(id, lesson_id, status)| {
+        let wait = waits.get(&id).filter(|_| status == PipelineStatus::Pending);
+        serde_json::json!({"job_id":id,"lesson_id":lesson_id,"status":status,"estimated_wait_minutes":wait.map(|entry| entry.minutes)})
+    }).collect();
     let processing_video_ids: Vec<String> = processing_tasks.iter()
         .filter_map(|j|j["lesson_id"].as_str().map(str::to_string)).collect();
     let processing_video_id = processing_video_ids.first().cloned();
@@ -608,10 +617,10 @@ async fn get_process_status(
     axum::extract::Path((course_id, video_id)): axum::extract::Path<(String, String)>,
     current_user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let jobs = state.pkuvideo_jobs.read().await;
-    if let Some(job) = jobs.values().filter(|j|j.user_id == current_user.id
+    let job = state.pkuvideo_jobs.read().await.values().filter(|j|j.user_id == current_user.id
         && j.course_id.as_deref() == Some(&course_id) && j.lesson_id.as_deref() == Some(&video_id))
-        .max_by_key(|j|j.created_at) {
+        .max_by_key(|j|j.created_at).cloned();
+    if let Some(job) = job {
         let (status, message) = match job.status {
             PipelineStatus::Pending => ("queued", "队列等待中".to_string()),
             PipelineStatus::Running => ("processing", if job.postprocessing {"正在保存课节笔记"} else {"正在处理视频"}.to_string()),
@@ -620,9 +629,14 @@ async fn get_process_status(
                 ("failed", crate::store::note_billing::INSUFFICIENT_MESSAGE.to_string()),
             PipelineStatus::Failed => ("failed", job.error.clone().unwrap_or_default()),
         };
-        return Ok(Json(serde_json::json!({"status":status,"message":message,"job_id":job.id,"priority":job.priority,"steps":job.steps,"postprocessing":job.postprocessing,"billing_state":job.billing_state,"charged_units":job.charged_units,"billing_duration_seconds":job.billing_duration_seconds,"failure_code":job.failure_code,"result":if job.status==PipelineStatus::Succeeded {job.course_notes_path.clone()} else {None}})));
+        let wait = if job.status == PipelineStatus::Pending {
+            super::acceleration::queue_waits(&state, current_user.id).await.unwrap_or_default()
+                .get(&job.id).map(|entry| entry.minutes)
+        } else {
+            None
+        };
+        return Ok(Json(serde_json::json!({"status":status,"message":message,"job_id":job.id,"priority":job.priority,"steps":job.steps,"postprocessing":job.postprocessing,"billing_state":job.billing_state,"charged_units":job.charged_units,"billing_duration_seconds":job.billing_duration_seconds,"failure_code":job.failure_code,"estimated_wait_minutes":wait,"result":if job.status==PipelineStatus::Succeeded {job.course_notes_path.clone()} else {None}})));
     }
-    drop(jobs);
     let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
     let lessons = lesson_storage::load_lessons(&state.store, user.email.split('@').next().unwrap_or_default(), &course_id).await.map_err(ApiError::Internal)?;
     let lesson = lessons.iter().find(|l|l.id == video_id).ok_or_else(||ApiError::BadRequest("课节不存在".into()))?;

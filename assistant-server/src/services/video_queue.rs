@@ -1,17 +1,19 @@
 //! Data-only task queue. Producers submit and return; fixed consumers execute work and completion events.
+use super::acceleration::{WaitDistribution, WaitEstimate, ACCELERATED_PRIORITY};
 use super::prepared_media::PreparedMedia;
-use super::acceleration::ACCELERATED_PRIORITY;
 use crate::error::ApiError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Instant,
 };
 use tokio::sync::{mpsc, Mutex, Notify};
 use uuid::Uuid;
@@ -57,10 +59,22 @@ struct Entry {
     sequence: u64,
     task: VideoTask,
 }
+impl Entry {
+    fn rank(&self) -> (u32, u64) {
+        (self.task.priority, self.sequence)
+    }
+}
+
+#[derive(Clone)]
+struct ActiveTask {
+    url: String,
+    started_at: Option<Instant>,
+}
+
 struct Inner {
     pending: Vec<Entry>,
     in_flight: HashSet<Uuid>,
-    active_urls: std::collections::HashMap<Uuid, String>,
+    active_urls: HashMap<Uuid, ActiveTask>,
     sequence: u64,
 }
 
@@ -74,16 +88,84 @@ impl Inner {
                 !self
                     .active_urls
                     .values()
-                    .any(|url| url == &e.task.media.url)
+                    .any(|active| active.url == e.task.media.url)
             })
-            .min_by_key(|(_, e)| (e.task.priority, e.sequence))
+            .min_by_key(|(_, e)| e.rank())
             .map(|(i, _)| i)?;
         let entry = self.pending.swap_remove(next);
-        self.active_urls
-            .insert(entry.task.id, entry.task.media.url.clone());
+        self.active_urls.insert(
+            entry.task.id,
+            ActiveTask {
+                url: entry.task.media.url.clone(),
+                started_at: Some(Instant::now()),
+            },
+        );
         Some(entry)
     }
 }
+
+struct ForecastTask {
+    id: Uuid,
+    owner: Uuid,
+    rank: (u32, u64),
+    url: String,
+    seconds: u64,
+}
+
+struct QueueForecast {
+    pending: Vec<ForecastTask>,
+    workers: BinaryHeap<Reverse<u64>>,
+    url_available_at: HashMap<String, u64>,
+}
+
+impl QueueForecast {
+    fn wait_seconds(&self, accelerated: Option<Uuid>) -> HashMap<Uuid, u64> {
+        let mut workers = self.workers.clone();
+        let mut url_available_at: HashMap<&str, u64> = self
+            .url_available_at
+            .iter()
+            .map(|(url, available)| (url.as_str(), *available))
+            .collect();
+        let mut pending: Vec<_> = self.pending.iter().collect();
+        pending.sort_unstable_by_key(|job| {
+            if Some(job.id) == accelerated {
+                (ACCELERATED_PRIORITY, job.rank.1)
+            } else {
+                job.rank
+            }
+        });
+        let mut waits = HashMap::with_capacity(pending.len());
+        while !pending.is_empty() {
+            let Reverse(worker_free) = workers.pop().expect("at least one queue worker");
+            // At the next free worker, pick the highest-ranked job whose URL is free.
+            // If every URL is busy, the job with the earliest release starts first.
+            let mut next = (0, u64::MAX);
+            for (index, job) in pending.iter().enumerate() {
+                let url_free = url_available_at.get(job.url.as_str()).copied().unwrap_or(0);
+                let starts_at = worker_free.max(url_free);
+                if starts_at < next.1 {
+                    next = (index, starts_at);
+                }
+                if starts_at == worker_free {
+                    break;
+                }
+            }
+            let (index, starts_at) = next;
+            let job = pending.remove(index);
+            let finishes_at = starts_at + job.seconds;
+            waits.insert(job.id, starts_at);
+            url_available_at.insert(job.url.as_str(), finishes_at);
+            workers.push(Reverse(finishes_at));
+        }
+        waits
+    }
+}
+
+pub struct QueueWait {
+    pub minutes: u64,
+    pub can_accelerate: bool,
+}
+
 pub struct VideoQueue {
     inner: Mutex<Inner>,
     notify: Notify,
@@ -155,6 +237,10 @@ impl VideoQueue {
                         let result = tokio::spawn(async move { processor.process(task).await })
                             .await
                             .unwrap_or_else(|_| Err("视频处理任务异常终止".into()));
+                        if let Some(active) = queue.inner.lock().await.active_urls.get_mut(&task_id)
+                        {
+                            active.started_at = None;
+                        }
                         if completed
                             .send(CompletionEvent {
                                 task_id,
@@ -193,11 +279,89 @@ impl VideoQueue {
         Ok(id)
     }
 
-    pub async fn acceleratable_jobs(&self, user: Uuid) -> HashSet<Uuid> {
-        self.inner.lock().await.pending.iter()
-            .filter(|entry| entry.task.user_id == user && entry.task.priority > ACCELERATED_PRIORITY)
-            .map(|entry| entry.task.id)
+    async fn forecast(&self, user: Uuid, distribution: WaitDistribution) -> Option<QueueForecast> {
+        let (mut pending, active, now) = {
+            let inner = self.inner.lock().await;
+            if !inner.pending.iter().any(|entry| entry.task.user_id == user) {
+                return None;
+            }
+            let pending: Vec<_> = inner
+                .pending
+                .iter()
+                .map(|entry| ForecastTask {
+                    id: entry.task.id,
+                    owner: entry.task.user_id,
+                    rank: entry.rank(),
+                    url: entry.task.media.url.clone(),
+                    seconds: 0,
+                })
+                .collect();
+            (pending, inner.active_urls.clone(), Instant::now())
+        };
+        let sampler = distribution.sampler();
+        for job in &mut pending {
+            job.seconds = sampler.seconds(job.id);
+        }
+        let mut workers = BinaryHeap::new();
+        let mut url_available_at = HashMap::new();
+        for (id, task) in active {
+            if let Some(started_at) = task.started_at {
+                let remaining = sampler
+                    .seconds(id)
+                    .saturating_sub(now.duration_since(started_at).as_secs());
+                workers.push(Reverse(remaining));
+                url_available_at.insert(task.url, remaining);
+            }
+        }
+        while workers.len() < self.limit {
+            workers.push(Reverse(0));
+        }
+        Some(QueueForecast {
+            pending,
+            workers,
+            url_available_at,
+        })
+    }
+
+    pub async fn estimated_waits(
+        &self,
+        user: Uuid,
+        distribution: WaitDistribution,
+    ) -> HashMap<Uuid, QueueWait> {
+        let Some(forecast) = self.forecast(user, distribution).await else {
+            return HashMap::new();
+        };
+        let waits = forecast.wait_seconds(None);
+        forecast
+            .pending
+            .iter()
+            .filter(|job| job.owner == user)
+            .map(|job| {
+                (
+                    job.id,
+                    QueueWait {
+                        minutes: waits[&job.id].div_ceil(60),
+                        can_accelerate: job.rank.0 > ACCELERATED_PRIORITY,
+                    },
+                )
+            })
             .collect()
+    }
+
+    pub async fn estimate_acceleration(
+        &self,
+        user: Uuid,
+        id: Uuid,
+        distribution: WaitDistribution,
+    ) -> Option<WaitEstimate> {
+        let forecast = self.forecast(user, distribution).await?;
+        forecast
+            .pending
+            .iter()
+            .find(|job| job.id == id && job.owner == user && job.rank.0 > ACCELERATED_PRIORITY)?;
+        let current = forecast.wait_seconds(None)[&id];
+        let accelerated = forecast.wait_seconds(Some(id))[&id];
+        Some(WaitEstimate::from_seconds(current, accelerated))
     }
 
     pub async fn accelerate(
@@ -208,9 +372,15 @@ impl VideoQueue {
     ) -> Result<(), ApiError> {
         // A worker cannot claim this task between debiting the ticket and updating its rank.
         let mut inner = self.inner.lock().await;
-        let entry = inner.pending.iter_mut().find(|entry|
-            entry.task.id == id && entry.task.user_id == user && entry.task.priority > ACCELERATED_PRIORITY
-        ).ok_or_else(|| ApiError::Conflict("任务已离开队列或已加速，请刷新历史记录".into()))?;
+        let entry = inner
+            .pending
+            .iter_mut()
+            .find(|entry| {
+                entry.task.id == id
+                    && entry.task.user_id == user
+                    && entry.task.priority > ACCELERATED_PRIORITY
+            })
+            .ok_or_else(|| ApiError::Conflict("任务已离开队列或已加速，请刷新历史记录".into()))?;
         persist.await?;
         entry.task.priority = ACCELERATED_PRIORITY;
         Ok(())
@@ -265,6 +435,46 @@ mod tests {
     }
 
     #[test]
+    fn wait_forecast_respects_parallel_workers_and_urls_with_the_same_task_durations() {
+        let owner = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let mut forecast = QueueForecast {
+            pending: vec![
+                ForecastTask {
+                    id: Uuid::new_v4(),
+                    owner,
+                    rank: (1, 1),
+                    url: "busy".into(),
+                    seconds: 600,
+                },
+                ForecastTask {
+                    id: Uuid::new_v4(),
+                    owner,
+                    rank: (4, 2),
+                    url: "free".into(),
+                    seconds: 240,
+                },
+                ForecastTask {
+                    id: target,
+                    owner,
+                    rank: (4, 3),
+                    url: "target".into(),
+                    seconds: 180,
+                },
+            ],
+            workers: [Reverse(120), Reverse(300)].into(),
+            url_available_at: HashMap::from([("busy".into(), 300)]),
+        };
+        assert_eq!(forecast.wait_seconds(None)[&target], 360);
+        assert_eq!(forecast.wait_seconds(Some(target))[&target], 120);
+        forecast.pending[2].url = "busy".into();
+        assert_eq!(forecast.wait_seconds(None)[&target], 900);
+        assert_eq!(forecast.wait_seconds(Some(target))[&target], 900);
+        forecast.pending[0].rank.0 = ACCELERATED_PRIORITY + 1;
+        assert_eq!(forecast.wait_seconds(Some(target))[&target], 300);
+    }
+
+    #[test]
     fn url_wait_preserves_original_fifo_and_priority() {
         let a = task(5);
         let mut b = task(5);
@@ -277,7 +487,13 @@ mod tests {
             active_urls: Default::default(),
             sequence: 0,
         };
-        inner.active_urls.insert(a.id, a.media.url);
+        inner.active_urls.insert(
+            a.id,
+            ActiveTask {
+                url: a.media.url,
+                started_at: Some(Instant::now()),
+            },
+        );
         inner.pending.push(Entry {
             task: b.clone(),
             sequence: 1,

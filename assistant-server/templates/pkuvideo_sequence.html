@@ -346,6 +346,7 @@
     let isProcessing = false;
     let processingLessonId = null;
     const activeLessons = new Set();
+    const queuedLessonWaits = new Map();
     const lessonPolls = new Set();
     let downloadingLessonId = null;
     let pendingKeyLessonId = null;
@@ -735,6 +736,7 @@
       currentLessons = [];
       currentManualAttempts = [];
       activeLessons.clear();
+      queuedLessonWaits.clear();
       updateCourseSelection();
 
       lessonSectionTitleEl.textContent = courseName || "课节列表";
@@ -757,6 +759,7 @@
         currentLessons = resp.lessons || [];
         for (const task of resp.processing_tasks || []) {
           activeLessons.add(task.lesson_id);
+          if (task.status === 'pending') queuedLessonWaits.set(task.lesson_id, task.estimated_wait_minutes);
           pollProcessStatus(task.lesson_id, courseId, task.job_id);
         }
         manualAddBtnEl.hidden = false;
@@ -767,6 +770,11 @@
         statusEl.textContent = "加载课节列表失败: " + err.message;
         statusEl.className = "status error";
       }
+    }
+
+    function queuedLessonLabel(lessonId) {
+      const minutes = queuedLessonWaits.get(lessonId);
+      return Number.isInteger(minutes) ? `排队中 · 预计等待 ${minutes} 分钟` : '排队中';
     }
 
     function renderLessonList(resp) {
@@ -798,7 +806,7 @@
                 <div class="lesson-title">第${index + 1}节 ${lesson.manual_replay ? '<span class="hint">手动添加 · 好学 App</span>' : ''}</div>
                 <div class="lesson-status ${isProcessingThisLesson ? 'in-progress' : (isDone ? 'done' : '')}">
                   ${isDone ? '<svg class="icon" aria-hidden="true"><use href="#replay-icon-check"/></svg>' : ''}
-                  ${isProcessingThisLesson ? '处理中...' : (isDownloadingThisLesson ? '生成PDF中...' : (lesson.is_processed ? '已处理' : '未处理'))}
+                  ${isProcessingThisLesson ? (queuedLessonWaits.has(lesson.id) ? queuedLessonLabel(lesson.id) : '处理中...') : (isDownloadingThisLesson ? '生成PDF中...' : (lesson.is_processed ? '已处理' : '未处理'))}
                 </div>
               </div>
               <div class="lesson-actions">
@@ -865,6 +873,7 @@
             if (selectedCourse !== courseId) return;
             if (['completed', 'failed', 'idle'].includes(resp.status)) {
               activeLessons.delete(lessonId);
+              queuedLessonWaits.delete(lessonId);
               const latest = await api(`/api/pkuvideofullclass/courses/${courseId}/videos`);
               if (selectedCourse !== courseId) return;
               currentLessons = latest.lessons || [];
@@ -873,7 +882,16 @@
               statusEl.className = resp.status === 'failed' ? 'status error' : 'status success';
               return;
             }
-            statusEl.textContent = resp.message || '队列处理中…';
+            if (resp.status === 'queued') {
+              const minutes = task.estimated_wait_minutes;
+              if (!queuedLessonWaits.has(lessonId) || queuedLessonWaits.get(lessonId) !== minutes) {
+                queuedLessonWaits.set(lessonId, minutes);
+                renderLessonList({lessons: currentLessons});
+              }
+            } else if (queuedLessonWaits.delete(lessonId)) {
+              renderLessonList({lessons: currentLessons});
+            }
+            statusEl.textContent = resp.status === 'queued' ? queuedLessonLabel(lessonId) : (resp.message || '队列处理中…');
             statusEl.className = 'status loading';
           } catch (error) { console.warn('查询课节状态失败', error); }
         }
@@ -906,6 +924,7 @@
         if (resp.needs_app_login) { await ensureAppLogin(); return; }
         if (!resp.success) throw new Error(resp.message || '提交失败');
         activeLessons.add(lessonId);
+        queuedLessonWaits.set(lessonId, null);
         statusEl.textContent = '已加入处理队列，可以继续提交其他课节';
         pollProcessStatus(lessonId, courseId, resp.job_id);
       } catch (error) {

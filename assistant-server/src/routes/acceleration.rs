@@ -5,6 +5,7 @@ use crate::{
     services::{
         acceleration::{AccelerationSettings, ACCELERATED_PRIORITY},
         pkuvideo::PipelineStatus,
+        video_queue::QueueWait,
     },
     store::acceleration::{storage_error, AccelerationWallet},
 };
@@ -17,6 +18,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub(super) fn routes() -> Router<AppState> {
@@ -26,6 +28,17 @@ pub(super) fn routes() -> Router<AppState> {
             "/api/video-task-history/:id/acceleration",
             get(estimate).post(redeem),
         )
+}
+
+pub(super) async fn queue_waits(
+    state: &AppState,
+    user: Uuid,
+) -> Result<HashMap<Uuid, QueueWait>, ApiError> {
+    let settings = state.store.acceleration_settings().await?;
+    Ok(state
+        .video_queue
+        .estimated_waits(user, settings.processing_time)
+        .await)
 }
 
 async fn wallet(
@@ -74,22 +87,17 @@ async fn estimate(
         .filter(|job| job.user_id == user.id)
         .map(|job| job.status == PipelineStatus::Pending)
         .ok_or(ApiError::NotFound)?;
-    if !eligible
-        || !state
-            .video_queue
-            .acceleratable_jobs(user.id)
-            .await
-            .contains(&id)
-    {
-        return Err(ApiError::Conflict(
-            "任务已离开队列或已加速，请刷新历史记录".into(),
-        ));
+    let conflict = || ApiError::Conflict("任务已离开队列或已加速，请刷新历史记录".into());
+    if !eligible {
+        return Err(conflict());
     }
     let settings = state.store.acceleration_settings().await?;
-    Ok((
-        [(CACHE_CONTROL, "no-store")],
-        Json(settings.estimate(&mut rand::thread_rng())),
-    ))
+    let estimate = state
+        .video_queue
+        .estimate_acceleration(user.id, id, settings.processing_time)
+        .await
+        .ok_or_else(conflict)?;
+    Ok(([(CACHE_CONTROL, "no-store")], Json(estimate)))
 }
 
 async fn redeem(
@@ -137,7 +145,7 @@ pub(super) async fn admin_save(
 ) -> Result<Json<AccelerationSettings>, ApiError> {
     if !settings.valid() {
         return Err(ApiError::BadRequest(
-            "请检查售价、等待上下界、均值和方差。加速后下界须小于或等于加速前下界。".into(),
+            "请检查售价、任务耗时上下界、均值和方差。均值须位于上下界之间。".into(),
         ));
     }
     state
@@ -262,18 +270,40 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         let client = reqwest::Client::new();
+        store
+            .save_sidecar(
+                std::path::Path::new("acceleration_settings"),
+                &json!({
+                    "price":2, "normal":{"min":8,"max":8,"mean":8,"variance":1},
+                    "accelerated":{"min":3,"max":3,"mean":3,"variance":1}
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
         let configure = |token| {
             client
                 .post(format!("{base}/api/admin/acceleration"))
                 .bearer_auth(token)
                 .header("X-Admin-Request", "1")
                 .json(&json!({
-                    "price":2, "normal":{"min":12,"max":12,"mean":12,"variance":1},
-                    "accelerated":{"min":3,"max":3,"mean":3,"variance":1}
+                    "price":2, "processing_time":{"min":12,"max":12,"mean":12,"variance":0}
                 }))
         };
         assert_eq!(configure(tokens[1]).send().await.unwrap().status(), 403);
-        assert_eq!(configure(tokens[0]).send().await.unwrap().status(), 200);
+        let legacy: serde_json::Value = client
+            .get(format!("{base}/api/admin/acceleration"))
+            .bearer_auth(tokens[0])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            legacy,
+            json!({"price":2,"processing_time":{"min":8,"max":8,"mean":8.0,"variance":1.0}})
+        );
 
         let purchase = client
             .post(format!("{base}/api/acceleration/tickets"))
@@ -291,6 +321,7 @@ mod tests {
                 .unwrap();
             assert_eq!(wallet, json!({"balance":2,"tickets":1}));
         }
+        assert_eq!(configure(tokens[0]).send().await.unwrap().status(), 200);
         let job_url = |id| format!("{base}/api/video-task-history/{id}/acceleration");
         assert_eq!(
             client
@@ -313,7 +344,34 @@ mod tests {
             .unwrap();
         assert_eq!(
             estimate,
-            json!({"current_minutes":12,"accelerated_minutes":3,"saved_minutes":9})
+            json!({"current_minutes":24,"accelerated_minutes":12,"saved_minutes":12})
+        );
+        let history = || {
+            client
+                .get(format!("{base}/api/video-task-history"))
+                .bearer_auth(tokens[0])
+        };
+        let records: Vec<serde_json::Value> = history().send().await.unwrap().json().await.unwrap();
+        let queued = records
+            .iter()
+            .find(|job| job["id"] == json!(ids[2]))
+            .unwrap();
+        assert_eq!(
+            queued["estimated_wait_minutes"],
+            estimate["current_minutes"]
+        );
+        let detail: serde_json::Value = client
+            .get(format!("{base}/api/pkuvideo/jobs/{}", ids[2]))
+            .bearer_auth(tokens[0])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            detail["estimated_wait_minutes"],
+            estimate["current_minutes"]
         );
         let redeem = |id| client.post(job_url(id)).bearer_auth(tokens[0]).json(&());
         assert_eq!(redeem(ids[0]).send().await.unwrap().status(), 409);
@@ -322,6 +380,16 @@ mod tests {
         let mut statuses = [a.unwrap().status().as_u16(), b.unwrap().status().as_u16()];
         statuses.sort();
         assert_eq!(statuses, [200, 409]);
+        let records: Vec<serde_json::Value> = history().send().await.unwrap().json().await.unwrap();
+        let new_front = records
+            .iter()
+            .find(|job| job["id"] == json!(ids[2]))
+            .unwrap();
+        assert_eq!(
+            new_front["estimated_wait_minutes"],
+            estimate["accelerated_minutes"]
+        );
+        assert_eq!(new_front["can_accelerate"], false);
         assert_eq!(redeem(ids[1]).send().await.unwrap().status(), 400);
         assert_eq!(store.acceleration_wallet(owner).await.unwrap().tickets, 0);
         let persisted = FileStore::new(temp.path().into()).await.unwrap();

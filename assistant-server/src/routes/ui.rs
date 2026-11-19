@@ -338,7 +338,7 @@ mod tests {
                 let reminders: serde_json::Value = client.get(assignments_url).header("cookie", &cookie)
                     .send().await.unwrap().json().await.unwrap();
                 assert_eq!(reminders["login_required"], true);
-                assert_eq!(reminders["attempted_at"], serde_json::Value::Null);
+                assert_eq!(reminders["refreshed_at"], serde_json::Value::Null);
                 let preference = format!("{base}/api/user/assignment-preferences");
                 let saved: serde_json::Value = client.get(&preference).header("cookie", &cookie)
                     .send().await.unwrap().json().await.unwrap();

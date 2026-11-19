@@ -116,8 +116,10 @@
         const source=job.course_id?`课程课节${job.course_date?' · '+job.course_date:''}`:'课堂笔记生成 / 直链';
         const reason=job.error||job.failure_code||'';
         const priority=Number.isInteger(job.priority)?`<small class="priority">${job.priority} 级${job.acceleration_used?' · 已加速':''}</small>`:'';
+        const wait=job.status==='pending'&&Number.isInteger(job.estimated_wait_minutes)
+          ? `<small class="priority">预计排队 ${job.estimated_wait_minutes} 分钟</small>`:'';
         const accelerate=job.can_accelerate?`<button type="button" data-accelerate="${escapeHTML(job.id)}">使用加速券</button>`:'';
-        return `<tr><td class="time">${escapeHTML(date(job.created_at))}</td><td class="subject">${escapeHTML(subject)}${job.regenerate?' · 重新生成':''}<small>${escapeHTML(source)}</small><span class="task-id">${escapeHTML(job.id)}</span></td><td><span class="state ${escapeHTML(job.status)}">${escapeHTML(label)}</span>${priority}${accelerate}${reason?`<span class="reason">${escapeHTML(reason)}</span>`:''}</td><td class="time">${escapeHTML(date(job.finished_at))}</td><td class="number">${duration(job.billing_duration_seconds)}</td><td class="number">${escapeHTML(job.charged_units||0)}</td><td>${job.course_id?'课程页面管理':job.artifacts_deleted_at?'已删除文件':'直链页面管理'}</td></tr>`;
+        return `<tr><td class="time">${escapeHTML(date(job.created_at))}</td><td class="subject">${escapeHTML(subject)}${job.regenerate?' · 重新生成':''}<small>${escapeHTML(source)}</small><span class="task-id">${escapeHTML(job.id)}</span></td><td><span class="state ${escapeHTML(job.status)}">${escapeHTML(label)}</span>${priority}${wait}${accelerate}${reason?`<span class="reason">${escapeHTML(reason)}</span>`:''}</td><td class="time">${escapeHTML(date(job.finished_at))}</td><td class="number">${duration(job.billing_duration_seconds)}</td><td class="number">${escapeHTML(job.charged_units||0)}</td><td>${job.course_id?'课程页面管理':job.artifacts_deleted_at?'已删除文件':'直链页面管理'}</td></tr>`;
       }).join('')||'<tr><td class="empty" colspan="7">暂无匹配的任务记录</td></tr>';
       $('page').textContent=`${page} / ${pages}`;$('previous').disabled=page<=1;$('next').disabled=page>=pages;
     }
@@ -174,7 +176,7 @@
       try {
         await accelerationApi(endpoint(selectedJob),{method:'POST',headers:{'Content-Type':'application/json'},body:'null'});
         const job=records.find(job=>job.id===selectedJob);
-        if (job) Object.assign(job,{priority:2,acceleration_used:true,can_accelerate:false});
+        if (job) Object.assign(job,{priority:2,acceleration_used:true,can_accelerate:false,estimated_wait_minutes:null});
         render();
         dialog.close();
         $('acceleration-result').textContent='已使用 1 张加速券，任务优先级已提升至 2 级。';
