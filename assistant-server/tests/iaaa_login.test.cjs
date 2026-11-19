@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, '../templates/auth.html'), 'utf8');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
-function environment(search = '', api = async () => ({ok: true, text: async () => '{}'}), images = []) {
+function environment(search = '', api = async () => ({ok: true, text: async () => '{}'}), images = [], pathname = '/auth/admin') {
   const nodes = new Map(), calls = [];
   function node(id) {
     if (!nodes.has(id)) nodes.set(id, {
@@ -18,8 +18,8 @@ function environment(search = '', api = async () => ({ok: true, text: async () =
     });
     return nodes.get(id);
   }
-  const location = {origin: 'https://assistant.example', search, href: ''};
-  vm.runInNewContext(script, {
+  const location = {origin: 'https://assistant.example', search, pathname, href: ''};
+  vm.runInNewContext(script.replace('const teachingCsrf = "";', 'const teachingCsrf = "test-csrf";'), {
     document: {getElementById: node, querySelector: () => node('card'), querySelectorAll: () => images, body: node('body')},
     location, URL, URLSearchParams,
     fetch: async (url, options) => {
@@ -106,4 +106,30 @@ test('decoding failure keeps the full preview visible', async () => {
   environment('', undefined, [image]);
   await handlers.load();
   assert.equal(classes.has('is-ready'), false);
+});
+
+
+test('temporary teaching login uses the existing form without creating a system login or retaining inputs', async () => {
+  const {node, calls, location} = environment('?next=%2Fta%3Fcourse%3D_c_1', undefined, [], '/teaching-login');
+  node('iaaaUsername').value = ' 2400012345 ';
+  node('iaaaPassword').value = ' temporary secret ';
+  await node('iaaaForm').listeners.submit(event);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, '/api/teaching-session');
+  assert.equal(calls[0].options.headers['X-Teaching-CSRF'], 'test-csrf');
+  assert.deepEqual(JSON.parse(calls[0].options.body), {username:'2400012345',password:' temporary secret '});
+  assert.equal(location.href, '/ta?course=_c_1');
+  assert.equal(node('iaaaPassword').value, '');
+  assert.equal(node('iaaaUsername').value, '');
+});
+
+test('temporary teaching failure clears both inputs and does not follow an external return URL', async () => {
+  const {node, calls, location} = environment('?next=https%3A%2F%2Fevil.example',
+    async () => ({ok:false,text:async () => '{"error":"教学网登录失败"}'}), [], '/teaching-login');
+  node('iaaaUsername').value = '2400012345'; node('iaaaPassword').value = 'secret';
+  await node('iaaaForm').listeners.submit(event);
+  assert.equal(calls[0].url, '/api/teaching-session');
+  assert.equal(node('iaaaPassword').value, ''); assert.equal(node('iaaaUsername').value, '');
+  assert.equal(node('iaaaSubmit').disabled, false); assert.equal(location.href, '');
+  assert.match(node('iaaaStatus').textContent, /教学网登录失败/);
 });

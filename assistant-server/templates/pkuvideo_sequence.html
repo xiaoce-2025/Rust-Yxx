@@ -370,7 +370,11 @@
       const txt = await res.text();
       let payload = {};
       try { payload = txt ? JSON.parse(txt) : {}; } catch { payload = { raw: txt }; }
-      if (!res.ok) throw new Error(payload.error || payload.raw || ("HTTP " + res.status));
+      if (!res.ok) {
+        const message = payload.error || payload.raw || ("HTTP " + res.status);
+        void window.TeachingSession.handleError(message);
+        throw new Error(message);
+      }
       return payload;
     }
 
@@ -384,13 +388,16 @@
 
     async function checkBinding() {
       try {
-        const resp = await api("/api/pkuvideofullclass/binding-status");
-        if (!resp.is_bound) {
-          location.href = "/pkuvideofullclass?callback=/pkuvideo_sequence";
+        const ready = await window.TeachingSession.ensure();
+        if (!ready) {
+          statusEl.textContent = "可选择绑定账号或一次性登录后刷新课程。";
+          if (!allCourses.length) courseListEl.innerHTML = '<div class="status">登录教学网后可查看课程。</div>';
         }
+        return ready;
       } catch (err) {
-        statusEl.textContent = "检测绑定状态失败: " + err.message;
+        statusEl.textContent = "检测教学网登录状态失败: " + err.message;
         statusEl.className = "status error";
+        return false;
       }
     }
 
@@ -410,7 +417,7 @@
           allCourses = [];
           if (!isProcessing) selectCourse(null, null);
           semesterSelectEl.innerHTML = '<option value="">无可用学期</option>';
-          courseListEl.innerHTML = '<div class="status">未找到课程，请确认已正确绑定IAAA账号</div>';
+          courseListEl.innerHTML = '<div class="status">暂无课程，请点击“刷新课程列表”从教学网获取</div>';
         } else {
           throw new Error(resp.message || "课程列表不可用");
         }
@@ -1087,7 +1094,7 @@
     }
 
     async function refreshCourseList() {
-      if (isProcessing) return;
+      if (isProcessing || !(await checkBinding())) return;
       refreshBtnEl.disabled = true;
       statusEl.textContent = "正在刷新课程列表...";
       statusEl.className = "status loading";
@@ -1188,8 +1195,7 @@
     });
 
     checkLogin();
-    checkBinding();
-    loadFeatures().then(loadCourseList);
+    checkBinding().then(ready => { if (ready) return loadFeatures().then(loadCourseList); });
   </script>
 </body>
 </html>

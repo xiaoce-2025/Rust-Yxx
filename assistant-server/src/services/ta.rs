@@ -165,11 +165,8 @@ impl Blackboard {
         if let Some(login) = &self.login { return Ok(login.clone()); }
         let cache = self.cached.as_ref().ok_or("教学网缓存不可用")?;
         cache.login.get_or_try_init(|| async {
-            let username = cache.user.email.split('@').next().ok_or("无法识别当前教学网账号")?;
-            if let Some(login) = cache.state.login_cache.get(username).await { return Ok(login); }
             let stored = cache.state.store.get_user(cache.user.id).await.ok_or("用户不存在")?;
-            let password = stored.iaaa_encrypted_password.ok_or("尚未绑定教学网，请前往用户中心完成现有 IAAA 绑定")?;
-            super::pkulogin::login_iaaa_and_get_cookies_with_cache(username, &password, &cache.state.login_cache).await
+            super::teaching_session::login(&cache.state, &stored).await
         }).await.cloned()
     }
 

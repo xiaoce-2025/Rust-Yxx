@@ -188,7 +188,11 @@ async fn bind(
             let username = current_user.email.split('@').next().unwrap_or_default();
             let login_lock = state.login_cache.login_lock(username).await;
             let _login_guard = login_lock.lock().await;
+            let temporary_key = crate::services::teaching_session::cache_key(current_user.id);
+            let temporary_lock = state.login_cache.login_lock(&temporary_key).await;
+            let _temporary_guard = temporary_lock.lock().await;
             state.login_cache.invalidate(username).await;
+            state.login_cache.invalidate(&temporary_key).await;
 
             crate::services::app_replay::clear_binding(&state.store, current_user.id).await.map_err(ApiError::Internal)?;
             if let Some(password) = req.password.as_ref() {
@@ -226,7 +230,11 @@ async fn unbind(
     let username = current_user.email.split('@').next().unwrap_or_default();
     let login_lock = state.login_cache.login_lock(username).await;
     let _login_guard = login_lock.lock().await;
+    let temporary_key = crate::services::teaching_session::cache_key(current_user.id);
+    let temporary_lock = state.login_cache.login_lock(&temporary_key).await;
+    let _temporary_guard = temporary_lock.lock().await;
     state.login_cache.invalidate(username).await;
+    state.login_cache.invalidate(&temporary_key).await;
     crate::services::app_replay::clear_binding(&state.store, current_user.id).await.map_err(ApiError::Internal)?;
     state.app_replay_clients.lock().await.remove(&current_user.id);
     state
@@ -349,13 +357,7 @@ async fn refresh_lessons(
         ApiError::BadRequest("无效的邮箱格式".to_string())
     })?;
 
-    let password = match user.iaaa_encrypted_password.clone() {
-        Some(p) => p,
-        None => {
-            tracing::warn!("用户未绑定IAAA账号: {}", current_user.id);
-            return Err(ApiError::BadRequest("未绑定IAAA账号，请先绑定".to_string()));
-        }
-    };
+    let password = user.iaaa_encrypted_password.clone().unwrap_or_default();
 
     tracing::info!("用户 {} 开始刷新课程 {} 的课节列表...", username, course_id);
 
@@ -363,7 +365,7 @@ async fn refresh_lessons(
         .await
         .map_err(ApiError::Internal)?;
 
-    let mut login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
+    let mut login_result = crate::services::teaching_session::login(&state, &user).await
         .map_err(|e| {
             tracing::error!("IAAA登录失败: {}", e);
             ApiError::BadRequest(format!("IAAA登录失败: {}", e))
@@ -487,17 +489,11 @@ async fn refresh_courses(
         ApiError::BadRequest("无效的邮箱格式".to_string())
     })?;
 
-    let password = match user.iaaa_encrypted_password.clone() {
-        Some(p) => p,
-        None => {
-            tracing::warn!("用户未绑定IAAA账号: {}", current_user.id);
-            return Err(ApiError::BadRequest("未绑定IAAA账号，请先绑定".to_string()));
-        }
-    };
+    let password = user.iaaa_encrypted_password.clone().unwrap_or_default();
 
     tracing::info!("用户 {} 开始刷新课程列表...", username);
 
-    let mut login_result = pkulogin::login_iaaa_and_get_cookies_with_cache(&username, &password, &state.login_cache).await
+    let mut login_result = crate::services::teaching_session::login(&state, &user).await
         .map_err(|e| {
             tracing::error!("IAAA登录失败: {}", e);
             ApiError::BadRequest(format!("IAAA登录失败: {}", e))

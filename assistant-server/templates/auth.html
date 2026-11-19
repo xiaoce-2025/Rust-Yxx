@@ -79,6 +79,13 @@
       if (image.complete && image.naturalWidth > 0) reveal();
     }
 
+    globalThis.addEventListener?.("pageshow", () => {
+      if (location.pathname === "/teaching-login") {
+        document.getElementById("iaaaUsername").value = "";
+        document.getElementById("iaaaPassword").value = "";
+      }
+    });
+
     const requestedNext = new URLSearchParams(location.search).get("next") || "/";
     let next = "/";
     try {
@@ -88,11 +95,14 @@
       }
     } catch (_) {}
 
+    const teachingLogin = location.pathname === "/teaching-login";
+    const teachingCsrf = "";
+
     async function callApi(path, body) {
       const res = await fetch(path, {
         method: "POST",
         credentials: "include",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(teachingLogin ? {"X-Teaching-CSRF": teachingCsrf} : {}) },
         body: JSON.stringify(body)
       });
       const txt = await res.text();
@@ -124,7 +134,7 @@
       button.disabled = true;
       iaaaStatus.textContent = "IAAA 认证中…";
       try {
-        await callApi("/api/auth/iaaa", {
+        await callApi(teachingLogin ? "/api/teaching-session" : "/api/auth/iaaa", {
           username: document.getElementById("iaaaUsername").value.trim(),
           password: document.getElementById("iaaaPassword").value
         });
@@ -133,11 +143,12 @@
         iaaaStatus.textContent = "登录失败：" + err.message;
       } finally {
         document.getElementById("iaaaPassword").value = "";
+        if (teachingLogin) document.getElementById("iaaaUsername").value = "";
         button.disabled = false;
       }
     });
 
-    fetch("/api/auth/me", { credentials: "include" }).then((r) => {
+    if (!teachingLogin) fetch("/api/auth/me", { credentials: "include" }).then((r) => {
       if (r.ok) location.href = next;
     }).catch(() => {});
   </script>

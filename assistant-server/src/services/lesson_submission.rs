@@ -161,15 +161,12 @@ pub(crate) async fn prepare_teaching_media(
     lesson: &lesson_storage::LessonInfo,
     supplied_key: Option<&str>,
 ) -> Result<Preparation, String> {
-    let password = user
-        .iaaa_encrypted_password
-        .as_deref()
-        .ok_or("未绑定IAAA账号，请先绑定")?;
+    let password = user.iaaa_encrypted_password.as_deref().unwrap_or_default();
     if lesson.play_url.is_empty() {
         return Err("播放链接为空，请先刷新课节列表".into());
     }
     let mut login =
-        pkulogin::login_iaaa_and_get_cookies_with_cache(username, password, &state.login_cache)
+        super::teaching_session::login(state, user)
             .await?;
     let (url, key_uri, key) = pkulogin::session_operation(
         &mut login,

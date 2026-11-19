@@ -19,6 +19,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/auth", get(auth_page))
         .route("/auth/admin", get(admin_auth_page))
+        .route("/teaching-login", get(teaching_login_page))
+        .route("/teaching-session.js", get(|| async {
+            ([(axum::http::header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (CACHE_CONTROL, "no-store")],
+                include_str!("../../templates/teaching-session.js"))
+        }))
         .route("/auth/iaaa-login.css", get(|| async {
             ([(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
                 include_str!("../../templates/iaaa-login.css"))
@@ -114,6 +119,24 @@ async fn auth_page(axum::extract::Query(query): axum::extract::Query<std::collec
     Html(include_str!("../../templates/auth_entry.html").replace("NEXT_ENCODED", &urlencoding::encode(&next)))
 }
 
+async fn teaching_login_page(user: CurrentUser, headers: axum::http::HeaderMap) -> Html<String> {
+    site_page(&teaching_login_html(&super::teaching_session::csrf(&headers, user.id)), "")
+}
+
+fn teaching_login_html(csrf: &str) -> String {
+    // One source of truth for the system IAAA and temporary teaching login UI.
+    include_str!("../../templates/auth.html")
+        .replace("<title>登录 |", "<title>一次性登录教学网 |")
+        .replace("北京大学 IAAA 认证登录", "一次性登录教学网")
+        .replace("使用北京大学 IAAA 账号密码认证，成功后登录对应学号邮箱账户。首次使用须通过注册白名单校验。",
+            "仅用于登录教学网，不保存账号密码，也不会绑定账号。登录会话可继续使用，失效后需重新输入。")
+        .replace("autocomplete=\"username\"", "autocomplete=\"off\"")
+        .replace("autocomplete=\"current-password\"", "autocomplete=\"off\"")
+        .replace("<form id=\"iaaaForm\"", "<form autocomplete=\"off\" id=\"iaaaForm\"")
+        .replace("通过IAAA登录</button>", "一次性登录</button>")
+        .replace("const teachingCsrf = \"\";", &format!("const teachingCsrf = \"{csrf}\";"))
+}
+
 async fn admin_auth_page() -> Html<String> {
     guarded_page(include_str!("../../templates/auth.html"))
 }
@@ -192,8 +215,11 @@ pub(crate) fn site_page(source: &str, active_path: &str) -> Html<String> {
         &format!("href=\"{active_path}\" aria-current=\"page\""),
         1,
     );
+    let teaching_script = if matches!(active_path, "/ta" | "/pkuvideo_sequence") {
+        "<script src=\"/teaching-session.js\"></script>"
+    } else { "" };
     Html(source
-        .replacen("<head>", &format!("<head>{BATCH_GUARD}<style>{css}{footer_css}</style>"), 1)
+        .replacen("<head>", &format!("<head>{BATCH_GUARD}{teaching_script}<style>{css}{footer_css}</style>"), 1)
         .replacen("<body>", &format!("<body>{header}"), 1)
         .replacen("<!-- site-footer -->", footer, 1))
 }
@@ -221,6 +247,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn temporary_login_reuses_iaaa_ui_without_system_login_copy_or_autofill() {
+        let page = teaching_login_html("csrf-test");
+        assert!(page.contains("一次性登录教学网"));
+        assert!(page.contains("不保存账号密码，也不会绑定账号"));
+        assert!(page.contains("const teachingCsrf = \"csrf-test\";"));
+        assert!(page.contains("id=\"iaaaView\" class=\"main auth-layout\""));
+        assert!(page.contains("/auth/iaaa-login.css") && page.contains(LOGIN_IMAGE_URL));
+        assert!(!page.contains("首次使用须通过注册白名单校验"));
+        assert!(!page.contains("autocomplete=\"current-password\""));
+    }
+
     #[tokio::test]
     async fn protected_html_requires_valid_session_before_rendering() {
         let temp = tempdir::TempDir::new("ui-auth").unwrap();
@@ -238,7 +276,7 @@ mod tests {
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
         assert_eq!(client.get(format!("{base}/api/ta/workspace")).send().await.unwrap().status(), 401);
         assert_eq!(client.get(format!("{base}/app")).send().await.unwrap().status(), 404);
-        for path in ["/", "/chat", "/user-center", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence", "/ta"] {
+        for path in ["/", "/teaching-login?next=%2Fta", "/chat", "/user-center", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence", "/ta"] {
             let response = client.get(format!("{base}{path}")).send().await.unwrap();
             assert_eq!(response.status(), 303);
             assert_eq!(response.headers()["location"], format!("/auth?next={}", urlencoding::encode(path)));
@@ -285,6 +323,17 @@ mod tests {
                 assert!(html.contains("href=\"/user-center\" aria-current=\"page\""));
                 assert!(!html.contains("<html lang=\"zh-CN\" data-batch-waiting>"));
 
+                let once = client.get(format!("{base}/teaching-login?next=%2Fta"))
+                    .header("cookie", format!("assistant_token={token}")).send().await.unwrap();
+                assert_eq!(once.status(), 200);
+                assert_eq!(once.headers()["cache-control"], "no-store");
+                let once = once.text().await.unwrap();
+                assert!(once.contains("一次性登录教学网"));
+                assert!(once.contains(&format!("const teachingCsrf = \"{}\";", super::super::teaching_session::csrf(&{
+                    let mut headers = axum::http::HeaderMap::new();
+                    headers.insert("cookie", format!("assistant_token={token}").parse().unwrap()); headers
+                }, id))));
+
                 let ta = client.get(format!("{base}/ta"))
                     .header("cookie", format!("assistant_token={token}")).send().await.unwrap();
                 assert_eq!(ta.status(),200);
@@ -304,12 +353,12 @@ mod tests {
                 let failed_action = client.post(format!("{base}/ta/action"))
                     .header("cookie", format!("assistant_token={token}"))
                     .header("x-ta-partial", "1")
-                    .form(&[("csrf", csrf.as_str()), ("action", "save_bulk")])
+                    .form(&[("csrf", csrf.as_str()), ("action", "save_bulk"), ("course", "_c_1"), ("column", "_h_1")])
                     .send().await.unwrap();
                 assert_eq!(failed_action.status(), 400);
                 let failure: serde_json::Value = failed_action.json().await.unwrap();
                 assert!(failure["html"].as_str().unwrap().contains("尚未绑定教学网"));
-                assert_eq!(failure["url"], "/ta");
+                assert_eq!(failure["url"], "/ta?course=_c_1&column=_h_1");
 
                 let submitter = Arc::new(HeldSubmission(tokio::sync::Notify::new()));
                 state.batch_submissions.start(

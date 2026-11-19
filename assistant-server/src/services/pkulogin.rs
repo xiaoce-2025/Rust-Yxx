@@ -63,7 +63,10 @@ pub async fn session_operation<T>(
     operation: impl FnMut(&PkuLoginResult) -> Result<T, String>,
 ) -> Result<T, String> {
     session_operation_with_refresh(login, operation,
-        || login_iaaa_and_get_cookies_with_cache(username, password, cache)).await
+        || async {
+            if password.is_empty() { return Err(super::teaching_session::LOGIN_REQUIRED.into()); }
+            login_iaaa_and_get_cookies_with_cache(username, password, cache).await
+        }).await
 }
 
 async fn session_operation_with_refresh<T, F, Fut>(
@@ -160,7 +163,7 @@ pub async fn login_iaaa_and_get_cookies(username: &str, password: &str) -> Resul
 
 async fn login_with_user_agent(username: &str, password: &str, user_agent: String) -> Result<PkuLoginResult, String> {
     let start_time = chrono::Utc::now();
-    tracing::info!("IAAA登录流程开始 - 用户名: {}, 时间: {}", username, start_time);
+    tracing::info!("IAAA登录流程开始 - 时间: {}", start_time);
 
 
     let cookie_file = std::env::temp_dir().join(format!(
@@ -456,6 +459,16 @@ mod session_tests {
             || async { panic!("ordinary errors must not trigger login") }).await;
         assert!(result.is_err());
         assert!(cache.get("user").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn temporary_session_expiry_never_attempts_login_with_empty_credentials() {
+        let cache = LoginCache::new();
+        let mut login = cache.insert("temporary-user", test_session()).await;
+        let result: Result<(), String> = session_operation(&mut login, "", "", &cache,
+            |_| Err(AUTH_EXPIRED.into())).await;
+        assert_eq!(result.unwrap_err(), super::super::teaching_session::LOGIN_REQUIRED);
+        assert!(cache.get("temporary-user").await.is_none());
     }
 
     #[tokio::test]
