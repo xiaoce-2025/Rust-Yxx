@@ -95,15 +95,15 @@ pub async fn save_lessons(store: &FileStore, username: &str, course_id: &str, le
     validate_storage_keys(username, course_id)?;
     let _guard = super::lesson_order::STORAGE_LOCK.lock().await;
     super::lesson_order::recover(store, &get_course_dir(username, course_id)).await?;
-    let payload = serde_json::to_string(lessons).map_err(|error| error.to_string())?;
-    store.save_sidecar(&get_index_path(username, course_id), &payload).await
+    store.save_lesson_index(&get_index_path(username, course_id), lessons).await.map_err(|error| error.to_string())
 }
 
 pub async fn load_lessons(store: &FileStore, username: &str, course_id: &str) -> Result<Vec<LessonInfo>, String> {
     validate_storage_keys(username, course_id)?;
     let _guard = super::lesson_order::STORAGE_LOCK.lock().await;
     super::lesson_order::recover(store, &get_course_dir(username, course_id)).await?;
-    Ok(store.load_sidecar(&get_index_path(username, course_id)).await?.unwrap_or_default())
+    let index = store.lesson_index_json(&get_index_path(username, course_id)).await.map_err(|error| error.to_string())?;
+    index.as_deref().map(serde_json::from_str).transpose().map(Option::unwrap_or_default).map_err(|error| error.to_string())
 }
 
 pub async fn save_ordered_lessons(store: &FileStore, username: &str, course_id: &str, old: &[LessonInfo], lessons: &mut Vec<LessonInfo>) -> Result<(), String> {
@@ -140,6 +140,26 @@ pub async fn delete_manual_lesson(store: &FileStore, username: &str, course_id: 
     let mut lessons:Vec<_> = old.iter().filter(|l|l.id!=lesson_id).cloned().collect();
     save_ordered_lessons(store, username,course_id,&old,&mut lessons).await
 }
+
+pub(super) async fn update_media(
+    store: &FileStore, username: &str, course_id: &str, lesson_id: &str,
+    url: String, new_key: Option<Option<String>>,
+) -> Result<(), String> {
+    validate_storage_keys(username, course_id)?;
+    let _guard = super::lesson_order::STORAGE_LOCK.lock().await;
+    super::lesson_order::recover(store, &get_course_dir(username, course_id)).await?;
+    let updated = store.change_lesson(&get_index_path(username, course_id), lesson_id, |lesson| {
+        lesson.video_url = url;
+        if let Some(key) = new_key {
+            lesson.enc_key = key;
+        }
+    }).await.map_err(|error| error.to_string())?;
+    if !updated {
+        return Err("课节不存在，请刷新后重试".into());
+    }
+    Ok(())
+}
+
 
 pub async fn update_lesson_status(
     store: &FileStore,

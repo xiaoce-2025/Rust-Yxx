@@ -180,7 +180,7 @@ mod tests {
         let ta_write = client.post(format!("{base}/ta/action"))
             .header("Cookie", &cookie).form(&[("action", "commit")]).send().await.unwrap();
         assert_eq!(ta_write.status(), StatusCode::LOCKED);
-        assert!(state.store.get_config(owner).await.is_none());
+        assert!(state.store.get_config(owner).await.unwrap().is_none());
         let password_api=client.post(format!("{base}/api/pkuvideo/submit")).json(&json!({
             "platform_email":email,"platform_password":"test-password","pku_auth_one":email.split('@').next().unwrap(),
             "pku_auth_two":"unused","video_url":"https://example.invalid/playlist.m3u8"

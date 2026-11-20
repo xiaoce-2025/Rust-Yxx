@@ -17,14 +17,17 @@
     .hero p { margin: 0; }
     .hero img { display: block; width: 100%; height: 308px; object-fit: contain; }
     .assignments { min-width: 0; margin: 16px 0; padding: 18px 22px; background: #fffdfa; border: 1px solid var(--line); border-radius: 12px; }
-    .assignments h1 { margin: 0 0 8px; font-size: 22px; }
+    .assignment-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+    .assignment-header h1 { margin: 0; font-size: 22px; }
+    .assignment-refresh { padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--red); font: inherit; font-size: 13px; cursor: pointer; }
+    .assignment-refresh:disabled { opacity: .6; cursor: default; }
     .assignment-list { list-style: none; padding: 0; margin: 0; max-height: 232px; overflow: auto; scrollbar-gutter: stable; }
     .assignment-list:focus-visible { outline: 2px solid var(--red); outline-offset: 3px; }
-    .assignment-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 14px; padding: 8px 6px 8px 0; border-bottom: 1px solid var(--line); color: var(--red); }
-    .assignment-list li.completed { color: #23603e; }
+    .assignment-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px 14px; padding: 8px 6px 8px 0; border-bottom: 1px solid var(--line); color: var(--red); }
     .assignment-list strong, .assignment-list small { overflow-wrap: anywhere; }
-    .assignment-list small { grid-column: 1; color: var(--muted); }
-    .assignment-deadline { grid-column: 2; grid-row: 1 / span 2; display: grid; gap: 3px; text-align: right; font-size: 13px; white-space: nowrap; }
+    .assignment-list strong { line-height: 20px; }
+    .assignment-list small { grid-column: 1; color: var(--muted); font-size: 13px; line-height: 16px; }
+    .assignment-deadline { grid-column: 2; grid-row: 1 / span 2; display: grid; gap: 4px; text-align: right; font-size: 13px; line-height: 16px; white-space: nowrap; }
     .assignment-deadline time { color: var(--muted); }
     .assignment-countdown { font-weight: bold; font-variant-numeric: tabular-nums; }
     .assignments p { font-size: 13px; }
@@ -69,7 +72,10 @@
       <div class="shell hero-inner">
         <img src="/home-hero-transparent.png" width="1672" height="941" alt="严小希校园插画" />
         <div class="assignments">
-          <h1 id="assignments-title">近期作业</h1>
+          <div class="assignment-header">
+            <h1 id="assignments-title">近期作业</h1>
+            <button class="assignment-refresh" id="assignment-refresh" type="button">刷新</button>
+          </div>
           <p id="assignment-status" role="status">正在加载作业…</p>
           <a class="assignment-sign-in" id="assignment-sign-in" href="/auth?next=%2F" hidden>登录严小希账号</a>
           <button class="assignment-login" id="assignment-login" type="button" hidden>登录教学网账号，查看近期的ddl</button>
@@ -116,13 +122,21 @@
   <script>
     const assignmentStatus = document.getElementById('assignment-status');
     const assignmentLogin = document.getElementById('assignment-login');
+    const assignmentSignIn = document.getElementById('assignment-sign-in');
+    const assignmentRefresh = document.getElementById('assignment-refresh');
     const assignmentList = document.getElementById('assignment-list');
     const assignmentUpdate = document.getElementById('assignment-update');
     const assignmentTime = new Intl.DateTimeFormat('zh-CN', {
       timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric',
       hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
     });
+    const assignmentUpdateTime = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+    });
+    let countdownTimer = null;
     assignmentLogin.addEventListener('click', () => window.TeachingSession.choose());
+    assignmentRefresh.addEventListener('click', loadAssignments);
 
     function countdownLabel(deadline, now) {
       if (deadline <= now) return '已截止';
@@ -133,27 +147,39 @@
     }
 
     async function loadAssignments() {
+      if (assignmentRefresh.disabled) return;
+      assignmentRefresh.disabled = true;
+      assignmentStatus.textContent = '正在刷新作业…';
+      assignmentStatus.hidden = false;
       try {
         const response = await fetch('/api/assignments', {cache: 'no-store'});
         if (response.status === 401) {
           assignmentStatus.hidden = true;
-          document.getElementById('assignment-sign-in').hidden = false;
+          assignmentLogin.hidden = true;
+          assignmentList.replaceChildren();
+          assignmentList.hidden = true;
+          assignmentUpdate.hidden = true;
+          assignmentRefresh.hidden = true;
+          assignmentSignIn.hidden = false;
+          if (countdownTimer !== null) clearInterval(countdownTimer);
+          countdownTimer = null;
           return;
         }
         if (!response.ok) throw new Error();
         const data = await response.json();
         assignmentLogin.hidden = !data.login_required;
-        assignmentStatus.textContent = data.login_required ? '' : data.refresh_failed
-          ? '教学网刷新失败' : data.reminders.length ? '' : '暂无近期作业';
+        const usingCache = data.refreshed_at && (data.login_required || data.refresh_failed);
+        assignmentStatus.textContent = usingCache ? '当前显示上次更新的作业' :
+          data.login_required ? '' : data.refresh_failed ? '教学网刷新失败，请重试。' :
+          data.reminders.length ? '' : '暂无近期作业';
         assignmentStatus.hidden = !assignmentStatus.textContent;
         const countdowns = [];
         const rows = data.reminders.map(entry => {
           const row = document.createElement('li');
-          row.classList.toggle('completed', entry.completed);
           const title = document.createElement('strong');
           title.textContent = entry.title;
           const course = document.createElement('small');
-          course.textContent = entry.course + ' · ' + (entry.completed ? '已完成' : '未完成');
+          course.textContent = entry.course;
           const deadline = document.createElement('time');
           deadline.dateTime = entry.deadline;
           const end = new Date(entry.deadline);
@@ -169,6 +195,8 @@
         });
         assignmentList.replaceChildren(...rows);
         assignmentList.hidden = !rows.length;
+        if (countdownTimer !== null) clearInterval(countdownTimer);
+        countdownTimer = null;
         if (countdowns.length) {
           const updateCountdowns = () => {
             const now = Date.now();
@@ -178,14 +206,16 @@
             }
           };
           updateCountdowns();
-          setInterval(updateCountdowns, 1000);
+          countdownTimer = setInterval(updateCountdowns, 1000);
         }
-        if (data.refreshed_at) {
-          assignmentUpdate.textContent = '上次更新 ' + assignmentTime.format(new Date(data.refreshed_at));
-          assignmentUpdate.hidden = false;
-        }
+        assignmentUpdate.textContent = '上次更新：' + (data.refreshed_at
+          ? assignmentUpdateTime.format(new Date(data.refreshed_at)) : '暂无');
+        assignmentUpdate.hidden = false;
       } catch {
         assignmentStatus.textContent = '作业列表加载失败，请稍后重试。';
+        assignmentStatus.hidden = false;
+      } finally {
+        assignmentRefresh.disabled = false;
       }
     }
     loadAssignments();

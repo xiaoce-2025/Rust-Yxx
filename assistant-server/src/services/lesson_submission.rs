@@ -29,7 +29,7 @@ pub async fn submit_lesson_mode(
         .await
         .ok_or(ApiError::Unauthorized)?;
     let username = user.email.split('@').next().unwrap_or_default().to_string();
-    let mut lessons =
+    let lessons =
         lesson_storage::load_lessons(&state.store, &username, &course_id).await.map_err(ApiError::Internal)?;
     let index = lessons
         .iter()
@@ -80,8 +80,7 @@ pub async fn submit_lesson_mode(
         match prepared {
             Preparation::Media(media) => media,
             Preparation::NeedsKey { url, key_uri } => {
-                lessons[index].video_url = url.clone();
-                lesson_storage::save_lessons(&state.store, &username, &course_id, &lessons).await
+                lesson_storage::update_media(&state.store, &username, &course_id, &video_id, url.clone(), None).await
                     .map_err(ApiError::Internal)?;
                 return Ok(Json(
                     serde_json::json!({"success":true,"needs_key":true,"key_uri":key_uri,"video_url":url}),
@@ -89,9 +88,8 @@ pub async fn submit_lesson_mode(
             }
         }
     };
-    lessons[index].video_url = media.url.clone();
-    lessons[index].enc_key = media.enc_key.clone();
-    lesson_storage::save_lessons(&state.store, &username, &course_id, &lessons).await.map_err(ApiError::Internal)?;
+    lesson_storage::update_media(&state.store, &username, &course_id, &video_id, media.url.clone(), Some(media.enc_key.clone()))
+        .await.map_err(ApiError::Internal)?;
     let job_id = Uuid::new_v4();
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     let mut job = PkuVideoJob::new(

@@ -104,16 +104,17 @@
     const models = {users:{name:'用户',app:'认证和授权'},whitelist:{name:'注册白名单',app:'认证和授权'},notes:{name:'课堂笔记任务',app:'课程回放'},replay:{name:'回放中转任务',app:'课程回放'},translation:{name:'视频翻译任务',app:'课程回放'}};
     const statusNames = {pending:'等待中',queued:'排队中',running:'运行中',succeeded:'已完成',failed:'失败',needs_review:'待检查',cancelled:'已取消',deleting:'删除中'};
     const listState = Object.fromEntries(Object.keys(models).map(key=>[key,{q:'',filter:'all',role:'all',page:1,sort:'',direction:1,selected:new Set()}]));
-    const pageSize = 20;
     let data = null, model = 'index', recordId = null, formDirty = false, loading = false, submitting = false;
     function notice(message,type='error') { $('notice').textContent=message; $('notice').className=type; $('notice').hidden=!message; }
     function date(value) { return value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—'; }
     function bool(value) { return `<span class="boolean ${value?'yes':'no'}" aria-label="${value?'是':'否'}">${value?'✓':'✗'}</span>`; }
-    function username(id) { return data.users.find(user=>user.id===id)?.username||id; }
+    let listing=null, detail=null, viewRequest=0;
+    function listRequest(params) { return api('/api/admin/list?'+new URLSearchParams(params)); }
+    function currentView(request,key,id) { return request===viewRequest && model===key && recordId===id; }
     async function api(path,body) {
       const response=await fetch(path,{cache:'no-store',...(body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-Admin-Request':'1'},body:JSON.stringify(body)})});
       if (response.status===401) { location.href='/auth?next=%2Fadmin'; throw new Error('登录已过期。'); }
-      const result=await response.json(); if (!response.ok) throw new Error(result.error||'请求失败，请重试。'); return result;
+      const result=await response.json(); if (!response.ok) throw Object.assign(new Error(result.error||'请求失败，请重试。'),{status:response.status}); return result;
     }
     function askConfirmation(message) {
       const dialog=$('confirmation');
@@ -128,25 +129,14 @@
       document.querySelectorAll('[data-model]').forEach(link=> { if (link.dataset.model===model) link.setAttribute('aria-current','page'); else link.removeAttribute('aria-current'); });
       const name=model==='index'?'站点管理':models[model].name;
       $('page-title').textContent=model==='index'?name:recordId?(recordId==='add'?'添加':'更改')+name:'选择'+name+'以更改';
-      $('breadcrumbs').innerHTML='<a href="#index">首页</a>'+(model==='index'?'':`<span>›</span>${escapeHTML(models[model].app)}<span>›</span>${recordId?`<a href="#${model}">${escapeHTML(name)}</a><span>›</span>${recordId==='add'?'添加':escapeHTML(recordLabel())}`:escapeHTML(name)}`);
+      $('breadcrumbs').innerHTML='<a href="#index">首页</a>'+(model==='index'?'':`<span>›</span>${escapeHTML(models[model].app)}<span>›</span>${recordId?`<a href="#${model}">${escapeHTML(name)}</a><span>›</span>${recordId==='add'?'添加':'<span id="record-crumb">'+escapeHTML(recordLabel())+'</span>'}`:escapeHTML(name)}`);
       document.title=$('page-title').textContent+' | 「严小希」站点管理';
       $('object-tools').innerHTML=model==='whitelist'&&!recordId?'<a class="button" href="#whitelist/add">添加邮箱 ＋</a>':model!=='index'&&!recordId?'<button class="button" data-refresh>刷新</button>':'';
       if (data) { if (model==='index') renderIndex(); else if (recordId) renderRecord(); else renderList(); }
     }
-    function recordLabel() { return model==='users'&&data?data.users.find(user=>user.id===recordId)?.username||recordId:recordId; }
+    function recordLabel() { return model==='users'&&detail?.id===recordId?detail.username:recordId; }
     function renderIndex() {
       $('view').innerHTML='<div class="index">'+['认证和授权','课程回放'].map(app=>`<section class="module"><h2>${app}</h2><table><tbody>${Object.entries(models).filter(([,info])=>info.app===app).map(([key,info])=>`<tr><th scope="row"><a href="#${key}">${info.name}</a></th><td>${key==='whitelist'?'<a class="add-link" href="#whitelist/add">添加</a>':''}</td><td><a href="#${key}">${['notes','replay','translation'].includes(key)?'查看':'更改'}</a></td></tr>`).join('')}</tbody></table></section>`).join('')+'</div>';
-    }
-    function records() { return model==='users'?data.users:model==='whitelist'?data.whitelist.map(email=>({id:email,email})):data.jobs.filter(job=>job.kind===model); }
-    function filteredRecords() {
-      const state=listState[model],query=state.q.toLowerCase();
-      let items=records().filter(record=> {
-        const text=model==='users'?record.username+' '+record.email+' '+record.id:model==='whitelist'?record.email:record.id+' '+username(record.user_id)+' '+(record.course_name||'')+' '+(record.course_date||'')+' '+(record.result_source||'')+' '+(record.url_key||'');
-        const matches=model==='users'?(state.filter==='all'||record.is_active===(state.filter==='active'))&&(state.role==='all'||record.is_admin===(state.role==='admin')):model==='whitelist'?true:state.filter==='all'||record.status===state.filter||(state.filter==='pending'&&record.status==='queued');
-        return text.toLowerCase().includes(query)&&matches;
-      });
-      if (state.sort) items=[...items].sort((a,b)=>String(a[state.sort]??'').localeCompare(String(b[state.sort]??''),'zh-CN',{numeric:true})*state.direction);
-      return items;
     }
     function filterGroup(title,key,options) { return `<section class="filter-group"><h3>${title}</h3>${options.map(([value,label])=>`<a href="#${model}" data-filter="${key}" data-value="${value}" ${listState[model][key]===value?'aria-current="true"':''}>${label}</a>`).join('')}</section>`; }
     function filters() {
@@ -154,17 +144,25 @@
       return '<aside class="filters" aria-label="筛选"><h2>筛选</h2>'+(model==='users'?filterGroup('按启用状态','filter',[['all','全部'],['active','是'],['inactive','否']])+filterGroup('按管理员身份','role',[['all','全部'],['admin','是'],['member','否']]):filterGroup('按任务状态','filter',[['all','全部'],['pending','等待中 / 排队中'],['running','运行中'],['succeeded','已完成'],['failed','失败'],['needs_review','待检查'],['cancelled','已取消']]))+'</aside>';
     }
     function sortHeading(field,label) { return `<th scope="col"><button class="sort-link" data-sort="${field}">${label}${listState[model].sort===field?(listState[model].direction===1?' ▴':' ▾'):''}</button></th>`; }
-    function renderList() {
-      const state=listState[model],items=filteredRecords(),totalPages=Math.max(1,Math.ceil(items.length/pageSize)); state.page=Math.min(state.page,totalPages);
-      const visible=items.slice((state.page-1)*pageSize,state.page*pageSize),selectable=model==='users'||model==='whitelist';
+    async function renderList() {
+      const key=model,state=listState[key],request=++viewRequest;
+      listing=null;
+      try {
+        const response=await listRequest({model:key,q:state.q,filter:state.filter,role:state.role,page:state.page,sort:state.sort,desc:state.direction===-1});
+        if (!currentView(request,key,null)) return;
+        listing=response;
+      } catch(error) { if(currentView(request,key,null)) notice(error.message); return; }
+      const {records:visible,total,page:currentPage,page_size:pageSize}=listing;
+      const totalPages=Math.max(1,Math.ceil(total/pageSize)); state.page=currentPage;
+      const selectable=model==='users'||model==='whitelist';
       state.selected=new Set([...state.selected].filter(id=>visible.some(record=>record.id===id)));
       const heads=model==='users'?sortHeading('username','用户名')+sortHeading('email','邮箱')+'<th>启用</th><th>管理员</th>'+sortHeading('storage_quota','存储配额')+sortHeading('processing_quota','希元余额（点）')+sortHeading('processing_priority','账户优先级（旧）')+'<th>有效会话</th>'+sortHeading('created_at','创建时间'):model==='whitelist'?sortHeading('email','邮箱地址'):sortHeading('id','任务 ID')+'<th>用户</th>'+sortHeading('status','状态')+sortHeading('updated_at','更新时间')+(model==='notes'?'<th>课程 / 日期 / 来源</th>':'');
       const rows=visible.map(record=> {
         const link=`<a class="record-name" href="#${model}/${encodeURIComponent(record.id)}">${escapeHTML(model==='users'?record.username:model==='whitelist'?record.email:record.id)}</a>`;
-        const cells=model==='users'?`<td>${link}</td><td>${escapeHTML(record.email)}</td><td>${bool(record.is_active)}</td><td>${bool(record.is_admin)}</td><td>${record.storage_quota}</td><td>${record.processing_quota}</td><td>${record.processing_priority}</td><td>${record.sessions}</td><td>${escapeHTML(new Date(record.created_at).toLocaleDateString('zh-CN'))}</td>`:model==='whitelist'?`<td>${link}</td>`:`<td class="monospace">${link}</td><td>${escapeHTML(username(record.user_id))}</td><td>${escapeHTML(statusNames[record.status]||record.status)}</td><td>${escapeHTML(date(record.updated_at))}</td>${model==='notes'?`<td>${escapeHTML(record.course_name||'独立视频任务')}<br>${escapeHTML(record.course_date||'—')}<br>${record.regenerate?'重新生成 · ':''}${escapeHTML(record.result_source||'待执行')}</td>`:''}`;
+        const cells=model==='users'?`<td>${link}</td><td>${escapeHTML(record.email)}</td><td>${bool(record.is_active)}</td><td>${bool(record.is_admin)}</td><td>${record.storage_quota}</td><td>${record.processing_quota}</td><td>${record.processing_priority}</td><td>${record.sessions}</td><td>${escapeHTML(new Date(record.created_at).toLocaleDateString('zh-CN'))}</td>`:model==='whitelist'?`<td>${link}</td>`:`<td class="monospace">${link}</td><td>${escapeHTML(record.username||record.user_id)}</td><td>${escapeHTML(statusNames[record.status]||record.status)}</td><td>${escapeHTML(date(record.updated_at))}</td>${model==='notes'?`<td>${escapeHTML(record.course_name||'独立视频任务')}<br>${escapeHTML(record.course_date||'—')}<br>${record.regenerate?'重新生成 · ':''}${escapeHTML(record.result_source||'待执行')}</td>`:''}`;
         return `<tr ${state.selected.has(record.id)?'class="selected"':''}>${selectable?`<td class="check-cell"><input type="checkbox" data-select="${escapeHTML(record.id)}" aria-label="选择 ${escapeHTML(model==='users'?record.username:record.email)}" ${state.selected.has(record.id)?'checked':''}></td>`:''}${cells}</tr>`;
       }).join('');
-      $('view').innerHTML=`<div class="changelist" ${model==='whitelist'?'style="grid-template-columns:minmax(0,1fr)"':''}><div class="results"><div class="toolbar"><form id="search-form" class="search-form"><label for="search-query" aria-label="搜索">⌕</label><input id="search-query" type="search" value="${escapeHTML(state.q)}" aria-label="搜索${models[model].name}"><button class="button" type="submit">搜索</button>${state.q?'<button class="button" type="button" data-clear-search>清除</button>':''}</form></div>${selectable?`<div class="actions"><label for="action">动作：</label><select id="action"><option value="">---------</option>${model==='users'?'<option value="enable">启用所选用户</option><option value="disable">停用所选用户</option><option value="revoke">撤销所选用户的会话</option>':'<option value="remove">删除所选邮箱</option>'}</select><button class="button" data-action>执行</button><span class="action-count" id="selection-count">选中了 ${state.selected.size} 个，共 ${visible.length} 个</span></div>`:''}<div class="table-wrap"><table class="data-table"><thead><tr>${selectable?'<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部记录" '+(visible.length&&visible.every(record=>state.selected.has(record.id))?'checked':'')+'></th>':''}${heads}</tr></thead><tbody>${rows||`<tr><td class="empty" colspan="12">0 条${models[model].name}记录</td></tr>`}</tbody></table></div><div class="paginator" aria-label="分页">${pageLinks(totalPages,state.page)}<span class="total">${items.length} 条${models[model].name}记录</span></div></div>${filters()}</div>`;
+      $('view').innerHTML=`<div class="changelist" ${model==='whitelist'?'style="grid-template-columns:minmax(0,1fr)"':''}><div class="results"><div class="toolbar"><form id="search-form" class="search-form"><label for="search-query" aria-label="搜索">⌕</label><input id="search-query" type="search" value="${escapeHTML(state.q)}" aria-label="搜索${models[model].name}"><button class="button" type="submit">搜索</button>${state.q?'<button class="button" type="button" data-clear-search>清除</button>':''}</form></div>${selectable?`<div class="actions"><label for="action">动作：</label><select id="action"><option value="">---------</option>${model==='users'?'<option value="enable">启用所选用户</option><option value="disable">停用所选用户</option><option value="revoke">撤销所选用户的会话</option>':'<option value="remove">删除所选邮箱</option>'}</select><button class="button" data-action>执行</button><span class="action-count" id="selection-count">选中了 ${state.selected.size} 个，共 ${visible.length} 个</span></div>`:''}<div class="table-wrap"><table class="data-table"><thead><tr>${selectable?'<th class="check-cell"><input type="checkbox" id="select-all" aria-label="选择本页全部记录" '+(visible.length&&visible.every(record=>state.selected.has(record.id))?'checked':'')+'></th>':''}${heads}</tr></thead><tbody>${rows||`<tr><td class="empty" colspan="12">0 条${models[model].name}记录</td></tr>`}</tbody></table></div><div class="paginator" aria-label="分页">${pageLinks(totalPages,state.page)}<span class="total">${total} 条${models[model].name}记录</span></div></div>${filters()}</div>`;
       $('search-form').addEventListener('submit',event=> { event.preventDefault(); state.q=$('search-query').value.trim(); state.page=1; state.selected.clear(); renderList(); });
       $('select-all')?.addEventListener('change',event=> { visible.forEach(record=>event.target.checked?state.selected.add(record.id):state.selected.delete(record.id)); updateSelection(); });
     }
@@ -178,9 +176,23 @@
     function readonlyRow(label,value,mono=false) { return `<div class="form-row"><span>${label}：</span><div class="field-value ${mono?'monospace':''}">${escapeHTML(value)}</div></div>`; }
     function inputRow(label,name,value,help='') { return `<div class="form-row"><label class="required" for="${name}">${label}：</label><div><input id="${name}" name="${name}" type="number" min="${name==='processing_priority'?1:0}" max="${name==='processing_priority'?100:2147483647}" value="${value}" required>${help?`<p class="help">${help}</p>`:''}</div></div>`; }
     function submitRow(extra='') { return `<div class="submit-row">${extra}<div class="submit-buttons"><button class="button" type="submit" name="save" value="continue">保存并继续编辑</button><button class="button default" type="submit" name="save" value="return">保存</button></div></div>`; }
-    function renderRecord() {
+    async function renderRecord() {
+      const key=model,id=recordId,request=++viewRequest;
+      detail=null;
+      if (!(key==='whitelist'&&id==='add')) {
+        try {
+          const response=await listRequest({model:key,id});
+          if (!currentView(request,key,id)) return;
+          detail=response;
+        } catch(error) {
+          if (currentView(request,key,id)) { if (error.status===404) missing(); else notice(error.message); }
+          return;
+        }
+      }
+      const crumb=$('record-crumb');
+      if (crumb) crumb.textContent=recordLabel();
       if (model==='users') {
-        const user=data.users.find(record=>record.id===recordId); if (!user) return missing();
+        const user=detail; if (!user) return missing();
         $('view').innerHTML=`<form id="record-form" class="change-form"><p class="errornote" id="form-error" role="alert" hidden></p><fieldset><h2 class="fieldset-title">账户信息</h2>${readonlyRow('用户名',user.username)}${readonlyRow('邮箱',user.email)}${readonlyRow('账户 ID',user.id,true)}${readonlyRow('创建时间',date(user.created_at))}</fieldset><fieldset><h2 class="fieldset-title">权限</h2><div class="form-row"><label for="is_active">启用：</label><div class="field-value"><input id="is_active" name="is_active" type="checkbox" ${user.is_active?'checked':''} ${user.is_admin?'disabled':''}><p class="help">停用后阻止此用户的后续访问。管理员账户不能在此停用。</p></div></div>${readonlyRow('管理员',user.is_admin?'是（由服务配置维护）':'否')}</fieldset><fieldset><h2 class="fieldset-title">存储配额与希元</h2>${inputRow('存储配额','storage_quota',user.storage_quota)}${readonlyRow('希元余额（点）',user.processing_quota)}<div class="form-row"><span>发放希元：</span><div><input id="credit-amount" type="number" min="1" step="1" placeholder="希元点数"><input id="credit-reason" placeholder="发放原因" maxlength="1000"><button type="button" id="credit-grant" class="button">发放希元</button><p id="credit-feedback" role="status"></p><pre id="credit-ledger" style="white-space:pre-wrap"></pre></div></div>${inputRow('账户优先级（旧）','processing_priority',user.processing_priority,'手动提交的课堂笔记任务统一从 4 级开始，可用加速券提升单个任务至 2 级。')}</fieldset><fieldset><h2 class="fieldset-title">登录会话</h2><div class="form-row"><span>有效会话：</span><div class="field-value">${user.sessions}${user.id!==data.current_user_id?'　<button type="button" class="text-button delete-link" data-revoke>撤销全部会话</button>':''}</div></div></fieldset>${submitRow('<a href="#users">返回用户列表</a>')}</form>`;
         wireForm(saveUser);
         let grantKey=crypto.randomUUID();
@@ -207,13 +219,13 @@
           $('credit-ledger').textContent=result.entries.map(e=>`${date(e.created_at)}  ${e.delta>0?'+':''}${e.delta} 点希元，余额 ${e.balance_after} 点希元  ${e.reason||e.event_type}`).join('\n')||'暂无希元流水';
         }).catch(()=>{if ($('credit-ledger')) $('credit-ledger').textContent='希元流水加载失败';});
       } else if (model==='whitelist') {
-        const adding=recordId==='add'; if (!adding&&!data.whitelist.includes(recordId)) return missing();
+        const adding=recordId==='add'; if (!adding&&!detail) return missing();
         $('view').innerHTML=`<form id="record-form" class="change-form"><p class="errornote" id="form-error" role="alert" hidden></p><fieldset><h2 class="fieldset-title">注册白名单</h2><div class="form-row"><label class="required" for="email">邮箱地址：</label><div><input id="email" name="email" type="email" maxlength="254" value="${adding?'':escapeHTML(recordId)}" required autocomplete="off"><p class="help">允许此邮箱注册及通过统一认证登录，邮箱大小写与认证规则保持一致。</p></div></div></fieldset>${submitRow(adding?'<a href="#whitelist">返回列表</a>':'<button type="button" class="text-button delete-link" data-delete-email>删除</button>')}</form>`;
         wireForm(saveEmail);
       } else {
-        const job=data.jobs.find(record=>record.id===recordId&&record.kind===model); if (!job) return missing();
+        const job=detail; if (!job) return missing();
         $('page-title').textContent='查看'+models[model].name;
-        $('view').innerHTML=`<div class="change-form"><fieldset><h2 class="fieldset-title">${models[model].name}</h2>${readonlyRow('任务 ID',job.id,true)}${readonlyRow('所属用户',username(job.user_id))}${readonlyRow('用户 ID',job.user_id,true)}${readonlyRow('状态',statusNames[job.status]||job.status)}${model==='notes'?readonlyRow('课程名称',job.course_name||'独立视频任务')+readonlyRow('课程日期',job.course_date||'—')+readonlyRow('重新生成',job.regenerate?'是':'否')+readonlyRow('结果来源',job.result_source||'待执行')+readonlyRow('URL 哈希',job.url_key||'—',true)+readonlyRow('计费状态',job.billing_state||'历史任务')+readonlyRow('已扣希元（点）',job.charged_units||0)+readonlyRow('计费时长（秒）',job.billing_duration_seconds??'—')+readonlyRow('失败码',job.failure_code||'—'):''}${job.created_at?readonlyRow('创建时间',date(job.created_at)):''}${readonlyRow('更新时间',date(job.updated_at))}</fieldset><p class="help">任务状态由处理流程维护，此处只读。</p><div class="submit-row"><a href="#${model}">返回${models[model].name}列表</a></div></div>`;
+        $('view').innerHTML=`<div class="change-form"><fieldset><h2 class="fieldset-title">${models[model].name}</h2>${readonlyRow('任务 ID',job.id,true)}${readonlyRow('所属用户',job.username||job.user_id)}${readonlyRow('用户 ID',job.user_id,true)}${readonlyRow('状态',statusNames[job.status]||job.status)}${model==='notes'?readonlyRow('课程名称',job.course_name||'独立视频任务')+readonlyRow('课程日期',job.course_date||'—')+readonlyRow('重新生成',job.regenerate?'是':'否')+readonlyRow('结果来源',job.result_source||'待执行')+readonlyRow('URL 哈希',job.url_key||'—',true)+readonlyRow('计费状态',job.billing_state||'历史任务')+readonlyRow('已扣希元（点）',job.charged_units||0)+readonlyRow('计费时长（秒）',job.billing_duration_seconds??'—')+readonlyRow('失败码',job.failure_code||'—'):''}${job.created_at?readonlyRow('创建时间',date(job.created_at)):''}${readonlyRow('更新时间',date(job.updated_at))}</fieldset><p class="help">任务状态由处理流程维护，此处只读。</p><div class="submit-row"><a href="#${model}">返回${models[model].name}列表</a></div></div>`;
       }
     }
     function missing() { $('view').innerHTML=`<p>记录不存在或已被移除。</p><p><a href="#${model}">返回列表</a></p>`; }
@@ -227,16 +239,21 @@
       });
     }
     async function saveUser(form) { const body={is_active:form.elements.is_active.checked}; for (const key of ['storage_quota','processing_priority']) body[key]=Number(form.elements[key].value); await api('/api/admin/users/'+recordId,body); return recordId; }
-    async function saveEmail(form) { const email=form.elements.email.value.trim(); if (data.whitelist.includes(email)&&email!==recordId) throw new Error('此邮箱已在白名单中。'); const emails=data.whitelist.filter(value=>value!==recordId); emails.push(email); await api('/api/admin/whitelist',{emails}); return email; }
+    async function saveEmail(form) {
+      const email=form.elements.email.value.trim();
+      await api('/api/admin/whitelist/change',{old:recordId==='add'?null:recordId,email});
+      return email;
+    }
     async function runAction() {
       const state=listState[model],action=$('action').value,ids=[...state.selected];
       if (!action) return notice('请选择一个动作。'); if (!ids.length) return notice('请先选择要操作的记录。');
       if (!await askConfirmation(`确定对所选 ${ids.length} 条记录执行「${$('action').selectedOptions[0].textContent}」？`)) return;
       const button=document.querySelector('[data-action]'); button.disabled=true; let completed=0;
       try {
-        if (model==='whitelist') { await api('/api/admin/whitelist',{emails:data.whitelist.filter(email=>!state.selected.has(email))}); completed=ids.length; }
+        if (model==='whitelist') { await api('/api/admin/whitelist/change',{remove:ids}); completed=ids.length; }
         else {
-          const targets=ids.map(id=>data.users.find(user=>user.id===id));
+          const targets=ids.map(id=>listing?.records.find(user=>user.id===id));
+          if (targets.some(user=>!user)) throw new Error('列表已变化，请刷新后重新选择。');
           if (action==='disable'&&targets.some(user=>user.is_admin)) throw new Error('所选记录包含管理员，不能停用。请取消选择管理员后重试。');
           if (action==='revoke'&&ids.includes(data.current_user_id)) throw new Error('不能撤销自己的会话，请取消选择当前账户。');
           for (const user of targets) { if (action==='revoke') await api('/api/admin/users/'+user.id+'/revoke-sessions',{}); else await api('/api/admin/users/'+user.id,{is_active:action==='enable',storage_quota:user.storage_quota,processing_priority:user.processing_priority}); completed++; }
@@ -245,7 +262,7 @@
       } catch (error) { try { await fetchData(); route(); } catch {} notice(`已处理 ${completed} 条记录。${error.message}`); }
       finally { button.disabled=false; }
     }
-    async function fetchData() { data=await api('/api/admin/data'); $('account-name').textContent=data.username; }
+    async function fetchData() { data=await api('/api/admin/summary'); $('account-name').textContent=data.username; }
     async function load() { if (loading) return; loading=true; try { await fetchData(); route(); } catch (error) { notice(error.message); } finally { loading=false; $('loading').hidden=true; } }
     document.addEventListener('click',async event=> {
       const filter=event.target.closest('[data-filter]');
@@ -256,7 +273,7 @@
       if (event.target.closest('[data-clear-search]')) { listState[model].q=''; listState[model].page=1; renderList(); }
       if (event.target.closest('[data-refresh]')) { notice(''); load(); }
       if (event.target.closest('[data-action]')) await runAction();
-      if (event.target.closest('[data-delete-email]')) { if (!await askConfirmation('确定从白名单删除 '+recordId+'？')) return; try { await api('/api/admin/whitelist',{emails:data.whitelist.filter(email=>email!==recordId)}); formDirty=false; await fetchData(); location.hash='whitelist'; notice('邮箱已删除。','success'); } catch (error) { notice(error.message); } }
+      if (event.target.closest('[data-delete-email]')) { if (!await askConfirmation('确定从白名单删除 '+recordId+'？')) return; try { await api('/api/admin/whitelist/change',{remove:[recordId]}); formDirty=false; await fetchData(); location.hash='whitelist'; notice('邮箱已删除。','success'); } catch (error) { notice(error.message); } }
       if (event.target.closest('[data-revoke]')) { if (!await askConfirmation('确定撤销该用户的全部登录会话？')) return; try { const result=await api('/api/admin/users/'+recordId+'/revoke-sessions',{}); await fetchData(); if (!formDirty) route(); notice('已撤销 '+result.revoked+' 个会话。','success'); } catch (error) { notice(error.message); } }
     });
     document.addEventListener('change',event=> { if (event.target.matches('[data-select]')) { const state=listState[model]; event.target.checked?state.selected.add(event.target.dataset.select):state.selected.delete(event.target.dataset.select); updateSelection(); } });

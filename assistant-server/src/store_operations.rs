@@ -70,13 +70,17 @@ impl FileStore {
         sqlx::query("CREATE INDEX IF NOT EXISTS note_credit_ledger_time ON note_credit_ledger(created_at DESC,id DESC)")
             .execute(&self.db).await?;
         // Existing sessions provide a known login timestamp. Do not invent dates for older users.
-        for session in self.sessions.read().await.values() {
-            sqlx::query("INSERT INTO user_activity VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET last_login_at=max(last_login_at,excluded.last_login_at)")
-                .bind(session.user_id.to_string()).bind(session.created_at.to_rfc3339()).execute(&self.db).await?;
+        let recent_sessions: Vec<(String, DateTime<Utc>)> =
+            sqlx::query_as("SELECT user_id,max(created_at) FROM sessions GROUP BY user_id")
+                .fetch_all(&self.db).await?;
+        for (user, created_at) in recent_sessions {
+            sqlx::query("INSERT INTO user_activity VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET last_login_at=max(last_login_at,excluded.last_login_at)")
+                .bind(user).bind(created_at.to_rfc3339()).execute(&self.db).await?;
         }
+
         // Import the latest pre-history TA records once. All future runs are archived independently.
         let rows =
-            sqlx::query("SELECT name,payload FROM collections WHERE name LIKE 'sidecar/ta_ai/%'")
+            sqlx::query("SELECT name,payload FROM store_documents WHERE name >= 'sidecar/ta_ai/' AND name < 'sidecar/ta_ai0' AND payload IS NOT NULL")
                 .fetch_all(&self.db)
                 .await?;
         for row in rows {
@@ -121,12 +125,11 @@ impl FileStore {
         &self,
         session: FileUserSession,
     ) -> Result<(), StoreError> {
-        let mut sessions = self.sessions.write().await;
-        let is_new = !sessions.contains_key(&session.session_id);
-        let mut next = sessions.clone();
-        next.insert(session.session_id, session.clone());
-        let mut tx = self.db.begin().await?;
-        write_collection(&mut tx, "sessions", &serde_json::to_string(&next)?).await?;
+        let mut tx = self.begin_note_transaction().await?;
+        let is_new: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM sessions WHERE id=?)")
+            .bind(session.session_id.to_string()).fetch_one(&mut *tx).await?;
+        write_session(&mut tx, &session).await?;
+
         if is_new {
             sqlx::query("INSERT INTO user_activity VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET last_login_at=max(last_login_at,excluded.last_login_at)")
                 .bind(session.user_id.to_string()).bind(session.created_at.to_rfc3339()).execute(&mut *tx).await?;
@@ -135,7 +138,6 @@ impl FileStore {
                 .bind(session.user_id.to_string()).bind(session.created_at.to_rfc3339()).bind(detail.to_string()).execute(&mut *tx).await?;
         }
         tx.commit().await?;
-        *sessions = next;
         Ok(())
     }
     #[cfg(test)]
@@ -229,7 +231,7 @@ impl FileStore {
         job: &crate::services::ta_ai::Job,
     ) -> Result<(), String> {
         let mut tx = self.db.begin().await.map_err(|e| e.to_string())?;
-        write_collection(
+        write_document(
             &mut tx,
             &Self::sidecar_key(path),
             &serde_json::to_string(job).map_err(|e| e.to_string())?,
@@ -342,13 +344,13 @@ impl FileStore {
         let key = Self::sidecar_key(path);
         let mut tx = self.db.begin().await.map_err(|e| e.to_string())?;
         let before: Option<String> =
-            sqlx::query_scalar("SELECT payload FROM collections WHERE name=?")
+            sqlx::query_scalar("SELECT payload FROM store_documents WHERE name=?")
                 .bind(&key)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(|e| e.to_string())?;
         let before = before.and_then(|s| serde_json::from_str::<Value>(&s).ok());
-        write_collection(&mut tx, &key, payload)
+        write_document(&mut tx, &key, payload)
             .await
             .map_err(|e| e.to_string())?;
         sqlx::query("INSERT INTO admin_events(actor,kind,target,status,created_at,detail) VALUES (?,'admin.settings',?,200,?,?)")

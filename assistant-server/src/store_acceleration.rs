@@ -124,7 +124,7 @@ impl FileStore {
         }
         if previous.is_none() {
             let raw: Option<String> =
-                sqlx::query_scalar("SELECT payload FROM collections WHERE name=?")
+                sqlx::query_scalar("SELECT payload FROM store_documents WHERE name=?")
                     .bind(Self::sidecar_key(Path::new(SETTINGS_KEY)))
                     .fetch_optional(&mut *tx)
                     .await
@@ -173,37 +173,25 @@ impl FileStore {
         user: Uuid,
         id: Uuid,
     ) -> Result<chrono::DateTime<Utc>, ApiError> {
-        let mut jobs = self.pkuvideo_jobs.write().await;
-        let job = jobs
-            .get_mut(&id)
-            .filter(|job| job.user_id == user)
-            .ok_or(ApiError::NotFound)?;
+        let mut tx = self.begin_note_transaction().await.map_err(storage_error)?;
+        let mut job: crate::services::pkuvideo::PkuVideoJob =
+            super::read_entity(&mut *tx, "pkuvideo_jobs", id).await.map_err(storage_error)?
+                .filter(|job: &crate::services::pkuvideo::PkuVideoJob| job.user_id == user)
+                .ok_or(ApiError::NotFound)?;
         if job.status != PipelineStatus::Pending || job.priority <= ACCELERATED_PRIORITY {
             return Err(ApiError::Conflict("该任务当前无法使用加速券".into()));
         }
-
-        let mut tx = self.begin_note_transaction().await.map_err(storage_error)?;
         let now = Utc::now();
         let spent = sqlx::query("UPDATE acceleration_ticket_accounts SET tickets=tickets-1 WHERE user_id=? AND tickets>0")
             .bind(user.to_string()).execute(&mut *tx).await.map_err(storage_error)?;
         if spent.rows_affected() == 0 {
             return Err(ApiError::BadRequest("加速券不足".into()));
         }
-        let mut updated = job.clone();
-        updated.priority = ACCELERATED_PRIORITY;
-        updated.acceleration_used = true;
-        updated.updated_at = now;
-        sqlx::query(
-            "UPDATE collections SET payload=json_set(payload,?,json(?))
-            WHERE name='pkuvideo_jobs'",
-        )
-        .bind(format!("$.\"{id}\""))
-        .bind(serde_json::to_string(&updated).map_err(storage_error)?)
-        .execute(&mut *tx)
-        .await
-        .map_err(storage_error)?;
+        job.priority = ACCELERATED_PRIORITY;
+        job.acceleration_used = true;
+        job.updated_at = now;
+        super::write_entity(&mut tx, "pkuvideo_jobs", job.id, &job).await.map_err(storage_error)?;
         tx.commit().await.map_err(storage_error)?;
-        *job = updated;
         Ok(now)
     }
 }

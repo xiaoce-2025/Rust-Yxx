@@ -325,7 +325,7 @@ mod tests {
                 assert!(!cookie.contains("Expires="));
                 let html = response.text().await.unwrap();
                 assert!(html.contains("<h1>用户中心</h1>"));
-                assert!(html.contains("隐藏已完成的作业"));
+                assert!(!html.contains("隐藏已完成的作业"));
                 assert!(html.contains("href=\"/user-center\" aria-current=\"page\""));
                 assert!(!html.contains("<html lang=\"zh-CN\" data-batch-waiting>"));
 
@@ -334,20 +334,29 @@ mod tests {
                     .send().await.unwrap().text().await.unwrap();
                 assert!(home.contains("<script src=\"/teaching-session.js\">"));
                 assert!(home.contains("登录教学网账号，查看近期的ddl"));
+                assert!(home.contains("id=\"assignment-refresh\""));
                 let assignments_url = format!("{base}/api/assignments");
-                let reminders: serde_json::Value = client.get(assignments_url).header("cookie", &cookie)
+                let reminders: serde_json::Value = client.get(&assignments_url).header("cookie", &cookie)
                     .send().await.unwrap().json().await.unwrap();
                 assert_eq!(reminders["login_required"], true);
                 assert_eq!(reminders["refreshed_at"], serde_json::Value::Null);
-                let preference = format!("{base}/api/user/assignment-preferences");
-                let saved: serde_json::Value = client.get(&preference).header("cookie", &cookie)
+                let snapshot = json!({
+                    "refreshed_at": "2026-11-20T10:00:00Z",
+                    "refresh_failed": false,
+                    "reminders": [{
+                        "title": "缓存作业", "course": "课程",
+                        "deadline": "2026-11-22T23:59:00+08:00", "completed": true
+                    }]
+                });
+                let snapshot_path = std::path::PathBuf::from("assignments")
+                    .join(id.to_string()).join("snapshot.json");
+                state.store.save_sidecar(&snapshot_path, &snapshot.to_string()).await.unwrap();
+                let cached: serde_json::Value = client.get(assignments_url).header("cookie", &cookie)
                     .send().await.unwrap().json().await.unwrap();
-                assert_eq!(saved["hide_completed"], true);
-                client.put(&preference).header("cookie", &cookie).json(&json!({"hide_completed":false}))
-                    .send().await.unwrap().error_for_status().unwrap();
-                let saved: serde_json::Value = client.get(&preference).header("cookie", &cookie)
-                    .send().await.unwrap().json().await.unwrap();
-                assert_eq!(saved["hide_completed"], false);
+                assert_eq!(cached["login_required"], true);
+                assert_eq!(cached["refreshed_at"], snapshot["refreshed_at"]);
+                assert_eq!(cached["reminders"][0]["title"], "缓存作业");
+                assert!(cached["reminders"][0].get("completed").is_none());
 
                 use crate::services::{course_parser::CourseInfo, course_storage, lesson_storage};
                 let username = id.to_string();

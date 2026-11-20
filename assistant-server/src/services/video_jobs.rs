@@ -1,6 +1,6 @@
 //! Submission, processing and completion dispatch for explicit video tasks.
 use super::{
-    pkuvideo::{run_pipeline, PipelineStatus},
+    pkuvideo::{run_pipeline, PipelineStatus, PkuVideoJob},
     prepared_media::PreparedMedia,
     video_queue::{CompletionEvent, CompletionTarget, TaskHandler, VideoTask},
 };
@@ -255,7 +255,7 @@ where
     G: FnOnce(PathBuf, Settings, PreparedMedia) -> F,
     F: std::future::Future<Output = PipelineOutput>,
 {
-    mark_job_running(&state, job_id).await;
+    mark_job_running(&state, job_id).await?;
     let job = state
         .pkuvideo_jobs
         .read()
@@ -324,9 +324,9 @@ where
         return Ok(());
     }
     tracing::info!(%job_id, share_cache=job.share_cache, regenerate=job.regenerate, "运行完整笔记生成流水线");
-    let user_config = state.store.get_config(user_id).await;
+    let user_config = state.store.get_config(user_id).await.map_err(|e| e.to_string())?;
     let merged_settings = merge_with_user_config(&state.settings, &user_config);
-    mark_step_running(&state, job_id, 0, "开始下载视频").await;
+    mark_step_running(&state, job_id, 0, "开始下载视频").await?;
     let job_dir = state
         .pkuvideo_jobs
         .read()
@@ -340,11 +340,11 @@ where
         Ok((transcript_path, notes_path, pdf_path)) => {
             let seconds=probe_duration(&job_dir.join("video.mp4")).await;
             save_duration(&state,job_id,seconds).await?;
-            mark_step_success(&state, job_id, 0, "视频下载完成").await;
-            mark_step_success(&state, job_id, 1, "mp3 抽离完成").await;
-            mark_step_success(&state, job_id, 2, "语音转文字完成").await;
-            mark_step_success(&state, job_id, 3, "讲义提取完成").await;
-            mark_step_success(&state, job_id, 4, "PDF 编译完成").await;
+            mark_step_success(&state, job_id, 0, "视频下载完成").await?;
+            mark_step_success(&state, job_id, 1, "mp3 抽离完成").await?;
+            mark_step_success(&state, job_id, 2, "语音转文字完成").await?;
+            mark_step_success(&state, job_id, 3, "讲义提取完成").await?;
+            mark_step_success(&state, job_id, 4, "PDF 编译完成").await?;
 
             let _ = (transcript_path, pdf_path);
             let notes = notes_path.ok_or("流水线未生成 TeX")?;
@@ -379,7 +379,9 @@ where
         Err(err) => {
             tracing::error!(%job_id, error=%err, "course processing failed");
             let (index, message) = parse_step_error(&err);
-            mark_step_failed(&state, job_id, index, &message).await;
+            if let Err(error) = mark_step_failed(&state, job_id, index, &message).await {
+                tracing::error!(%job_id, %error, "保存笔记失败状态失败");
+            }
             Err(message)
         }
     }
@@ -497,57 +499,61 @@ pub(crate) fn merge_with_user_config(
     merged
 }
 
-async fn mark_job_running(state: &AppState, job_id: Uuid) {
-    let billing=state.store.note_billing_state(job_id).await.ok().flatten();
+async fn persist_job_progress(
+    state: &AppState,
+    job_id: Uuid,
+    update: impl FnOnce(&mut PkuVideoJob),
+) -> Result<(), String> {
     let mut jobs = state.pkuvideo_jobs.write().await;
-    if let Some(job) = jobs.get_mut(&job_id) {
-        job.billing_state=billing;
-        job.failure_code=None;job.error=None;
+    let current = jobs.get_mut(&job_id).ok_or("任务不存在")?;
+    let mut next = current.clone();
+    update(&mut next);
+    next.updated_at = Utc::now();
+    if state.store.persist_pkuvideo_job(&next).await.map_err(|error| error.to_string())? {
+        *current = next;
+    }
+    Ok(())
+}
+
+async fn mark_job_running(state: &AppState, job_id: Uuid) -> Result<(), String> {
+    let billing = state.store.note_billing_state(job_id).await.map_err(|error| error.to_string())?;
+    persist_job_progress(state, job_id, |job| {
+        job.billing_state = billing;
+        job.failure_code = None;
+        job.error = None;
         job.status = PipelineStatus::Running;
         job.started_at = Some(Utc::now());
-        job.updated_at = Utc::now();
-        // 保存到FileStore
-        let _ = state.store.update_pkuvideo_job(job.clone()).await;
-    }
+    }).await
 }
 
-async fn mark_step_running(state: &AppState, job_id: Uuid, index: usize, msg: &str) {
-    let mut jobs = state.pkuvideo_jobs.write().await;
-    if let Some(job) = jobs.get_mut(&job_id) {
+async fn mark_step_running(state: &AppState, job_id: Uuid, index: usize, message: &str) -> Result<(), String> {
+    persist_job_progress(state, job_id, |job| {
         if let Some(step) = job.steps.get_mut(index) {
             step.status = PipelineStatus::Running;
-            step.message = msg.to_string();
+            step.message = message.into();
             step.started_at = Some(Utc::now());
         }
-        job.updated_at = Utc::now();
-        // 保存到FileStore
-        let _ = state.store.update_pkuvideo_job(job.clone()).await;
-    }
+    }).await
 }
 
-async fn mark_step_success(state: &AppState, job_id: Uuid, index: usize, msg: &str) {
-    let mut jobs = state.pkuvideo_jobs.write().await;
-    if let Some(job) = jobs.get_mut(&job_id) {
+async fn mark_step_success(state: &AppState, job_id: Uuid, index: usize, message: &str) -> Result<(), String> {
+    persist_job_progress(state, job_id, |job| {
         if let Some(step) = job.steps.get_mut(index) {
             step.status = PipelineStatus::Succeeded;
-            step.message = msg.to_string();
+            step.message = message.into();
             step.finished_at = Some(Utc::now());
             if step.started_at.is_none() {
                 step.started_at = step.finished_at;
             }
         }
-        job.updated_at = Utc::now();
-        // 保存到FileStore
-        let _ = state.store.update_pkuvideo_job(job.clone()).await;
-    }
+    }).await
 }
 
-async fn mark_step_failed(state: &AppState, job_id: Uuid, index: usize, msg: &str) {
-    let mut jobs = state.pkuvideo_jobs.write().await;
-    if let Some(job) = jobs.get_mut(&job_id) {
+async fn mark_step_failed(state: &AppState, job_id: Uuid, index: usize, message: &str) -> Result<(), String> {
+    persist_job_progress(state, job_id, |job| {
         if let Some(step) = job.steps.get_mut(index) {
             step.status = PipelineStatus::Failed;
-            step.message = msg.to_string();
+            step.message = message.into();
             step.finished_at = Some(Utc::now());
             if step.started_at.is_none() {
                 step.started_at = step.finished_at;
@@ -555,12 +561,10 @@ async fn mark_step_failed(state: &AppState, job_id: Uuid, index: usize, msg: &st
         }
         job.status = PipelineStatus::Failed;
         job.postprocessing = false;
-        job.updated_at = Utc::now();
-        job.error = Some(msg.to_string());
-        // 保存到FileStore
-        let _ = state.store.update_pkuvideo_job(job.clone()).await;
-    }
+        job.error = Some(message.into());
+    }).await
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -862,11 +866,11 @@ mod tests {
         let state = state(temp.path()).await;
         let (user, name, _cleanup) = cache_user(&state).await;
         let id = cache_job(&state, user, false).await;
-        mark_job_running(&state, id).await;
+        mark_job_running(&state, id).await.unwrap();
         persist_delivery(&state, id, b"\\section{Exact delivery}", None, "generated")
             .await
             .unwrap();
-        state.load_pkuvideo_jobs().await;
+        state.load_pkuvideo_jobs().await.unwrap();
         let job = state.store.get_pkuvideo_job(id).await.unwrap();
         assert_eq!(job.status, PipelineStatus::Succeeded);
         assert_eq!(
@@ -877,17 +881,17 @@ mod tests {
         let cache = state.store.verified_tex(job.url_key.as_deref().unwrap()).await.unwrap().unwrap();
         assert_eq!(cache.0.tex_sha256, job.result_tex_sha256.unwrap());
         assert_eq!(job.cache_revision_used, Some(cache.0.revision));
-        state.load_pkuvideo_jobs().await;
+        state.load_pkuvideo_jobs().await.unwrap();
         assert_eq!(
             state.store.get_pkuvideo_job(id).await.unwrap().status,
             PipelineStatus::Succeeded
         );
         let old = cache_job(&state, user, true).await;
-        mark_job_running(&state, old).await;
+        mark_job_running(&state, old).await.unwrap();
         persist_delivery(&state, old, b"\\section{Old interrupted result}", None, "regenerated").await.unwrap();
         VideoTaskHandler { state:state.clone() }.failed(old,"installation failure".into()).await;
         assert!(execute_fixture(&state,user,&name,true,Some("\\section{Newer result}")).await.1);
-        state.load_pkuvideo_jobs().await;
+        state.load_pkuvideo_jobs().await.unwrap();
         assert_eq!(installed(&state,&name).await.0,"\\section{Newer result}");
         let old=state.store.get_pkuvideo_job(old).await.unwrap();
         assert_eq!(old.status,PipelineStatus::Failed);

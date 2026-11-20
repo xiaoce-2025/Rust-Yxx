@@ -44,11 +44,44 @@ function harness(operationResponse) {
     URLSearchParams,
     fetch: async (url, options) => {
       requests.push({ url, options });
-      if (url.startsWith('/api/admin/records?')) return { ok: true, json: async () => operationResponse };
-      if (!options.method) return { ok: true, json: async () => structuredClone(snapshot) };
+      const request = new URL(url, 'https://example.test');
+      const params = request.searchParams;
+      const ok = data => ({ ok: true, json: async () => structuredClone(data) });
+      if (request.pathname === '/api/admin/records') return ok(operationResponse);
+      if (request.pathname === '/api/admin/related') return ok({
+        users: Object.fromEntries(snapshot.users.map(u => [u.id,u.username])),
+        jobs: Object.fromEntries(snapshot.jobs.map(job => [job.id,job.kind])),
+      });
+      if (request.pathname === '/api/admin/summary') return ok({ current_user_id:snapshot.current_user_id,username:snapshot.username });
+      if (request.pathname === '/api/admin/list') {
+        const model=params.get('model'), id=params.get('id');
+        let records=model==='users'?snapshot.users:model==='whitelist'?snapshot.whitelist.map(email=>({id:email,email})):
+          snapshot.jobs.filter(job=>job.kind===model).map(job=>({...job,username:snapshot.users.find(u=>u.id===job.user_id)?.username}));
+        if (id) {
+          const detail=records.find(row=>row.id===id);
+          return detail ? ok(detail) : {status:404,ok:false,json:async()=>({error:'missing'})};
+        }
+        const status=params.get('filter'), role=params.get('role'), q=params.get('q')?.toLowerCase(), sort=params.get('sort');
+        records=records.filter(row=>(!q||[row.id,row.email,row.username].join(' ').toLowerCase().includes(q)) &&
+          (!status||status==='all'||(model==='users'?row.is_active===(status==='active'):
+            row.status===status||status==='pending'&&row.status==='queued')) &&
+          (!role||role==='all'||row.is_admin===(role==='admin')));
+        if (sort) records.sort((a,b)=>String(a[sort]).localeCompare(String(b[sort]),'zh-CN',{numeric:true})*(params.get('desc')==='true'?-1:1));
+        const total=records.length, page=Math.max(1,Math.min(Number(params.get('page')||1),Math.ceil(total/20)));
+        return ok({records:records.slice((page-1)*20,page*20),total,page,page_size:20});
+      }
+      if (!options.method) return ok({entries:[]});
+
       assert.equal(options.headers['X-Admin-Request'], '1');
       const body = JSON.parse(options.body);
-      if (url === '/api/admin/whitelist') snapshot.whitelist = [...new Set(body.emails)].sort();
+      if (url === '/api/admin/whitelist/change') {
+        if (body.email) {
+          if (body.old!==body.email && snapshot.whitelist.includes(body.email)) {
+            return {status:409,ok:false,json:async()=>({error:'此邮箱已在白名单中。'})};
+          }
+          snapshot.whitelist=[...snapshot.whitelist.filter(email=>email!==body.old),body.email].sort();
+        } else snapshot.whitelist=snapshot.whitelist.filter(email=>!body.remove.includes(email));
+      }
       else {
         const id = url.split('/')[4];
         const user = snapshot.users.find(user => user.id === id);
@@ -72,7 +105,7 @@ test('audit links select the target user and safely render a pending event', asy
   });
   await h.run('fetchData()');
   await h.run("models.activity={name:'登录与操作记录'}; model='activity'; location.hash='#activity?user=user-1&q=%237'; applyOperationsLink(); renderOperations()");
-  const url = new URL(h.requests.at(-1).url, 'https://example.test');
+  const url = new URL(h.requests.findLast(request => request.url.startsWith('/api/admin/records?')).url, 'https://example.test');
   assert.equal(url.searchParams.get('q'), '#7');
   assert.equal(url.searchParams.get('user'), 'user-1');
   const view = h.node('view').innerHTML;
@@ -87,35 +120,38 @@ test('entry is a model directory without dashboard or welcome widgets', async ()
   const view = h.node('view').innerHTML;
   for (const model of ['users', 'whitelist', 'notes', 'replay', 'translation']) assert.ok(view.includes(`href="#${model}"`));
   assert.doesNotMatch(html, /overview-view|class="stats"|class="welcome"|linear-gradient/);
-  assert.ok(h.requests.every(request => request.url === '/api/admin/data'));
+  assert.ok(h.requests.every(request => request.url === '/api/admin/summary'));
 });
 
 test('lists filter, sort, paginate and escape user supplied text', async () => {
   const h = harness(); await h.run('fetchData()');
-  h.run("model='users'; renderList()");
+  await h.run("model='users'; renderList()");
   assert.match(h.node('view').innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.doesNotMatch(h.node('view').innerHTML, /<img src=x/);
-  h.run("listState.users.filter='inactive'; renderList()");
+  await h.run("listState.users.filter='inactive'; renderList()");
   assert.match(h.node('view').innerHTML, /1 条用户记录/);
   assert.match(h.node('view').innerHTML, /user3@example.com/);
-  h.run("listState.users.filter='all'; listState.users.role='admin'; renderList()");
+  await h.run("listState.users.filter='all'; listState.users.role='admin'; renderList()");
   assert.match(h.node('view').innerHTML, /1 条用户记录/);
-  h.run("listState.users.role='all'; listState.users.q='user2@'; renderList()");
+  await h.run("listState.users.role='all'; listState.users.q='user2@'; renderList()");
   assert.match(h.node('view').innerHTML, /1 条用户记录/);
-  h.run("listState.users.q=''; listState.users.sort='processing_priority'; listState.users.direction=-1; listState.users.page=2; listState.users.selected.add('user-24'); renderList()");
+  await h.run("listState.users.q=''; listState.users.sort='processing_priority'; listState.users.direction=-1; listState.users.page=2; listState.users.selected.add('user-24'); renderList()");
   assert.match(h.node('view').innerHTML, /25 条用户记录/);
   assert.equal(h.run('listState.users.selected.size'), 0, 'selection cannot leak from another page');
-  assert.deepEqual(JSON.parse(h.run('JSON.stringify(filteredRecords().slice(0,2).map(user=>user.processing_priority))')), [25, 24]);
+  const request=new URL(h.requests.at(-1).url,'https://example.test');
+  assert.equal(request.searchParams.get('page'),'2');
+  assert.equal(request.searchParams.get('sort'),'processing_priority');
+  assert.equal(request.searchParams.get('desc'),'true');
 });
 
 test('task models remain separate and queued tasks match the waiting filter', async () => {
   const h = harness(); await h.run('fetchData()');
-  h.run("model='notes'; renderList()");
+  await h.run("model='notes'; renderList()");
   assert.match(h.node('view').innerHTML, /notes-1/);
   assert.doesNotMatch(h.node('view').innerHTML, /replay-1|translation-1/);
-  h.run("model='translation'; listState.translation.filter='pending'; renderList()");
+  await h.run("model='translation'; listState.translation.filter='pending'; renderList()");
   assert.match(h.node('view').innerHTML, /translation-1/);
-  h.run("recordId='translation-1'; renderRecord()");
+  await h.run("recordId='translation-1'; renderRecord()");
   assert.match(h.node('view').innerHTML, /任务状态由处理流程维护，此处只读/);
 });
 
@@ -134,7 +170,8 @@ test('user editing and whitelist add/change preserve other records', async () =>
 
 test('batch action requires confirmation and preserves administrator protection', async () => {
   const h = harness(); await h.run('fetchData()');
-  h.run("model='users'; listState.users.selected.add('user-3')");
+  await h.run("model='users'; renderList()");
+  h.run("listState.users.selected.add('user-3')");
   h.node('action').value = 'enable'; h.node('action').selectedOptions = [{ textContent: '启用所选用户' }];
   let pending = h.run('runAction()');
   assert.equal(h.node('confirmation').open, true);
@@ -143,7 +180,8 @@ test('batch action requires confirmation and preserves administrator protection'
   pending = h.run('runAction()'); h.node('confirmation').close('yes'); await pending;
   assert.equal(h.snapshot.users[3].is_active, true);
   assert.match(h.node('notice').textContent, /成功处理 1 条/);
-  h.run("model='users'; listState.users.selected.add('admin')");
+  await h.run("model='users'; renderList()");
+  h.run("listState.users.selected.add('admin')");
   h.node('action').value = 'disable';
   pending = h.run('runAction()'); h.node('confirmation').close('yes'); await pending;
   assert.equal(h.snapshot.users[0].is_active, true);

@@ -5,7 +5,24 @@ use std::path::PathBuf;
 use serde::de::DeserializeOwned;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Sqlite, SqlitePool, Transaction};
-use tokio::sync::RwLock;
+use crate::services::{pkuvideo::PkuVideoJob, pkuvideo_fw::PkuVideoFwJob};
+#[path = "store_accounts.rs"]
+mod accounts;
+#[path = "store_jobs.rs"]
+mod jobs;
+#[path = "store_migration.rs"]
+mod migration;
+#[path = "store_admin_list.rs"]
+mod admin_list;
+pub(crate) use admin_list::AdminList;
+#[path = "store_sections.rs"]
+mod sections;
+#[path = "store_provider_config.rs"]
+mod provider_config;
+#[path = "store_legacy_features.rs"]
+mod legacy_features;
+use accounts::{replace_whitelist, write_session};
+
 use uuid::Uuid;
 #[path = "store_acceleration.rs"]
 pub(crate) mod acceleration;
@@ -154,183 +171,115 @@ pub struct FileStore {
     tex_cache_lock: tokio::sync::Mutex<()>,
     data_dir: PathBuf,
     db: SqlitePool,
-    users: RwLock<HashMap<Uuid, FileUser>>,
-    sessions: RwLock<HashMap<Uuid, FileUserSession>>,
-    configs: RwLock<HashMap<Uuid, FileUserConfig>>,
-    conversations: RwLock<HashMap<Uuid, FileConversation>>,
-    messages: RwLock<Vec<FileConversationMessage>>,
-    wechat_bindings: RwLock<Vec<FileUserWeChatBinding>>,
-    wechat_channels: RwLock<HashMap<Uuid, FileUserWeChatChannel>>,
-    oauth_states: RwLock<Vec<FileWeChatOAuthState>>,
-    pkuvideo_jobs: RwLock<HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob>>,
-    pkuvideo_fw_jobs: RwLock<HashMap<Uuid, crate::services::pkuvideo_fw::PkuVideoFwJob>>,
-    oidc_identities: RwLock<HashMap<String, Uuid>>,
-    whitelist: RwLock<RegistrationWhitelist>,
+    provider_keys: provider_config::ProviderKeys,
 }
 
-async fn import_collection<T: DeserializeOwned + Default + Serialize>(
-    tx: &mut Transaction<'_, Sqlite>,
-    data_dir: &std::path::Path,
-    name: &str,
-) -> Result<T, StoreError> {
-    let stored: Option<String> =
-        sqlx::query_scalar("SELECT payload FROM collections WHERE name = ?")
-            .bind(name)
-            .fetch_optional(&mut **tx)
-            .await?;
-    if let Some(payload) = stored {
-        return Ok(serde_json::from_str(&payload)?);
-    }
-
-    let path = data_dir.join(format!("{name}.json"));
-    let value = match tokio::fs::read_to_string(&path).await {
-        Ok(payload) if name == "wechat_channels" => {
-            // Older versions serialized channels as an array.
-            let channels: Vec<FileUserWeChatChannel> = serde_json::from_str(&payload)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
-            let map: HashMap<_, _> = channels.into_iter().map(|ch| (ch.user_id, ch)).collect();
-            serde_json::from_value(serde_json::to_value(map)?)?
-        }
-        Ok(payload) => serde_json::from_str(&payload)
-            .map_err(|error| format!("{}: {error}", path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => T::default(),
-        Err(error) => return Err(error.into()),
-    };
-    write_collection(&mut **tx, name, &serde_json::to_string(&value)?).await?;
-    Ok(value)
+async fn read_entity<'e, T: DeserializeOwned>(
+    executor: impl sqlx::Executor<'e, Database = Sqlite>,
+    table: &'static str,
+    id: impl ToString,
+) -> Result<Option<T>, StoreError> {
+    let sql = format!("SELECT payload FROM {table} WHERE id=?");
+    let payload: Option<String> = sqlx::query_scalar(&sql).bind(id.to_string()).fetch_optional(executor).await?;
+    Ok(payload.as_deref().map(serde_json::from_str).transpose()?)
 }
 
-async fn write_collection(
+async fn write_entity(
+    connection: &mut sqlx::SqliteConnection,
+    table: &'static str,
+    id: impl ToString,
+    record: &impl Serialize,
+) -> Result<(), StoreError> {
+    let sql = format!("INSERT INTO {table}(id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload");
+    sqlx::query(&sql).bind(id.to_string()).bind(serde_json::to_string(record)?).execute(connection).await?;
+    Ok(())
+}
+
+async fn write_document(
     connection: &mut sqlx::SqliteConnection,
     name: &str,
     payload: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO collections (name, payload) VALUES (?, ?)
-         ON CONFLICT(name) DO UPDATE SET payload = excluded.payload",
-    )
-    .bind(name)
-    .bind(payload)
-    .execute(connection)
-    .await?;
+    sqlx::query("INSERT INTO store_documents(name,payload) VALUES (?,?) ON CONFLICT(name) DO UPDATE SET payload=excluded.payload")
+        .bind(name).bind(payload).execute(connection).await?;
     Ok(())
 }
 
 impl FileStore {
-    pub async fn admin_users(&self) -> Vec<FileUser> {
-        let users: Vec<_> = self.users.read().await.values().cloned().collect();
-        let mut result = Vec::new();
-        for user in users { if let Some(user) = self.project_note_balance(user).await { result.push(user); } }
-        result
-    }
-
-    pub async fn admin_update_user(&self, id: Uuid, active: bool, storage: i32, priority: u32, audit_id: Option<i64>) -> Result<(), crate::error::ApiError> {
-        use crate::error::ApiError;
-        let mut users = self.users.write().await;
-        let mut updated = users.clone();
-        let user = updated.get_mut(&id).ok_or(ApiError::NotFound)?;
-        let before = serde_json::json!({"is_active":user.is_active,"storage_quota":user.storage_quota,"processing_priority":user.processing_priority});
-        user.is_active = active;
-        user.storage_quota = storage;
-        user.processing_priority = priority;
-        user.updated_at = Utc::now();
-        let detail = serde_json::json!({"before":before,"after":{"is_active":active,"storage_quota":storage,"processing_priority":priority}});
-        self.save_admin_collection("users", &updated, audit_id, detail).await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        *users = updated;
-        Ok(())
-    }
-
-    pub async fn admin_revoke_sessions(&self, user_id: Uuid, audit_id: Option<i64>) -> Result<usize, StoreError> {
-        let mut sessions = self.sessions.write().await;
-        let mut updated = sessions.clone();
-        updated.retain(|_, s| s.user_id != user_id);
-        let count = sessions.len() - updated.len();
-        self.save_admin_collection("sessions", &updated, audit_id, serde_json::json!({"revoked_sessions":count})).await?;
-        *sessions = updated;
-        Ok(count)
-    }
-
-    async fn save_admin_collection<T: Serialize>(&self, name: &str, value: &T, audit_id: Option<i64>, detail: serde_json::Value) -> Result<(), StoreError> {
-        let mut tx = self.db.begin().await?;
-        write_collection(&mut tx, name, &serde_json::to_string(value)?).await?;
-        operations::audit_detail(&mut tx, audit_id, detail).await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    pub async fn admin_session_counts(&self) -> HashMap<Uuid, usize> {
-        let mut counts = HashMap::new();
-        for session in self.sessions.read().await.values().filter(|s| s.expires_at > Utc::now()) {
-            *counts.entry(session.user_id).or_insert(0) += 1;
-        }
-        counts
-    }
-
-    pub async fn admin_whitelist(&self) -> Vec<String> {
-        self.whitelist.read().await.allowed_emails.clone()
-    }
-
-    pub async fn admin_save_whitelist(&self, emails: Vec<String>) -> Result<(), StoreError> {
-        let mut whitelist = self.whitelist.write().await;
-        let updated = RegistrationWhitelist { allowed_emails: emails };
-        let path = self.data_dir.join("whitelist.json");
-        let temporary = self.data_dir.join("whitelist.json.tmp");
-        tokio::fs::write(&temporary, serde_json::to_vec_pretty(&updated)?).await?;
-        tokio::fs::rename(&temporary, &path).await?;
-        *whitelist = updated;
-        Ok(())
-    }
-
     pub async fn new(data_dir: PathBuf) -> Result<Self, StoreError> {
         tokio::fs::create_dir_all(&data_dir).await?;
         let db = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .filename(data_dir.join("assistant.sqlite3"))
-                    .create_if_missing(true)
-                    .busy_timeout(std::time::Duration::from_secs(5)),
-            )
+            .connect_with(SqliteConnectOptions::new()
+                .filename(data_dir.join("assistant.sqlite3"))
+                .create_if_missing(true)
+                .foreign_keys(true)
+                .busy_timeout(std::time::Duration::from_secs(5)))
             .await?;
-        let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS collections (
-                name TEXT PRIMARY KEY NOT NULL,
-                payload TEXT NOT NULL CHECK (json_valid(payload))
-            )",
-        )
-        .execute(&mut *tx)
-        .await?;
-        let store = Self {
-            tex_cache_lock: tokio::sync::Mutex::new(()),
-            users: RwLock::new(import_collection(&mut tx, &data_dir, "users").await?),
-            sessions: RwLock::new(import_collection(&mut tx, &data_dir, "sessions").await?),
-            configs: RwLock::new(import_collection(&mut tx, &data_dir, "configs").await?),
-            conversations: RwLock::new(import_collection(&mut tx, &data_dir, "conversations").await?),
-            messages: RwLock::new(import_collection(&mut tx, &data_dir, "messages").await?),
-            wechat_bindings: RwLock::new(import_collection(&mut tx, &data_dir, "wechat_bindings").await?),
-            wechat_channels: RwLock::new(import_collection(&mut tx, &data_dir, "wechat_channels").await?),
-            oauth_states: RwLock::new(import_collection(&mut tx, &data_dir, "oauth_states").await?),
-            pkuvideo_jobs: RwLock::new(import_collection(&mut tx, &data_dir, "pkuvideo_jobs").await?),
-            pkuvideo_fw_jobs: RwLock::new(import_collection(&mut tx, &data_dir, "pkuvideo_fw_jobs").await?),
-            oidc_identities: RwLock::new(import_collection(&mut tx, &data_dir, "oidc_identities").await?),
-            whitelist: RwLock::new(RegistrationWhitelist { allowed_emails: Vec::new() }),
-            data_dir,
-            db: db.clone(),
-        };
-        tx.commit().await?;
+        let provider_keys = provider_config::ProviderKeys::new(&data_dir);
+        migration::migrate(&db, &data_dir, &provider_keys).await?;
+        provider_keys.validate(&db).await?;
+        let store = Self { data_dir, db, provider_keys, tex_cache_lock: tokio::sync::Mutex::new(()) };
         store.init_note_billing().await?;
         store.init_tex_cache().await?;
         store.init_operations().await?;
-        store.load_whitelist().await?;
         Ok(store)
     }
 
-    async fn save_collection<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StoreError> {
-        let payload = serde_json::to_string(value)?;
-        let mut connection = self.db.acquire().await?;
-        write_collection(&mut connection, name, &payload).await?;
+    pub async fn verify_database(&self) -> Result<serde_json::Value, StoreError> {
+        let integrity: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check").fetch_all(&self.db).await?;
+        if integrity != ["ok"] {
+            return Err("SQLite integrity_check 未通过".into());
+        }
+        if sqlx::query("PRAGMA foreign_key_check").fetch_optional(&self.db).await?.is_some() {
+            return Err("SQLite foreign_key_check 未通过".into());
+        }
+        let mut counts = serde_json::Map::new();
+        for table in [
+            "users", "sessions", "oidc_identities", "registration_whitelist", "user_configs",
+            "user_provider_configs", "conversations", "messages", "wechat_bindings",
+            "wechat_channels", "oauth_states", "pkuvideo_jobs", "pkuvideo_fw_jobs",
+            "translation_jobs", "course_lessons", "ta_drafts", "store_documents", "note_credit_accounts", "note_credit_ledger", "note_recharge_orders",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&self.db).await?;
+            counts.insert(table.into(), count.into());
+        }
+        let (sessions_without_user, users_without_balance, links_without_user): (i64, i64, i64) =
+            sqlx::query_as("SELECT
+                (SELECT count(*) FROM sessions LEFT JOIN users ON users.id=sessions.user_id WHERE users.id IS NULL),
+                (SELECT count(*) FROM users LEFT JOIN note_credit_accounts ON note_credit_accounts.user_id=users.id WHERE note_credit_accounts.user_id IS NULL),
+                (SELECT count(*) FROM oidc_identities LEFT JOIN users ON users.id=oidc_identities.user_id WHERE users.id IS NULL)")
+                .fetch_one(&self.db).await?;
+        if users_without_balance > 0 || links_without_user > 0 {
+            return Err(format!("迁移后有 {users_without_balance} 个账户缺少余额，{links_without_user} 条 OIDC 关联缺少用户").into());
+        }
+        let sqlite_version: String = sqlx::query_scalar("SELECT sqlite_version()").fetch_one(&self.db).await?;
+        let schema_version: i64 = sqlx::query_scalar("SELECT max(version) FROM store_migrations").fetch_one(&self.db).await?;
+        Ok(serde_json::json!({
+            "sqlite_version": sqlite_version, "schema_version": schema_version, "row_counts": counts,
+            "historical_sessions_without_user": sessions_without_user,
+        }))
+    }
+
+
+    async fn read_entities<T: DeserializeOwned>(&self, sql: &str, parameter: Option<String>) -> Vec<T> {
+        let mut query = sqlx::query_scalar::<_, String>(sql);
+        if let Some(parameter) = parameter {
+            query = query.bind(parameter);
+        }
+        match query.fetch_all(&self.db).await {
+            Ok(records) => records.into_iter().filter_map(|payload| match serde_json::from_str(&payload) {
+                Ok(record) => Some(record),
+                Err(error) => { tracing::error!(%error, "解析数据库记录失败"); None }
+            }).collect(),
+            Err(error) => { tracing::error!(%error, "读取数据库记录失败"); Vec::new() }
+        }
+    }
+
+    async fn delete_entity(&self, table: &'static str, id: impl ToString) -> Result<(), StoreError> {
+        let sql = format!("DELETE FROM {table} WHERE id=?");
+        sqlx::query(&sql).bind(id.to_string()).execute(&self.db).await?;
         Ok(())
     }
 
@@ -340,485 +289,58 @@ impl FileStore {
     }
 
     pub async fn stored_sidecar(&self, path: &std::path::Path) -> Result<Option<String>, String> {
-        sqlx::query_scalar("SELECT payload FROM collections WHERE name = ?")
-            .bind(Self::sidecar_key(path))
-            .fetch_optional(&self.db)
-            .await
-            .map_err(|error| error.to_string())
+        self.document(Self::sidecar_key(path)).await.map(Option::flatten)
+    }
+
+    async fn document(&self, key: String) -> Result<Option<Option<String>>, String> {
+        sqlx::query_scalar("SELECT payload FROM store_documents WHERE name=?")
+            .bind(key).fetch_optional(&self.db).await.map_err(|error| error.to_string())
     }
 
     pub async fn save_sidecar(&self, path: &std::path::Path, payload: &str) -> Result<(), String> {
         let mut connection = self.db.acquire().await.map_err(|error| error.to_string())?;
-        write_collection(&mut connection, &Self::sidecar_key(path), payload)
-            .await
-            .map_err(|error| error.to_string())
+        write_document(&mut connection, &Self::sidecar_key(path), payload)
+            .await.map_err(|error| error.to_string())
     }
 
     pub async fn sidecar_paths_under(&self, directory: &std::path::Path) -> Result<Vec<String>, String> {
-        let prefix = format!("{}/", Self::sidecar_key(directory));
-        sqlx::query_scalar("SELECT substr(name, length(?) + 1) FROM collections WHERE substr(name, 1, length(?)) = ?")
-            .bind(&prefix)
-            .bind(&prefix)
-            .bind(&prefix)
-            .fetch_all(&self.db)
-            .await
-            .map_err(|error| error.to_string())
+        let base = Self::sidecar_key(directory);
+        let prefix = format!("{base}/");
+        let end = format!("{base}0");
+        sqlx::query_scalar("SELECT substr(name,length(?1)+1) FROM store_documents WHERE name>=?2 AND name<?3 AND payload IS NOT NULL UNION SELECT substr(scope,length(?1)+1) FROM lesson_indexes WHERE scope>=?2 AND scope<?3 ORDER BY 1")
+            .bind(&prefix).bind(&prefix).bind(end).fetch_all(&self.db).await.map_err(|error| error.to_string())
     }
 
     pub async fn delete_sidecar(&self, path: &std::path::Path) -> Result<(), String> {
-        sqlx::query("DELETE FROM collections WHERE name = ?")
-            .bind(Self::sidecar_key(path))
-            .execute(&self.db)
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut connection = self.db.acquire().await.map_err(|error| error.to_string())?;
+        Self::mask_document(&mut connection, path).await
+    }
+
+    async fn mask_document(connection: &mut sqlx::SqliteConnection, path: &std::path::Path) -> Result<(), String> {
+        // A tombstone masks any old file that has yet to be removed from a backup.
+        sqlx::query("INSERT INTO store_documents(name,payload) VALUES (?,NULL) ON CONFLICT(name) DO UPDATE SET payload=NULL")
+            .bind(Self::sidecar_key(path)).execute(connection).await.map_err(|error| error.to_string())?;
         Ok(())
     }
 
-    pub async fn load_sidecar<T: DeserializeOwned>(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<Option<T>, String> {
-        if let Some(payload) = self.stored_sidecar(path).await? {
-            return serde_json::from_str(&payload).map_err(|error| error.to_string());
-        }
 
+    pub async fn load_sidecar<T: DeserializeOwned>(&self, path: &std::path::Path) -> Result<Option<T>, String> {
+        let key = Self::sidecar_key(path);
+        if let Some(payload) = self.document(key.clone()).await? {
+            return payload.as_deref().map(serde_json::from_str).transpose().map_err(|error| error.to_string());
+        }
         let payload = match tokio::fs::read_to_string(path).await {
             Ok(payload) => payload,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("{}: {error}", path.display())),
         };
-        serde_json::from_str::<T>(&payload)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        // A concurrent refresh may already have replaced the legacy version.
-        let payload: String = sqlx::query_scalar(
-            "INSERT INTO collections (name, payload) VALUES (?, ?)
-             ON CONFLICT(name) DO UPDATE SET payload = collections.payload
-             RETURNING payload",
+        serde_json::from_str::<T>(&payload).map_err(|error| format!("{}: {error}", path.display()))?;
+        let payload: Option<String> = sqlx::query_scalar(
+            "INSERT INTO store_documents(name,payload) VALUES (?,?)
+             ON CONFLICT(name) DO UPDATE SET payload=store_documents.payload RETURNING payload",
         )
-        .bind(Self::sidecar_key(path))
-        .bind(payload)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|error| error.to_string())?;
-        serde_json::from_str(&payload).map_err(|error| error.to_string())
-    }
-
-    async fn update_collection<T: Serialize + Clone>(
-        &self,
-        name: &str,
-        collection: &RwLock<T>,
-        update: impl FnOnce(&mut T),
-    ) -> Result<(), StoreError> {
-        let mut current = collection.write().await;
-        let mut next = current.clone();
-        update(&mut next);
-        self.save_collection(name, &next).await?;
-        *current = next;
-        Ok(())
-    }
-
-    pub async fn get_user(&self, user_id: Uuid) -> Option<FileUser> {
-        let user = self.users.read().await.get(&user_id).cloned()?;
-        self.project_note_balance(user).await
-    }
-
-    pub async fn get_user_by_email(&self, email: &str) -> Option<FileUser> {
-        let id = self.users.read().await.values().find(|u| u.email == email).map(|u| u.id)?;
-        self.get_user(id).await
-    }
-    pub async fn get_user_by_username(&self, username: &str) -> Option<FileUser> {
-        let id = self.users.read().await.values().find(|u| u.username == username).map(|u| u.id)?;
-        self.get_user(id).await
-    }
-
-    pub async fn insert_user(&self, user: FileUser) -> Result<(), StoreError> {
-        let mut users = self.users.write().await;
-        if users.values().any(|u| u.email == user.email) {
-            return Err("邮箱已存在".into());
-        }
-        let mut updated = users.clone();
-        updated.insert(user.id, user.clone());
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("INSERT INTO note_credit_accounts(user_id,balance,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING")
-            .bind(user.id.to_string()).bind(user.processing_quota).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
-        write_collection(&mut tx,"users", &serde_json::to_string(&updated)?).await?;
-        tx.commit().await?;
-        *users = updated;
-        Ok(())
-    }
-
-    /// A verified OIDC identity still needs this application's own whitelist on every login.
-    pub async fn resolve_oidc_user(&self, issuer: &str, subject: &str, email: &str, username: &str) -> Result<FileUser, crate::error::ApiError> {
-        use crate::error::ApiError;
-        if !self.is_email_in_whitelist(email).await {
-            return Err(ApiError::Forbidden("统一认证已通过，但该邮箱不在小助手白名单中".into()));
-        }
-        let mut users = self.users.write().await;
-        let mut links = self.oidc_identities.write().await;
-        let mut new_user = false;
-        let identity = format!("{}\0{}", issuer.trim_end_matches('/'), subject);
-        let user = if let Some(id) = links.get(&identity) {
-            let user = users.get(id).ok_or_else(|| ApiError::Forbidden("关联账户不存在，请联系管理员".into()))?;
-            if user.email != email { return Err(ApiError::Forbidden("统一账户邮箱已变更，请联系管理员重新关联".into())); }
-            user.clone()
-        } else if let Some(user) = users.values().find(|user| user.email == email) {
-            let prefix = format!("{}\0", issuer.trim_end_matches('/'));
-            if links.iter().any(|(key, id)| key.starts_with(&prefix) && id == &user.id) {
-                return Err(ApiError::Forbidden("此邮箱已关联其他统一认证账户，请联系管理员".into()));
-            }
-            user.clone()
-        } else {
-            let id = Uuid::new_v4();
-            let now = Utc::now();
-            let user = FileUser {
-                id, username: if users.values().any(|u|u.username == username) {format!("{username}-{id}")} else {username.to_string()},
-                email: email.to_string(), password_hash: crate::auth::hash_password(&Uuid::new_v4().to_string())?,
-                is_active: true, created_at: now, updated_at: now, storage_quota: 3, processing_quota: 1,
-                processing_priority: 5, iaaa_encrypted_password: None, iaaa_public_key: None,
-            };
-            new_user = true;
-            user
-        };
-        if !user.is_active {
-            return Err(ApiError::Forbidden("小助手账户已停用".into()));
-        }
-        if links.contains_key(&identity) {
-            return Ok(user);
-        }
-        let mut updated_links = links.clone();
-        updated_links.insert(identity, user.id);
-        let mut updated_users = users.clone();
-        if new_user {
-            updated_users.insert(user.id, user.clone());
-        }
-        let persist = async {
-            let mut tx = self.db.begin().await?;
-            if new_user {
-                write_collection(&mut tx, "users", &serde_json::to_string(&updated_users)?).await?;
-                sqlx::query("INSERT INTO note_credit_accounts(user_id,balance,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING")
-                    .bind(user.id.to_string()).bind(user.processing_quota).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
-            }
-            write_collection(&mut tx, "oidc_identities", &serde_json::to_string(&updated_links)?).await?;
-            tx.commit().await?;
-            Ok::<_, StoreError>(())
-        };
-        persist.await.map_err(|error| {
-            tracing::error!(%error, "保存统一认证账户失败");
-            ApiError::Internal("保存统一认证账户失败".into())
-        })?;
-        *users = updated_users;
-        *links = updated_links;
-        Ok(user)
-    }
-
-    /// Resolve a verified IAAA identity atomically. Only new accounts require the whitelist.
-    pub async fn resolve_iaaa_user(&self, mut candidate: FileUser) -> Result<Option<FileUser>, StoreError> {
-        let mut users = self.users.write().await;
-        if let Some(user) = users.values().find(|u| u.email == candidate.email) {
-            tracing::info!(user_id=%user.id, is_active=user.is_active, "IAAA identity resolved to existing account");
-            return Ok(Some(user.clone()));
-        }
-        if !self.is_email_in_whitelist(&candidate.email).await {
-            tracing::warn!(email=%candidate.email, "IAAA registration denied: email is not in the whitelist");
-            return Ok(None);
-        }
-        if users.values().any(|u| u.username == candidate.username) {
-            candidate.username = format!("{}-{}", candidate.username, candidate.id);
-        }
-        let mut updated = users.clone();
-        updated.insert(candidate.id, candidate.clone());
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("INSERT INTO note_credit_accounts(user_id,balance,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING")
-            .bind(candidate.id.to_string()).bind(candidate.processing_quota).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
-        write_collection(&mut tx,"users",&serde_json::to_string(&updated)?).await?;
-        tx.commit().await?;
-        *users = updated;
-        tracing::info!(user_id=%candidate.id, "IAAA whitelist check passed; new account registered");
-        Ok(Some(candidate))
-    }
-
-    pub async fn increase_storage_quota(&self, user_id: Uuid, amount: i32) -> Result<(), StoreError> {
-        self.update_collection("users", &self.users, |users| {
-            if let Some(user) = users.get_mut(&user_id) {
-                user.storage_quota += amount;
-                user.updated_at = chrono::Utc::now();
-            }
-        }).await
-    }
-
-    pub async fn decrease_storage_quota(&self, user_id: Uuid, amount: i32) -> Result<(), StoreError> {
-        self.update_collection("users", &self.users, |users| {
-            if let Some(user) = users.get_mut(&user_id) {
-                user.storage_quota = std::cmp::max(0, user.storage_quota - amount);
-                user.updated_at = chrono::Utc::now();
-            }
-        }).await
-    }
-
-    pub async fn update_iaaa_binding(&self, user_id: Uuid, encrypted_password: String, public_key: String) -> Result<(), StoreError> {
-        self.update_collection("users", &self.users, |users| {
-            if let Some(user) = users.get_mut(&user_id) {
-                user.iaaa_encrypted_password = Some(encrypted_password);
-                user.iaaa_public_key = Some(public_key);
-                user.updated_at = chrono::Utc::now();
-            }
-        }).await
-    }
-
-    pub async fn remove_iaaa_binding(&self, user_id: Uuid) -> Result<(), StoreError> {
-        self.update_collection("users", &self.users, |users| {
-            if let Some(user) = users.get_mut(&user_id) {
-                user.iaaa_encrypted_password = None;
-                user.iaaa_public_key = None;
-                user.updated_at = chrono::Utc::now();
-            }
-        }).await
-    }
-
-    // ===== Sessions =====
-    pub async fn get_session(&self, session_id: Uuid) -> Option<FileUserSession> {
-        let sessions = self.sessions.read().await;
-        sessions.get(&session_id).cloned()
-    }
-
-    pub async fn insert_session(&self, session: FileUserSession) -> Result<(), StoreError> {
-        self.insert_session_record(session).await
-    }
-
-    pub async fn delete_session(&self, session_id: Uuid) -> Result<(), StoreError> {
-        self.update_collection("sessions", &self.sessions, |records| {
-            records.remove(&session_id);
-        }).await
-    }
-
-    // ===== Configs =====
-    pub async fn get_config(&self, user_id: Uuid) -> Option<FileUserConfig> {
-        self.configs.read().await.get(&user_id).cloned()
-    }
-
-    pub async fn update_config(
-        &self,
-        user_id: Uuid,
-        update: impl FnOnce(Option<FileUserConfig>) -> FileUserConfig,
-    ) -> std::io::Result<()> {
-        self.update_collection("configs", &self.configs, |configs| {
-            let config = update(configs.remove(&user_id));
-            configs.insert(user_id, config);
-        })
-        .await
-        .map_err(std::io::Error::other)
-    }
-
-    // ===== Conversations =====
-    pub async fn get_conversations(&self, user_id: Uuid) -> Vec<FileConversation> {
-        let mut convs: Vec<_> = self
-            .conversations
-            .read()
-            .await
-            .values()
-            .filter(|c| c.user_id == user_id)
-            .cloned()
-            .collect();
-        convs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        convs
-    }
-
-    pub async fn get_conversation(&self, conv_id: Uuid) -> Option<FileConversation> {
-        self.conversations.read().await.get(&conv_id).cloned()
-    }
-
-    pub async fn insert_conversation(&self, conv: FileConversation) -> Result<(), StoreError> {
-        self.update_collection("conversations", &self.conversations, |records| {
-            records.insert(conv.id, conv);
-        }).await
-    }
-
-    pub async fn update_conversation(&self, conv: FileConversation) -> Result<(), StoreError> {
-        self.update_collection("conversations", &self.conversations, |records| {
-            records.insert(conv.id, conv);
-        }).await
-    }
-
-    // ===== Messages =====
-    pub async fn get_messages(&self, conv_id: Uuid) -> Vec<FileConversationMessage> {
-        let mut msgs: Vec<_> = self
-            .messages
-            .read()
-            .await
-            .iter()
-            .filter(|m| m.conversation_id == conv_id)
-            .cloned()
-            .collect();
-        msgs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        msgs
-    }
-
-    pub async fn insert_message(&self, msg: FileConversationMessage) -> Result<(), StoreError> {
-        self.update_collection("messages", &self.messages, |records| {
-            records.push(msg);
-        }).await
-    }
-
-    // ===== WeChat Bindings =====
-    pub async fn get_wechat_binding(&self, user_id: Uuid) -> Option<FileUserWeChatBinding> {
-        let bindings = self.wechat_bindings.read().await;
-        bindings
-            .iter()
-            .filter(|b| b.user_id == user_id)
-            .max_by_key(|b| b.updated_at)
-            .cloned()
-    }
-
-    pub async fn upsert_wechat_binding(&self, binding: FileUserWeChatBinding) -> Result<(), StoreError> {
-        self.update_collection("wechat_bindings", &self.wechat_bindings, |records| {
-            if let Some(existing) = records.iter_mut().find(|b| b.user_id == binding.user_id && b.openid == binding.openid) {
-                *existing = binding;
-            } else {
-                records.push(binding);
-            }
-        }).await
-    }
-
-    pub async fn delete_wechat_binding(&self, user_id: Uuid) -> Result<(), StoreError> {
-        self.update_collection("wechat_bindings", &self.wechat_bindings, |records| {
-            records.retain(|b| b.user_id != user_id);
-        }).await
-    }
-
-    // ===== WeChat Channels =====
-    pub async fn get_wechat_channel(&self, user_id: Uuid) -> Option<FileUserWeChatChannel> {
-        self.wechat_channels.read().await.get(&user_id).cloned()
-    }
-
-    pub async fn upsert_wechat_channel(&self, channel: FileUserWeChatChannel) -> Result<(), StoreError> {
-        self.update_collection("wechat_channels", &self.wechat_channels, |records| {
-            records.insert(channel.user_id, channel);
-        }).await
-    }
-
-    pub async fn get_all_wechat_channels(&self) -> Vec<FileUserWeChatChannel> {
-        self.wechat_channels.read().await.values().cloned().collect()
-    }
-
-    // ===== OAuth States =====
-    pub async fn get_oauth_state(&self, state: &str) -> Option<(Uuid, DateTime<Utc>)> {
-        self.oauth_states
-            .read()
-            .await
-            .iter()
-            .find(|s| s.state == state && s.expires_at > Utc::now())
-            .map(|s| (s.user_id, s.expires_at))
-    }
-
-    pub async fn insert_oauth_state(&self, state: FileWeChatOAuthState) -> Result<(), StoreError> {
-        self.update_collection("oauth_states", &self.oauth_states, |records| {
-            records.push(state);
-        }).await
-    }
-
-    pub async fn delete_oauth_state(&self, state: &str) -> Result<(), StoreError> {
-        self.update_collection("oauth_states", &self.oauth_states, |records| {
-            records.retain(|s| s.state != state);
-        }).await
-    }
-
-    // ===== Registration Whitelist =====
-    async fn load_whitelist(&self) -> Result<(), StoreError> {
-        let path = self.data_dir.join("whitelist.json");
-        if path.exists() {
-            let data = tokio::fs::read_to_string(&path).await?;
-            let whitelist: RegistrationWhitelist = serde_json::from_str(&data)?;
-            *self.whitelist.write().await = whitelist;
-        } else {
-            let default_whitelist = RegistrationWhitelist {
-                allowed_emails: Vec::new(),
-            };
-            let json = serde_json::to_string_pretty(&default_whitelist)?;
-            tokio::fs::write(&path, json).await?;
-            *self.whitelist.write().await = default_whitelist;
-        }
-        Ok(())
-    }
-
-    pub async fn reload_whitelist(&self) -> Result<(), StoreError> {
-        self.load_whitelist().await
-    }
-
-    pub async fn is_email_in_whitelist(&self, email: &str) -> bool {
-        let whitelist = self.whitelist.read().await;
-        whitelist.allowed_emails.iter().any(|e| e == email)
-    }
-
-    // ===== PKU Video Jobs =====
-    pub async fn get_pkuvideo_job(&self, job_id: Uuid) -> Option<crate::services::pkuvideo::PkuVideoJob> {
-        self.pkuvideo_jobs.read().await.get(&job_id).cloned()
-    }
-
-    pub async fn get_pkuvideo_jobs_by_user(&self, user_id: Uuid) -> Vec<crate::services::pkuvideo::PkuVideoJob> {
-        let jobs = self.pkuvideo_jobs.read().await;
-        jobs.values()
-            .filter(|job| job.user_id == user_id)
-            .cloned()
-            .collect()
-    }
-
-    pub async fn insert_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), StoreError> {
-        self.update_pkuvideo_job(job).await
-    }
-
-    pub async fn update_pkuvideo_job(&self, job: crate::services::pkuvideo::PkuVideoJob) -> Result<(), StoreError> {
-        let mut jobs=self.pkuvideo_jobs.write().await;
-        let mut tx=self.db.begin_with("BEGIN IMMEDIATE").await?;
-        let charged:i64=sqlx::query_scalar("SELECT count(*) FROM note_credit_ledger WHERE job_id=? AND event_type='JOB_CHARGE'")
-            .bind(job.id.to_string()).fetch_one(&mut *tx).await?;
-        let replacement=if charged>0 {
-            // Even a failure callback racing final settlement cannot overwrite success.
-            let payload:String=sqlx::query_scalar("SELECT payload FROM collections WHERE name='pkuvideo_jobs'").fetch_one(&mut *tx).await?;
-            let persisted:HashMap<Uuid,crate::services::pkuvideo::PkuVideoJob>=serde_json::from_str(&payload)?;
-            persisted.get(&job.id).cloned()
-        } else {
-            sqlx::query("UPDATE collections SET payload=json_set(payload,?,json(?)) WHERE name='pkuvideo_jobs'")
-                .bind(format!("$.\"{}\"",job.id)).bind(serde_json::to_string(&job)?).execute(&mut *tx).await?;
-            Some(job)
-        };
-        tx.commit().await?;
-        if let Some(job)=replacement {jobs.insert(job.id,job);}
-        Ok(())
-    }
-
-    pub async fn delete_pkuvideo_job(&self, job_id: Uuid) -> Result<(), StoreError> {
-        let mut jobs=self.pkuvideo_jobs.write().await;
-        sqlx::query("UPDATE collections SET payload=json_remove(payload,?) WHERE name='pkuvideo_jobs'")
-            .bind(format!("$.\"{job_id}\"")).execute(&self.db).await?;
-        jobs.remove(&job_id);
-        Ok(())
-    }
-
-    pub async fn get_all_pkuvideo_jobs(&self) -> HashMap<Uuid, crate::services::pkuvideo::PkuVideoJob> {
-        self.pkuvideo_jobs.read().await.clone()
-    }
-
-    // ===== PKU Video FW Jobs =====
-    pub async fn insert_pkuvideo_fw_job(&self, job: crate::services::pkuvideo_fw::PkuVideoFwJob) -> Result<(), StoreError> {
-        self.update_collection("pkuvideo_fw_jobs", &self.pkuvideo_fw_jobs, |records| {
-            records.insert(job.id, job);
-        }).await
-    }
-
-    pub async fn update_pkuvideo_fw_job(&self, job: crate::services::pkuvideo_fw::PkuVideoFwJob) -> Result<(), StoreError> {
-        self.update_collection("pkuvideo_fw_jobs", &self.pkuvideo_fw_jobs, |records| {
-            records.insert(job.id, job);
-        }).await
-    }
-
-    pub async fn delete_pkuvideo_fw_job(&self, job_id: Uuid) -> Result<(), StoreError> {
-        self.update_collection("pkuvideo_fw_jobs", &self.pkuvideo_fw_jobs, |records| {
-            records.remove(&job_id);
-        }).await
-    }
-
-    pub async fn get_all_pkuvideo_fw_jobs(&self) -> HashMap<Uuid, crate::services::pkuvideo_fw::PkuVideoFwJob> {
-        self.pkuvideo_fw_jobs.read().await.clone()
+        .bind(key).bind(payload).fetch_one(&self.db).await.map_err(|error| error.to_string())?;
+        payload.as_deref().map(serde_json::from_str).transpose().map_err(|error| error.to_string())
     }
 }
 
@@ -858,4 +380,62 @@ mod tests {
         assert!(reopened.get_session(id).await.is_none());
         assert_eq!(tokio::fs::read_to_string(&sessions).await.unwrap(), legacy);
     }
+
+    #[tokio::test]
+    async fn upgrade_preserves_sqlite_records_and_quarantines_legacy_files() {
+        let dir = tempdir::TempDir::new_in("target", "sqlite-row-upgrade").unwrap();
+        let user_id = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let user = serde_json::json!({
+            "id":user_id,"username":"student","email":"student@example.invalid","password_hash":"test",
+            "created_at":now,"updated_at":now,"is_active":true,"processing_quota":7,"storage_quota":3
+        });
+        let session = serde_json::json!({
+            "session_id":id,"user_id":user_id,"created_at":now,"expires_at":now+chrono::Duration::hours(1)
+        });
+        let config = serde_json::json!({
+            "user_id":user_id,"default_model":"default","theme":"light","settings":{},"mimo_api_key":"test-provider-key"
+        });
+        let old = SqlitePoolOptions::new().max_connections(1).connect_with(
+            SqliteConnectOptions::new().filename(dir.path().join("assistant.sqlite3")).create_if_missing(true),
+        ).await.unwrap();
+        sqlx::query("CREATE TABLE collections(name TEXT PRIMARY KEY,payload TEXT NOT NULL)")
+            .execute(&old).await.unwrap();
+        for (name, record_id, record) in [("users",user_id,user),("sessions",id,session),("configs",user_id,config)] {
+            let payload = serde_json::to_string(&HashMap::from([(record_id,record)])).unwrap();
+            sqlx::query("INSERT INTO collections VALUES (?,?)").bind(name).bind(payload).execute(&old).await.unwrap();
+        }
+        tokio::fs::write(dir.path().join("sessions.json"), "{invalid; SQLite takes precedence}").await.unwrap();
+        tokio::fs::write(dir.path().join("whitelist.json"), r#"{"allowed_emails":["student@example.invalid"]}"#).await.unwrap();
+        let legacy = dir.path().join("legacy.json");
+        tokio::fs::write(&legacy, "true").await.unwrap();
+        old.close().await;
+
+        let store = FileStore::new(dir.path().into()).await.unwrap();
+        assert_eq!(store.authenticated_user(id).await.unwrap().unwrap().id,user_id);
+        assert_eq!(store.note_balance(user_id).await.unwrap(),7);
+        assert!(store.is_email_in_whitelist("student@example.invalid").await);
+        assert_eq!(store.get_config(user_id).await.unwrap().unwrap().mimo_api_key.as_deref(),Some("test-provider-key"));
+        let ciphertext: Vec<u8> = sqlx::query_scalar("SELECT secret FROM user_provider_configs WHERE provider='mimo'")
+            .fetch_one(&store.db).await.unwrap();
+        assert!(!ciphertext.windows(b"test-provider-key".len()).any(|window| window == b"test-provider-key"));
+        let metadata: String = sqlx::query_scalar("SELECT payload FROM user_configs").fetch_one(&store.db).await.unwrap();
+        assert!(!metadata.contains("test-provider-key"));
+        store.admin_revoke_sessions(user_id,None).await.unwrap();
+        store.admin_save_whitelist(vec![]).await.unwrap();
+        assert_eq!(store.load_sidecar::<bool>(&legacy).await.unwrap(),Some(true));
+        store.delete_sidecar(&legacy).await.unwrap();
+        assert_eq!(store.verify_database().await.unwrap()["row_counts"]["users"],1);
+        drop(store);
+
+        let reopened = FileStore::new(dir.path().into()).await.unwrap();
+        assert!(reopened.authenticated_user(id).await.unwrap().is_none());
+        assert!(!reopened.is_email_in_whitelist("student@example.invalid").await);
+        assert_eq!(reopened.load_sidecar::<bool>(&legacy).await.unwrap(),None);
+        assert!(legacy.exists());
+        assert_eq!(reopened.note_balance(user_id).await.unwrap(),7);
+        assert_eq!(reopened.get_config(user_id).await.unwrap().unwrap().mimo_api_key.as_deref(),Some("test-provider-key"));
+    }
+
 }

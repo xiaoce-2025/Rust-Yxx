@@ -93,9 +93,9 @@
   <!-- site-footer -->
   <script>
     const $=id=>document.getElementById(id);
-    let records=[],page=1,loading=false;
+    let records=[],page=1,total=0,filtered=0,pageSize=25,historyRequest=0,searchTimer;
     let quoteRequest=0,selectedJob=null,redeeming=false;
-    const pageSize=25;
+
     const escapeHTML=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const date=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—';
     function duration(seconds) {
@@ -103,13 +103,9 @@
       return `${Math.floor(seconds/3600)}:${String(Math.floor(seconds%3600/60)).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`;
     }
     function render() {
-      const query=$('search').value.trim().toLowerCase();
-      const filtered=records.filter(job=>(!query||[job.id,job.course_name,job.course_date].some(value=>String(value||'').toLowerCase().includes(query)))
-        && ($('source').value==='all'||($('source').value==='course')===Boolean(job.course_id))
-        && ($('status').value==='all'||job.status===$('status').value));
-      const pages=Math.max(1,Math.ceil(filtered.length/pageSize));page=Math.min(page,pages);
-      $('summary').textContent=`共 ${records.length} 条记录 · 筛选后 ${filtered.length} 条`;
-      $('records').innerHTML=filtered.slice((page-1)*pageSize,page*pageSize).map(job=> {
+      const pages=Math.max(1,Math.ceil(filtered/pageSize));
+      $('summary').textContent=`共 ${total} 条记录 · 筛选后 ${filtered} 条`;
+      $('records').innerHTML=records.map(job=> {
         const pending=job.billing_state==='BILLING_PENDING';
         const label=pending?'结算待恢复':({pending:'排队中',running:'处理中',succeeded:'已完成',failed:'失败'})[job.status]||job.status;
         const subject=job.course_id?(job.course_name||'课程课节'):'直链任务';
@@ -190,18 +186,32 @@
       }
     });
     async function refresh() {
-      if (loading) return;loading=true;$('refresh').disabled=true;
+      const request=++historyRequest;
+      $('refresh').disabled=true;
+      const params=new URLSearchParams({page,search:$('search').value,source:$('source').value,status:$('status').value});
       try {
-        const response=await fetch('/api/video-task-history',{cache:'no-store',credentials:'same-origin'});
+        const response=await fetch('/api/video-task-history/page?'+params,{cache:'no-store',credentials:'same-origin'});
         if (!response.ok) throw new Error(response.status===401?'登录已失效，请重新登录':'暂时无法读取任务记录，请稍后重试');
-        const data=await response.json();if (!Array.isArray(data)) throw new Error('任务记录格式无效');
-        records=data;$('feedback').hidden=true;render();
-      } catch(error) {$('feedback').textContent=error.message;$('feedback').hidden=false;}
-      finally {loading=false;$('refresh').disabled=false;}
+        const data=await response.json();
+        if (request!==historyRequest) return;
+        if (!Array.isArray(data.records)) throw new Error('任务记录格式无效');
+        ({records,total,filtered,page,page_size:pageSize}=data);
+        $('feedback').hidden=true;render();
+      } catch(error) {
+        if (request!==historyRequest) return;
+        $('feedback').textContent=error.message;$('feedback').hidden=false;
+      } finally {
+        if (request===historyRequest) $('refresh').disabled=false;
+      }
     }
-    for (const id of ['search','source','status']) $(id).addEventListener(id==='search'?'input':'change',()=>{page=1;render();});
+    for (const id of ['search','source','status']) $(id).addEventListener(id==='search'?'input':'change',()=>{
+      page=1;clearTimeout(searchTimer);historyRequest++;
+      searchTimer=setTimeout(refresh,id==='search'?250:0);
+    });
     $('refresh').addEventListener('click',refresh);
-    $('previous').addEventListener('click',()=>{page--;render();});$('next').addEventListener('click',()=>{page++;render();});
+    $('previous').addEventListener('click',()=>{page--;refresh();});
+    $('next').addEventListener('click',()=>{page++;refresh();});
+
     refresh();
     setInterval(()=>{if (!document.hidden&&records.some(job=>['pending','running'].includes(job.status))) refresh();},10000);
   </script>

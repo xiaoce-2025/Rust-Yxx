@@ -101,11 +101,12 @@ impl FileStore {
                 .fetch_one(&mut *tx)
                 .await?;
         if migrated == 0 {
+            sqlx::query("INSERT INTO note_credit_accounts(user_id,balance,updated_at)
+                SELECT id,json_extract(payload,'$.processing_quota'),? FROM users WHERE 1
+                ON CONFLICT(user_id) DO NOTHING")
+                .bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
+
             let now = Utc::now().to_rfc3339();
-            for user in self.users.read().await.values() {
-                sqlx::query("INSERT INTO note_credit_accounts(user_id,balance,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO NOTHING")
-                    .bind(user.id.to_string()).bind(user.processing_quota).bind(&now).execute(&mut *tx).await?;
-            }
             sqlx::query("INSERT INTO note_billing_migrations(version,enabled_at) VALUES(1,?)")
                 .bind(now)
                 .execute(&mut *tx)
@@ -124,18 +125,6 @@ impl FileStore {
                 .fetch_one(&self.db)
                 .await?,
         )
-    }
-    pub(super) async fn project_note_balance(&self, mut user: FileUser) -> Option<FileUser> {
-        match self.note_balance(user.id).await {
-            Ok(balance) => {
-                user.processing_quota = balance;
-                Some(user)
-            }
-            Err(error) => {
-                tracing::error!(user_id=%user.id,%error,"读取希元余额失败");
-                None
-            }
-        }
     }
     pub async fn queue_note_billing(&self, job: Uuid, user: Uuid) -> Result<(), StoreError> {
         sqlx::query("INSERT INTO note_job_billing(job_id,user_id,state,updated_at) VALUES(?,?,'QUEUED',?) ON CONFLICT(job_id) DO NOTHING")
@@ -227,15 +216,13 @@ impl FileStore {
         Ok(json!({"balance_before":before,"balance_after":after,"granted":amount}))
     }
 
-    /// Charge and final job state are committed together. The store mirror lock has the
-    /// same order as ordinary job updates; callers must release AppState's mirror first.
+    /// Charge and final job state are committed together.
     pub async fn charge_note_job(
         &self,
         mut job: PkuVideoJob,
         seconds: i64,
     ) -> Result<PkuVideoJob, StoreError> {
         let units = cost_units(seconds)?;
-        let mut jobs = self.pkuvideo_jobs.write().await;
         let mut tx = self.begin_note_transaction().await?;
         if let Some(row) = sqlx::query(
             "SELECT user_id FROM note_credit_ledger WHERE job_id=? AND event_type='JOB_CHARGE'",
@@ -247,15 +234,8 @@ impl FileStore {
             if row.get::<String, _>("user_id") != job.user_id.to_string() {
                 return Err("BillingOwnerMismatch".into());
             }
-            let payload: String =
-                sqlx::query_scalar("SELECT payload FROM collections WHERE name='pkuvideo_jobs'")
-                    .fetch_one(&mut *tx)
-                    .await?;
-            let persisted: std::collections::HashMap<Uuid, PkuVideoJob> =
-                serde_json::from_str(&payload)?;
-            let result = persisted.get(&job.id).cloned().ok_or("任务不存在")?;
+            let result = super::read_entity(&mut *tx, "pkuvideo_jobs", job.id).await?.ok_or("任务不存在")?;
             tx.commit().await?;
-            jobs.insert(result.id, result.clone());
             return Ok(result);
         }
         let row = sqlx::query("SELECT user_id,state FROM note_job_billing WHERE job_id=?")
@@ -298,16 +278,8 @@ impl FileStore {
         job.postprocessing = false;
         job.updated_at = now;
         job.finished_at = Some(now);
-        let path = format!("$.\"{}\"", job.id);
-        sqlx::query(
-            "UPDATE collections SET payload=json_set(payload,?,json(?)) WHERE name='pkuvideo_jobs'",
-        )
-        .bind(path)
-        .bind(serde_json::to_string(&job)?)
-        .execute(&mut *tx)
-        .await?;
+        super::write_entity(&mut tx, "pkuvideo_jobs", job.id, &job).await?;
         tx.commit().await?;
-        jobs.insert(job.id, job.clone());
         Ok(job)
     }
 
@@ -635,7 +607,7 @@ mod tests {
         assert_eq!(
             store
                 .get_all_pkuvideo_jobs()
-                .await
+                .await.unwrap()
                 .values()
                 .next()
                 .unwrap()

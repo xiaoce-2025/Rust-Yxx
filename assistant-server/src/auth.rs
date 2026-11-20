@@ -19,6 +19,9 @@ pub struct CurrentUser {
     pub email: String,
 }
 
+#[derive(Clone)]
+struct RequestIdentity(CurrentUser);
+
 #[async_trait]
 impl<S> FromRequestParts<S> for CurrentUser
 where
@@ -28,35 +31,27 @@ where
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        if let Some(identity) = parts.extensions.get::<RequestIdentity>() {
+            return Ok(identity.0.clone());
+        }
         let app_state = AppState::from_ref(state);
 
         let token = extract_session_token(&parts.headers).ok_or(ApiError::Unauthorized)?;
 
         let session_id = Uuid::from_str(&token).map_err(|_| ApiError::Unauthorized)?;
 
-        let session = app_state.store
-            .get_session(session_id)
-            .await
-            .ok_or(ApiError::Unauthorized)?;
-
-        if session.expires_at < Utc::now() {
-            return Err(ApiError::Unauthorized);
+        match app_state.store.authenticated_user(session_id).await {
+            Ok(Some(user)) => {
+                parts.extensions.insert(RequestIdentity(user.clone()));
+                Ok(user)
+            }
+            Ok(None) => Err(ApiError::Unauthorized),
+            Err(error) => {
+                tracing::error!(%error, "读取登录会话失败");
+                Err(ApiError::Internal("读取登录会话失败".into()))
+            }
         }
 
-        let user = app_state.store
-            .get_user(session.user_id)
-            .await
-            .ok_or(ApiError::Unauthorized)?;
-
-        if !user.is_active {
-            return Err(ApiError::Unauthorized);
-        }
-
-        Ok(Self {
-            id: user.id,
-            username: user.username,
-            email: user.email,
-        })
     }
 }
 

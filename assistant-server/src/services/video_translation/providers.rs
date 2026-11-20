@@ -40,7 +40,7 @@ impl Credentials {
             .cloned()
             .ok_or("原任务不存在")?;
         use crate::{services::video_jobs::merge_with_user_config, store::AiMode};
-        let config = state.store.get_config(source.user_id).await;
+        let config = state.store.get_config(source.user_id).await.map_err(|e| e.to_string())?;
         let settings = merge_with_user_config(&state.settings, &config);
         let user = config.as_ref().filter(|cfg| cfg.ai_mode != Some(AiMode::Server));
         Ok(Self {

@@ -39,7 +39,7 @@ async fn get_api_config(
     State(state): State<AppState>,
     current_user: CurrentUser,
 ) -> Result<Json<ApiConfigResponse>, ApiError> {
-    let config = state.store.get_config(current_user.id).await;
+    let config = state.store.get_config(current_user.id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     use crate::store::AiMode;
     let ai_mode = config.as_ref().map_or(AiMode::Server, |cfg| {
@@ -153,11 +153,11 @@ mod tests {
         let user = CurrentUser { id:Uuid::new_v4(),username:"test".into(),email:"test@example.com".into() };
         let request = serde_json::from_value(json!({"mimo_model":" custom-tts ","mimo_api_key":" test-user-secret "})).unwrap();
         let _ = update_api_config(State(state.clone()),user.clone(),Json(request)).await.unwrap();
-        let cfg = state.store.get_config(user.id).await.unwrap();
+        let cfg = state.store.get_config(user.id).await.unwrap().unwrap();
         assert_eq!(cfg.mimo_model.as_deref(),Some("custom-tts"));
         assert_eq!(cfg.mimo_api_key.as_deref(),Some("test-user-secret"));
         let reopened = crate::store::FileStore::new(temp.path().into()).await.unwrap();
-        assert_eq!(reopened.get_config(user.id).await.unwrap().mimo_model,cfg.mimo_model);
+        assert_eq!(reopened.get_config(user.id).await.unwrap().unwrap().mimo_model,cfg.mimo_model);
 
         let response = get_api_config(State(state.clone()),user.clone()).await.unwrap().0;
         let response = serde_json::to_value(response).unwrap();
@@ -177,7 +177,7 @@ mod tests {
 
         let partial = serde_json::from_value(json!({"deepseek_model":"old-client-model"})).unwrap();
         let _ = update_api_config(State(state.clone()),user.clone(),Json(partial)).await.unwrap();
-        assert_eq!(state.store.get_config(user.id).await.unwrap().mimo_api_key,cfg.mimo_api_key);
+        assert_eq!(state.store.get_config(user.id).await.unwrap().unwrap().mimo_api_key,cfg.mimo_api_key);
         let mut legacy = serde_json::to_value(&cfg).unwrap();
         legacy.as_object_mut().unwrap().remove("mimo_model");
         legacy.as_object_mut().unwrap().remove("mimo_api_key");

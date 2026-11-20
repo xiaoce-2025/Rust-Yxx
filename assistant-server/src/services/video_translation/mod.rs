@@ -117,8 +117,7 @@ pub async fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Str
 async fn save(entry: &Entry) -> Result<(), String> {
     let mut job = entry.job.lock().await;
     job.updated_at = Utc::now();
-    let payload = serde_json::to_string(&*job).map_err(|error| error.to_string())?;
-    entry.store.save_sidecar(&dir(job.id).join("manifest.json"), &payload).await
+    entry.store.save_translation_job(&job).await
 }
 
 async fn stage(entry: &Entry, name: &str) -> Result<(), String> {
@@ -332,6 +331,7 @@ pub async fn restore(state: &AppState) -> Result<(), String> {
         .iter()
         .filter_map(|path| path.strip_suffix("/manifest.json")?.parse().ok())
         .collect();
+    ids.extend(state.store.translation_job_ids().await?);
     let mut dirs = fs::read_dir(ROOT).await.map_err(|e| e.to_string())?;
     while let Some(item) = dirs.next_entry().await.map_err(|e| e.to_string())? {
         if let Ok(id) = Uuid::parse_str(&item.file_name().to_string_lossy()) {
@@ -341,7 +341,7 @@ pub async fn restore(state: &AppState) -> Result<(), String> {
         }
     }
     for id in ids {
-        let mut job: TranslationJob = match state.store.load_sidecar(&dir(id).join("manifest.json")).await {
+        let mut job: TranslationJob = match state.store.load_translation_job(id, &dir(id).join("manifest.json")).await {
             Ok(Some(job)) => job,
             Ok(None) => continue,
             Err(error) => {
@@ -427,7 +427,7 @@ pub async fn finish_remove(state: &AppState, id: Uuid) -> Result<(), String> {
             }
         }
     }
-    state.store.delete_sidecar(&target.join("manifest.json")).await?;
+    state.store.delete_translation_job(id, &target.join("manifest.json")).await?;
     state.video_translations.entries.lock().await.remove(&id);
     tracing::info!(target: "video_translation", job_id=%id, "翻译任务文件与缓存清理完成");
     Ok(())
@@ -930,7 +930,7 @@ mod tests {
         remove(&state, id).await.unwrap();
         assert!(dropped.load(Ordering::SeqCst));
         let tombstone: TranslationJob =
-            state.store.load_sidecar(&dir(id).join("manifest.json")).await.unwrap().unwrap();
+            state.store.load_translation_job(id, &dir(id).join("manifest.json")).await.unwrap().unwrap();
         assert_eq!(tombstone.status, "deleting");
         assert!(dir(id).exists());
         finish_remove(&state, id).await.unwrap();

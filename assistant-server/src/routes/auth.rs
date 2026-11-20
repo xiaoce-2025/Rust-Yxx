@@ -309,17 +309,14 @@ mod iaaa_tests {
         let store = FileStore::new(dir.path().into()).await.unwrap();
         assert!(store.resolve_iaaa_user(candidate()).await.unwrap().is_none());
         assert!(store.get_user_by_email(&candidate().email).await.is_none());
-        std::fs::write(dir.path().join("whitelist.json"),
-            r#"{"allowed_emails":["2400012345@stu.pku.edu.cn"]}"#).unwrap();
-        store.reload_whitelist().await.unwrap();
+        store.admin_save_whitelist(vec![candidate().email]).await.unwrap();
         let (first, second) = tokio::join!(store.resolve_iaaa_user(candidate()), store.resolve_iaaa_user(candidate()));
         let first = first.unwrap().unwrap();
         assert_eq!(first.id, second.unwrap().unwrap().id);
         assert_eq!(first.storage_quota, 3);
         assert_eq!(first.processing_quota, 1);
         assert!(first.iaaa_encrypted_password.is_none());
-        std::fs::write(dir.path().join("whitelist.json"), r#"{"allowed_emails":[]}"#).unwrap();
-        store.reload_whitelist().await.unwrap();
+        store.admin_save_whitelist(vec![]).await.unwrap();
         let mut replacement = candidate();
         replacement.password_hash = "replacement-hash".into();
         let resolved = store.resolve_iaaa_user(replacement).await.unwrap().unwrap();

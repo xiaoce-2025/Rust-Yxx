@@ -381,12 +381,7 @@ mod tests {
             )
             .await
             .is_err());
-        std::fs::write(
-            dir.path().join("whitelist.json"),
-            r#"{"allowed_emails":["student@example.com","new@example.com"]}"#,
-        )
-        .unwrap();
-        store.reload_whitelist().await.unwrap();
+        store.admin_save_whitelist(vec!["student@example.com".into(), "new@example.com".into()]).await.unwrap();
         let first = store
             .resolve_oidc_user(
                 "http://localhost:4100",
@@ -425,12 +420,7 @@ mod tests {
             )
             .await
             .is_err());
-        std::fs::write(
-            dir.path().join("whitelist.json"),
-            r#"{"allowed_emails":[]}"#,
-        )
-        .unwrap();
-        store.reload_whitelist().await.unwrap();
+        store.admin_save_whitelist(vec![]).await.unwrap();
         assert!(store
             .resolve_oidc_user(
                 "http://localhost:4100",
@@ -466,12 +456,7 @@ mod tests {
             })
             .await
             .unwrap();
-        std::fs::write(
-            dir.path().join("whitelist.json"),
-            r#"{"allowed_emails":["existing@example.com"]}"#,
-        )
-        .unwrap();
-        store.reload_whitelist().await.unwrap();
+        store.admin_save_whitelist(vec!["existing@example.com".into()]).await.unwrap();
         let resolved = store
             .resolve_oidc_user(
                 "http://localhost:4100",

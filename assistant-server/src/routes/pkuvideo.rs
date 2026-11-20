@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -66,6 +66,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/pkuvideo/jobs", get(job_list))
         .route("/api/pkuvideo/standalone-jobs", get(standalone_job_list))
         .route("/api/video-task-history", get(task_history))
+        .route("/api/video-task-history/page", get(task_history_page))
         .route("/api/pkuvideo/jobs/:id/reexecute", post(reexecute_step))
         .route("/api/pkuvideo/jobs/:id", delete(delete_job))
         .route("/api/pkuvideo/jobs/:id/pdf", get(download_pdf))
@@ -195,30 +196,53 @@ async fn job_list(
     State(state): State<AppState>,
     current_user: CurrentUser,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    let jobs = state.pkuvideo_jobs.read().await;
-    let mut user_jobs: Vec<PkuVideoJob> = jobs
-        .values()
-        .filter(|job| job.user_id == current_user.id)
-        .cloned()
-        .collect();
-
-    user_jobs.sort_by_key(|j|std::cmp::Reverse(j.created_at));
-    Ok(Json(user_jobs.iter().map(public_job).collect()))
+    let jobs = state.store.get_pkuvideo_jobs_by_user(current_user.id).await;
+    Ok(Json(jobs.iter().map(public_job).collect()))
 }
 
 async fn standalone_job_list(State(state):State<AppState>,current:CurrentUser)->Json<Vec<serde_json::Value>> {
-    let jobs=state.pkuvideo_jobs.read().await;
-    let mut jobs:Vec<_>=jobs.values().filter(|job|job.user_id==current.id && job.is_stored_standalone()).collect();
-    jobs.sort_by_key(|job|std::cmp::Reverse(job.created_at));
-    Json(jobs.into_iter().map(public_job).collect())
+    let jobs = state.store.standalone_jobs(current.id).await;
+    Json(jobs.iter().map(public_job).collect())
 }
 
 async fn task_history(State(state):State<AppState>,current:CurrentUser)->Result<Json<Vec<serde_json::Value>>,ApiError> {
-    let waits = super::acceleration::queue_waits(&state, current.id).await?;
-    let jobs=state.pkuvideo_jobs.read().await;
-    let mut jobs:Vec<_>=jobs.values().filter(|job|job.user_id==current.id).collect();
-    jobs.sort_by_key(|job|std::cmp::Reverse(job.created_at));
-    Ok(Json(jobs.into_iter().map(|job| {
+    let jobs = state.store.get_pkuvideo_jobs_by_user(current.id).await;
+    Ok(Json(history_records(&state, current.id, jobs).await?))
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    page: Option<i64>,
+    search: Option<String>,
+    source: Option<String>,
+    status: Option<String>,
+}
+
+async fn task_history_page(
+    State(state): State<AppState>, current: CurrentUser, Query(query): Query<HistoryQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let source = match query.source.as_deref() {
+        Some("course") => Some(true),
+        Some("direct") => Some(false),
+        _ => None,
+    };
+    let status = query.status.as_deref().filter(|value| *value != "all");
+    let search: String = query.search.unwrap_or_default().trim().to_lowercase().chars().take(160).collect();
+    let size = 25;
+    let (jobs, total, filtered, page) = state.store.task_history_page(
+        current.id, &search, source, status, query.page.unwrap_or(1), size,
+    ).await.map_err(|error| ApiError::Internal(error.to_string()))?;
+    let records = history_records(&state, current.id, jobs).await?;
+    Ok(Json(serde_json::json!({"records":records,"total":total,"filtered":filtered,"page":page,"page_size":size})))
+}
+
+async fn history_records(state: &AppState, user: Uuid, jobs: Vec<PkuVideoJob>) -> Result<Vec<serde_json::Value>, ApiError> {
+    let waits = if jobs.iter().any(|job| job.status == PipelineStatus::Pending) {
+        super::acceleration::queue_waits(state, user).await?
+    } else {
+        Default::default()
+    };
+    Ok(jobs.iter().map(|job| {
         let mut record=public_job(job);
         if let Some(record)=record.as_object_mut() {
             for key in ["pdf_path","tex_url","video_url","steps"] {record.remove(key);}
@@ -228,7 +252,7 @@ async fn task_history(State(state):State<AppState>,current:CurrentUser)->Result<
             record.insert("acceleration_used".into(), serde_json::json!(job.acceleration_used));
         }
         record
-    }).collect()))
+    }).collect())
 }
 
 // Never serialize internal URLs, keys or local filesystem paths to normal users.
@@ -487,7 +511,7 @@ mod history_tests {
         let direct_file=store.user_tex_path(owner,direct);
         crate::store::atomic_tex(&direct_file,b"\\section{Private direct note}").unwrap();
         let state=AppState::new(settings,store.clone());
-        *state.pkuvideo_jobs.write().await=store.get_all_pkuvideo_jobs().await;
+        *state.pkuvideo_jobs.write().await=store.get_all_pkuvideo_jobs().await.unwrap();
         let app=crate::routes::ui::routes(state.clone()).merge(routes()).with_state(state);
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base=format!("http://{}",listener.local_addr().unwrap());
@@ -509,6 +533,10 @@ mod history_tests {
             assert!(record.get("pdf_path").is_none()&&record.get("tex_url").is_none());
             assert!(!record.to_string().contains("SECRET_"));
         }
+        let paged:serde_json::Value=client.get(format!("{base}/api/video-task-history/page?page=2&source=course&status=succeeded")).bearer_auth(token).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(paged["page"],1);
+        assert_eq!(paged["filtered"],1);
+        assert_eq!(paged["records"][0]["id"],course.to_string());
         let list:Vec<serde_json::Value>=client.get(format!("{base}/api/pkuvideo/standalone-jobs")).bearer_auth(token).send().await.unwrap().json().await.unwrap();
         assert_eq!(list.len(),1);assert_eq!(list[0]["id"],direct.to_string());
         // A cleanup error must preserve the stored item and its reserved slot.

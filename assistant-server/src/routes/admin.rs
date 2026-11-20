@@ -1,5 +1,5 @@
 use axum::{
-    extract::{FromRequestParts, Path, Request, State},
+    extract::{FromRequestParts, Path, Query, Request, State},
     http::{header::CACHE_CONTROL, HeaderValue, Method},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
@@ -25,6 +25,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/admin", get(page))
         .route("/admin/", get(page))
         .route("/api/admin/data", get(management_data))
+        .route("/api/admin/summary", get(management_summary))
+        .route("/api/admin/list", get(management_list))
+        .route("/api/admin/related", get(management_related))
+        .route("/api/admin/whitelist/change", post(change_whitelist))
         .route("/api/admin/users/:id", post(update_user))
         .route("/api/admin/users/:id/note-credits/grant",post(grant_note_credits))
         .route("/api/admin/users/:id/note-credits/ledger",get(note_credit_ledger))
@@ -71,6 +75,65 @@ async fn require_admin(State(state): State<AppState>, request: Request, next: Ne
 
 async fn page() -> Html<String> { Html(tex_cache::page(operations_view::page(ta_ai::page()))) }
 
+async fn management_summary(current: CurrentUser) -> Json<Value> {
+    Json(json!({"current_user_id":current.id,"username":current.username}))
+}
+
+async fn management_list(
+    State(state): State<AppState>, Query(query): Query<crate::store::AdminList>,
+) -> Result<Json<Value>, ApiError> {
+    if !matches!(query.model.as_str(), "users" | "whitelist" | "notes" | "replay" | "translation")
+        || query.q.chars().count() > 300
+        || query.id.as_ref().is_some_and(|id| id.len() > 254)
+    {
+        return Err(ApiError::BadRequest("无效的管理列表参数".into()));
+    }
+    let value = state.store.admin_list(query, &state.settings.admin.user_ids).await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    if value.is_null() { return Err(ApiError::NotFound); }
+    Ok(Json(value))
+}
+
+#[derive(Deserialize)]
+struct RelatedQuery {
+    #[serde(default)] users: String,
+    #[serde(default)] jobs: String,
+}
+
+async fn management_related(State(state): State<AppState>, Query(q): Query<RelatedQuery>) -> Result<Json<Value>, ApiError> {
+    let parse = |value: &str| {
+        let ids: Vec<Uuid> = value.split(',').take(201).filter_map(|id| id.parse().ok()).collect();
+        (ids.len() <= 200).then_some(ids).ok_or(ApiError::BadRequest("无效的关联记录".into()))
+    };
+    state.store.admin_related(&parse(&q.users)?, &parse(&q.jobs)?).await
+        .map(Json).map_err(|error| ApiError::Internal(error.to_string()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WhitelistChange {
+    old: Option<String>,
+    email: Option<String>,
+    #[serde(default)] remove: Vec<String>,
+}
+
+async fn change_whitelist(State(state): State<AppState>, Json(mut input): Json<WhitelistChange>) -> Result<Json<Value>, ApiError> {
+    input.email = input.email.map(|email| email.trim().into());
+    let valid = |email: &str| email.len() <= 254 && !email.chars().any(char::is_whitespace)
+        && email.split('@').count() == 2 && !email.starts_with('@') && !email.ends_with('@');
+    if input.email.as_deref().is_some_and(|email| !valid(email))
+        || input.old.as_ref().is_some_and(|email| email.len() > 254)
+        || input.remove.len() > 200 || input.remove.iter().any(|email| email.len() > 254)
+        || (input.email.is_some() && !input.remove.is_empty())
+        || (input.email.is_none() && (input.remove.is_empty() || input.old.is_some()))
+    {
+        return Err(ApiError::BadRequest("无效的白名单操作".into()));
+    }
+    state.store.change_whitelist(input.old, input.email, input.remove).await?;
+    Ok(Json(json!({"success":true})))
+}
+
+
 async fn management_data(State(state): State<AppState>, current: CurrentUser) -> Result<Json<Value>,ApiError> {
     let last_logins=state.store.last_logins().await.map_err(|e|ApiError::Internal(e.to_string()))?;
     let counts = state.store.admin_session_counts().await;
@@ -86,10 +149,10 @@ async fn management_data(State(state): State<AppState>, current: CurrentUser) ->
     })).collect();
     // Deliberately project only operational metadata: no credentials, URLs or file paths.
     let mut jobs = Vec::new();
-    for job in state.store.get_all_pkuvideo_jobs().await.values() {
+    for job in state.store.get_all_pkuvideo_jobs().await.map_err(|error| ApiError::Internal(error.to_string()))?.values() {
         jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"notes","course_name":job.course_name,"course_date":job.course_date,"regenerate":job.regenerate,"result_source":job.result_source,"url_key":job.url_key,"status":job.status,"created_at":job.created_at,"updated_at":job.updated_at,"billing_state":job.billing_state,"charged_units":job.charged_units,"billing_duration_seconds":job.billing_duration_seconds,"failure_code":job.failure_code}));
     }
-    for job in state.store.get_all_pkuvideo_fw_jobs().await.values() {
+    for job in state.store.get_all_pkuvideo_fw_jobs().await.map_err(|error| ApiError::Internal(error.to_string()))?.values() {
         jobs.push(json!({"id":job.id,"user_id":job.user_id,"kind":"replay","status":job.status,"created_at":job.created_at,"updated_at":job.updated_at}));
     }
     let entries: Vec<_> = state.video_translations.entries.lock().await.values().cloned().collect();
@@ -199,6 +262,7 @@ mod tests {
         private_job.steps[0].status=crate::services::pkuvideo::PipelineStatus::Failed;
         private_job.steps[0].message="SECRET_INTERNAL_ERROR".into();
         private_job.error=Some("SECRET_ERROR".into());
+        store.insert_pkuvideo_job(private_job.clone()).await.unwrap();
         state.pkuvideo_jobs.write().await.insert(private_id,private_job);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}",listener.local_addr().unwrap());
@@ -208,6 +272,19 @@ mod tests {
         assert_eq!(client.get(&private_url).bearer_auth(tokens[0]).send().await.unwrap().status(),403);
         let safe_job=client.get(&private_url).bearer_auth(tokens[1]).send().await.unwrap().text().await.unwrap();
         assert!(!safe_job.contains("SECRET_") && !safe_job.contains("private.invalid"));
+        let list_url=format!("{base}/api/admin/list?model=users&role=member&page=99");
+        assert_eq!(client.get(&list_url).bearer_auth(tokens[1]).send().await.unwrap().status(),403);
+        let list: Value=client.get(&list_url).bearer_auth(tokens[0]).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(list["total"],1);
+        assert_eq!(list["page"],1);
+        assert_eq!(list["records"][0]["id"],member.to_string());
+        let note_url=format!("{base}/api/admin/list?model=notes&id={private_id}");
+        let note: Value=client.get(&note_url).bearer_auth(tokens[0]).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(note["id"],private_id.to_string());
+        assert!(!note.to_string().contains("SECRET_"));
+        let whitelist_url=format!("{base}/api/admin/list?model=whitelist&q=unknown");
+        let empty:Value=client.get(&whitelist_url).bearer_auth(tokens[0]).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(empty["total"],0);
         let cache_key=crate::store::tex_hash(b"shared-classroom-url");
         store.publish_tex(&cache_key,b"\\section{Shared classroom}",Uuid::new_v4()).await.unwrap();
         for path in ["/api/admin/tex-cache".to_string(),format!("/api/admin/tex-cache/{cache_key}"),format!("/api/admin/tex-cache/{cache_key}/tex")] {

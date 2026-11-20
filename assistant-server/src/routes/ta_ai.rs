@@ -71,7 +71,7 @@ pub(super) async fn start(
         "symbolic" => Mode::Symbolic,
         _ => return Err("请选择有效评分模式".into()),
     };
-    let config = state.store.get_config(user.id).await;
+    let config = state.store.get_config(user.id).await.map_err(|e| e.to_string())?;
     let merged = crate::services::video_jobs::merge_with_user_config(&state.settings, &config);
     let provider = Provider::new(&merged.deepseek)?;
     let annotation = state
@@ -327,14 +327,14 @@ async fn run_with_client(
     job.message = "正在读取提交并生成评分草稿".into();
     save(state, user.id, job).await?;
     let mut consecutive_failures = 0;
+    let drafts_path = draft_path(user.id, &job.course, &job.column)?;
     for attempt in attempts {
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let drafts = load_drafts(state, user.id, &job.course, &job.column).await?;
         if !can_grade(&attempt)
             || (!job.include_graded && is_graded(&attempt))
-            || drafts.iter().any(|d| d.attempt_id == attempt.id)
+            || state.store.has_grading_draft(&drafts_path, &attempt.id).await.map_err(|error| error.to_string())?
         {
             job.skipped += 1;
         } else {
@@ -382,11 +382,7 @@ async fn run_with_client(
                 }) {
                     return Err("提交或教学网成绩已变化，请重新核对".into());
                 }
-                let mut current = load_drafts(state, user.id, &job.course, &job.column).await?;
-                if current.iter().any(|d| d.attempt_id == attempt.id) {
-                    return Ok(false);
-                }
-                current.push(Draft {
+                let draft = Draft {
                     attempt_id: attempt.id.clone(),
                     student_id: attempt.user_id.clone(),
                     score,
@@ -395,9 +391,10 @@ async fn run_with_client(
                     updated_at: chrono::Utc::now().to_rfc3339(),
                     synced: false,
                     error: None,
-                });
-                persist(state, user.id, &job.course, &job.column, &current).await?;
-                Ok(true)
+                };
+                state.store.save_grading_drafts(
+                    &drafts_path, &[draft], false,
+                ).await.map(|count| count != 0).map_err(|error| error.to_string())
             }
             .await;
             match result {
@@ -597,9 +594,10 @@ mod tests {
             (1, 1, 1)
         );
         // Malformed/truncated model output still cleans uploaded files and never creates a zero grade.
-        persist(&state, user.id, "_c_1", "_h_1", &original)
-            .await
-            .unwrap();
+        state.store.discard_grading_drafts(
+            &draft_path(user.id, "_c_1", "_h_1").unwrap(),
+            &std::collections::HashSet::from(["_a_1"]),
+        ).await.unwrap();
         remote.lock().unwrap().bad_output = true;
         let mut j = job();
         run_with_client(

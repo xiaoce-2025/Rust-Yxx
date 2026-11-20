@@ -63,7 +63,7 @@ function pageElements() {
     if (!elements.has(id)) {
       elements.set(id, {
         value: '', style: {}, hidden: true, options: [], querySelectorAll: () => [],
-        add() {}, replaceChildren() {},
+        add() {}, replaceChildren(...children) { this.children = children; },
         addEventListener(event, handler) { this[event] = handler; }
       });
     }
@@ -102,23 +102,29 @@ test('home updates the remaining days, hours and minutes without another fetch',
     document: {
       getElementById,
       createElement(tag) {
-        const element = {classList: {toggle() {}}, append() {}};
+        const element = {append(...children) { this.children = children; }};
         if (tag === 'span') spans.push(element);
         return element;
       }
     },
     window: {},
     Date: class extends Date { static now() { return now; } },
-    setInterval(callback) { tick = callback; },
+    setInterval(callback) { tick = callback; return requests; },
+    clearInterval(id) { assert.equal(id, requests - 1); },
     async fetch() {
       requests++;
-      return {ok: true, json: async () => ({reminders: [
-        {title: '作业', course: '课程', completed: false, deadline: new Date(end).toISOString()}
-      ]})};
+      return {ok: true, json: async () => ({
+        refreshed_at: new Date(requests === 1 ? now : end).toISOString(),
+        refresh_failed: requests === 3,
+        reminders: [{title: '作业', course: '课程', deadline: new Date(end).toISOString()}]
+      })};
     }
   });
   await flush();
   assert.equal(spans[0].textContent, '1天2小时5分钟');
+  assert.equal(getElementById('assignment-list').children[0].children[1].textContent, '课程');
+  const initialUpdate = getElementById('assignment-update').textContent;
+  assert.match(initialUpdate, /^上次更新：/);
   now += 60000;
   tick();
   assert.equal(spans[0].textContent, '1天2小时4分钟');
@@ -126,6 +132,16 @@ test('home updates the remaining days, hours and minutes without another fetch',
   tick();
   assert.equal(spans[0].textContent, '已截止');
   assert.equal(requests, 1);
+  const refresh = getElementById('assignment-refresh');
+  await Promise.all([refresh.click(), refresh.click()]);
+  assert.equal(requests, 2);
+  const manualUpdate = getElementById('assignment-update').textContent;
+  assert.notEqual(manualUpdate, initialUpdate);
+  await refresh.click();
+  assert.equal(requests, 3);
+  assert.equal(getElementById('assignment-update').textContent, manualUpdate);
+  assert.equal(getElementById('assignment-status').textContent, '当前显示上次更新的作业');
+  assert.equal(getElementById('assignment-list').hidden, false);
 });
 
 test('replay loads stored lessons without checking the teaching session and prompts on refresh', async () => {

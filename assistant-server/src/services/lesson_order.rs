@@ -84,20 +84,16 @@ pub(super) async fn recover(store: &FileStore, dir: &Path) -> Result<(), String>
         }
     }
     let index_path = dir.join("index.json");
-    let current = match store.stored_sidecar(&index_path).await? {
-        Some(index) => Some(index),
-        None => match fs::read_to_string(&index_path) {
-            Ok(index) => Some(index),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.to_string()),
-        },
-    };
-    if journal.committed
-        || (journal.previous_index.as_deref() != Some(journal.index.as_str())
-            && current.as_deref() == Some(journal.index.as_str()))
-    {
+    // Old journals stored the full JSON and may have different indentation or key order.
+    let current = store.lesson_index_json(&index_path).await.map_err(|error| error.to_string())?;
+    let parse = |text: &str| serde_json::from_str::<serde_json::Value>(text).map_err(|error| error.to_string());
+    let published = parse(&journal.index)?;
+    let previous = journal.previous_index.as_deref().map(parse).transpose()?;
+    let current = current.as_deref().map(parse).transpose()?;
+    if journal.committed || (previous.as_ref() != Some(&published) && current.as_ref() == Some(&published)) {
         return cleanup(dir, &journal);
     }
+
     if journal.publishing && !journal.restoring {
         // First vacate every published destination, then restore the old names.
         for (index, movement) in journal.moves.iter().enumerate().rev() {
@@ -138,6 +134,15 @@ pub(super) async fn reconcile(
     single_filename(course_id)?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     recover(store, dir).await?;
+    let index_path = dir.join("index.json");
+    let previous_index = store.lesson_index_json(&index_path).await.map_err(|error| error.to_string())?;
+    let previous: Vec<LessonInfo> = previous_index.as_deref().map(serde_json::from_str)
+        .transpose().map_err(|error| error.to_string())?.unwrap_or_default();
+    if serde_json::to_value(&previous).map_err(|error| error.to_string())? !=
+        serde_json::to_value(old).map_err(|error| error.to_string())?
+    {
+        return Err("课节列表已变化，请刷新后重试".into());
+    }
     let mut ordered = new.clone();
     super::lesson_parser::sort_lessons(&mut ordered);
     let mut identities = HashSet::new();
@@ -217,16 +222,11 @@ pub(super) async fn reconcile(
     if ordered.len() > old.len() {
         moves.reverse();
     }
-    let index_path = dir.join("index.json");
     if moves.is_empty() {
-        store.save_sidecar(&index_path, &index).await?;
+        store.save_lesson_index(&index_path, &ordered).await.map_err(|error| error.to_string())?;
         *new = ordered;
         return Ok(());
     }
-    // Import the old index before any note moves so recovery can compare
-    // the exact database payload on either side of the commit.
-    let _: Option<Vec<LessonInfo>> = store.load_sidecar(&index_path).await?;
-    let previous_index = store.stored_sidecar(&index_path).await?;
     let transaction = dir.join(TRANSACTION);
     fs::create_dir(&transaction).map_err(|e| e.to_string())?;
     let mut journal = Journal {
@@ -264,7 +264,7 @@ pub(super) async fn reconcile(
                     .map_err(|e| format!("重命名课节笔记失败: {e}"))?;
             }
         }
-        store.save_sidecar(&index_path, &journal.index).await?;
+        store.save_lesson_index(&index_path, &ordered).await.map_err(|error| error.to_string())?;
         journal.committed = true;
         super::lesson_storage::atomic_write(
             &transaction.join("journal.json"),
@@ -331,7 +331,7 @@ mod tests {
             }
         }
         let saved: Vec<LessonInfo> =
-            store.load_sidecar(&dir.join("index.json")).await.unwrap().unwrap();
+            serde_json::from_str(&store.lesson_index_json(&dir.join("index.json")).await.unwrap().unwrap()).unwrap();
         assert_eq!(
             serde_json::to_value(saved).unwrap(),
             serde_json::to_value(lessons).unwrap()
@@ -404,6 +404,7 @@ mod tests {
         let legacy_name = "c_lesson_app_uuid.tex";
         fs::rename(temp.path().join(old_name), temp.path().join(legacy_name)).unwrap();
         legacy[1].tex_filename = Some(legacy_name.into());
+        store.save_lesson_index(&temp.path().join("index.json"), &legacy).await.unwrap();
         let mut repaired = legacy.clone();
         reconcile(&store, temp.path(), "c", &legacy, &mut repaired).await.unwrap();
         verify(&store, temp.path(), &repaired).await;

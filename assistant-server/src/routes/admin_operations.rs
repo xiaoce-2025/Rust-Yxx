@@ -164,7 +164,7 @@ pub(super) async fn notes(
     for job in state
         .store
         .get_all_pkuvideo_jobs()
-        .await
+        .await.map_err(|error| ApiError::Internal(error.to_string()))?
         .values()
         .filter(|j| j.course_id.is_none() && (j.notes_path.is_some() || j.pdf_path.is_some()))
     {

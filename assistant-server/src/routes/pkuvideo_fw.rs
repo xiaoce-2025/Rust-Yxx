@@ -141,17 +141,12 @@ async fn submit(
     job.progress = Some(progress_tracker.clone());
 
     state
-        .pkuvideo_fw_jobs
-        .write()
-        .await
-        .insert(job_id, job.clone());
-
-    // 保存到FileStore
-    state
         .store
-        .insert_pkuvideo_fw_job(job)
+        .insert_pkuvideo_fw_job(job.clone())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    state.pkuvideo_fw_jobs.write().await.insert(job_id, job);
 
     let state_for_task = state.clone();
     let state_for_error = state.clone();
@@ -169,15 +164,8 @@ async fn submit(
         )
         .await
         {
-            let mut jobs = state_for_error.pkuvideo_fw_jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = PipelineStatus::Failed;
-                job.updated_at = Utc::now();
-                job.error = Some(e);
-                let _ = state_for_error
-                    .store
-                    .update_pkuvideo_fw_job(job.clone())
-                    .await;
+            if let Err(error) = persist_download_status(&state_for_error, job_id, PipelineStatus::Failed, None, Some(e)).await {
+                tracing::error!(%job_id, %error, "保存回放下载失败状态失败");
             }
         }
     });
@@ -281,9 +269,9 @@ async fn submit_lesson_replay(
     let progress = job.progress.clone();
     state.pkuvideo_fw_jobs.write().await.insert(id, job);
     task::spawn(async move {
-        if let Some(job) = state.pkuvideo_fw_jobs.write().await.get_mut(&id) {
-            job.status = PipelineStatus::Running;
-            job.updated_at = Utc::now();
+        if let Err(error) = persist_download_status(&state, id, PipelineStatus::Running, None, None).await {
+            tracing::error!(job_id=%id, %error, "保存回放运行状态失败");
+            return;
         }
         let result: Result<PathBuf, String> = async {
             let dir = PathBuf::from("./data/pkuvideo_fw_jobs").join(id.to_string());
@@ -301,26 +289,15 @@ async fn submit_lesson_replay(
             Ok(path)
         }
         .await;
-        let mut jobs = state.pkuvideo_fw_jobs.write().await;
-        if let Some(job) = jobs.get_mut(&id) {
-            job.updated_at = Utc::now();
-            match result {
-                Ok(path) => {
-                    job.status = PipelineStatus::Succeeded;
-                    job.video_path = Some(path.to_string_lossy().into());
-                    if let Some(progress) = &job.progress {
-                        progress.store(100, std::sync::atomic::Ordering::SeqCst);
-                    }
-                }
-                Err(error) => {
-                    tracing::error!(target:"app_replay_download",job_id=%id,%error,"lesson replay download failed");
-                    job.status = PipelineStatus::Failed;
-                    job.error = Some(error);
-                }
+        let persisted = match result {
+            Ok(path) => persist_download_status(&state, id, PipelineStatus::Succeeded, Some(path), None).await,
+            Err(error) => {
+                tracing::error!(target:"app_replay_download",job_id=%id,%error,"lesson replay download failed");
+                persist_download_status(&state, id, PipelineStatus::Failed, None, Some(error)).await
             }
-            if let Err(error) = state.store.update_pkuvideo_fw_job(job.clone()).await {
-                tracing::error!(job_id=%id,%error,"saving replay job failed");
-            }
+        };
+        if let Err(error) = persisted {
+            tracing::error!(job_id=%id, %error, "保存回放结果失败");
         }
     });
     Ok(super::operations::job_response(id, Json(SubmitResponse {
@@ -474,6 +451,25 @@ fn validate_input(video_url: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+async fn persist_download_status(
+    state: &AppState,
+    id: Uuid,
+    status: PipelineStatus,
+    path: Option<PathBuf>,
+    error: Option<String>,
+) -> Result<(), String> {
+    let mut jobs = state.pkuvideo_fw_jobs.write().await;
+    let job = jobs.get_mut(&id).ok_or("回放任务不存在")?;
+    let mut next = job.clone();
+    next.status = status;
+    next.updated_at = Utc::now();
+    next.video_path = path.map(|path| path.to_string_lossy().into_owned());
+    next.error = error;
+    state.store.update_pkuvideo_fw_job(next.clone()).await.map_err(|error| error.to_string())?;
+    *job = next;
+    Ok(())
+}
+
 async fn run_download_job(
     state: AppState,
     job_id: Uuid,
@@ -484,14 +480,7 @@ async fn run_download_job(
     manual_key: Option<String>,
     progress: Arc<AtomicU8>,
 ) -> Result<(), String> {
-    // 标记为运行中
-    {
-        let mut jobs = state.pkuvideo_fw_jobs.write().await;
-        if let Some(job) = jobs.get_mut(&job_id) {
-            job.status = PipelineStatus::Running;
-            job.updated_at = Utc::now();
-        }
-    }
+    persist_download_status(&state, job_id, PipelineStatus::Running, None, None).await?;
 
     let base_dir = PathBuf::from("./data/pkuvideo_fw_jobs");
     let result = pkuvideo_fw::download_video_only(
@@ -509,31 +498,8 @@ async fn run_download_job(
     .await;
 
     match result {
-        Ok(video_path) => {
-            let mut jobs = state.pkuvideo_fw_jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = PipelineStatus::Succeeded;
-                job.updated_at = Utc::now();
-                job.video_path = Some(video_path.to_string_lossy().to_string());
-                let _ = state.store.update_pkuvideo_fw_job(job.clone()).await;
-            }
-            Ok(())
-        }
-        Err(err) => {
-            let message = if let Some((_, msg)) = err.split_once(';') {
-                msg.to_string()
-            } else {
-                err.clone()
-            };
-            let mut jobs = state.pkuvideo_fw_jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = PipelineStatus::Failed;
-                job.updated_at = Utc::now();
-                job.error = Some(message.clone());
-                let _ = state.store.update_pkuvideo_fw_job(job.clone()).await;
-            }
-            Err(message)
-        }
+        Ok(path) => persist_download_status(&state, job_id, PipelineStatus::Succeeded, Some(path), None).await,
+        Err(error) => Err(error.split_once(';').map_or(error.as_str(), |(_, message)| message).to_owned()),
     }
 }
 

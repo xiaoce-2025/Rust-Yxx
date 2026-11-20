@@ -1,8 +1,7 @@
 //! Standalone file slots are independent of course_data and immutable task history.
-use super::{write_collection, FileStore, FileUser, StoreError};
+use super::{read_entity, write_entity, FileStore, FileUser, StoreError};
 use crate::services::pkuvideo::{PipelineStatus, PkuVideoJob};
 use chrono::Utc;
-use std::collections::HashMap;
 use uuid::Uuid;
 
 impl FileStore {
@@ -10,81 +9,42 @@ impl FileStore {
         if job.course_id.is_some() {
             return Err("COURSE_JOB".into());
         }
-        let mut users = self.users.write().await;
-        let mut jobs = self.pkuvideo_jobs.write().await;
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        let payload: String =
-            sqlx::query_scalar("SELECT payload FROM collections WHERE name='pkuvideo_jobs'")
-                .fetch_one(&mut *tx)
-                .await?;
-        let mut persisted: HashMap<Uuid, PkuVideoJob> = serde_json::from_str(&payload)?;
-        if persisted.contains_key(&job.id) {
+        let mut tx = self.begin_note_transaction().await?;
+        let duplicate: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pkuvideo_jobs WHERE id=?)")
+            .bind(job.id.to_string()).fetch_one(&mut *tx).await?;
+        if duplicate {
             return Err("DUPLICATE_JOB".into());
         }
-        if persisted
-            .values()
-            .filter(|j| j.user_id == job.user_id && j.is_stored_standalone())
-            .count()
-            >= 3
-        {
+        let slots: i64 = sqlx::query_scalar("SELECT count(*) FROM pkuvideo_jobs WHERE owner=? AND standalone=1")
+            .bind(job.user_id.to_string()).fetch_one(&mut *tx).await?;
+        if slots >= 3 {
             return Err("STANDALONE_STORAGE_FULL".into());
         }
-        let payload: String =
-            sqlx::query_scalar("SELECT payload FROM collections WHERE name='users'")
-                .fetch_one(&mut *tx)
-                .await?;
-        let mut updated_users: HashMap<Uuid, FileUser> = serde_json::from_str(&payload)?;
-        let user = updated_users
-            .get_mut(&job.user_id)
-            .ok_or("OWNER_MISMATCH")?;
+        let mut user: FileUser = read_entity(&mut *tx, "users", job.user_id).await?.ok_or("OWNER_MISMATCH")?;
         if user.storage_quota <= 0 {
             return Err("STORAGE_QUOTA_EXCEEDED".into());
         }
         user.storage_quota -= 1;
         user.updated_at = Utc::now();
-        persisted.insert(job.id, job.clone());
-        write_collection(&mut tx, "users", &serde_json::to_string(&updated_users)?).await?;
-        write_collection(
-            &mut tx,
-            "pkuvideo_jobs",
-            &serde_json::to_string(&persisted)?,
-        )
-        .await?;
+        write_entity(&mut tx, "users", user.id, &user).await?;
+        write_entity(&mut tx, "pkuvideo_jobs", job.id, &job).await?;
         tx.commit().await?;
-        *users = updated_users;
-        *jobs = persisted;
         Ok(())
     }
 
-    pub async fn archive_standalone_job(
-        &self,
-        id: Uuid,
-        owner: Uuid,
-    ) -> Result<PkuVideoJob, StoreError> {
-        let mut users = self.users.write().await;
-        let mut jobs = self.pkuvideo_jobs.write().await;
-        let mut tx = self.db.begin_with("BEGIN IMMEDIATE").await?;
-        let payload: String =
-            sqlx::query_scalar("SELECT payload FROM collections WHERE name='pkuvideo_jobs'")
-                .fetch_one(&mut *tx)
-                .await?;
-        let mut persisted: HashMap<Uuid, PkuVideoJob> = serde_json::from_str(&payload)?;
-        let job = persisted.get_mut(&id).ok_or("JOB_NOT_FOUND")?;
+    pub async fn archive_standalone_job(&self, id: Uuid, owner: Uuid) -> Result<PkuVideoJob, StoreError> {
+        let mut tx = self.begin_note_transaction().await?;
+        let mut job: PkuVideoJob = read_entity(&mut *tx, "pkuvideo_jobs", id).await?.ok_or("JOB_NOT_FOUND")?;
         if job.user_id != owner {
             return Err("OWNER_MISMATCH".into());
         }
         if job.course_id.is_some() {
             return Err("COURSE_JOB".into());
         }
-        if matches!(
-            job.status,
-            PipelineStatus::Pending | PipelineStatus::Running
-        ) {
+        if matches!(job.status, PipelineStatus::Pending | PipelineStatus::Running) {
             return Err("ACTIVE_JOB".into());
         }
         if job.artifacts_deleted_at.is_some() {
-            let job = job.clone();
-            tx.commit().await?;
             return Ok(job);
         }
         job.artifacts_deleted_at = Some(Utc::now());
@@ -92,26 +52,13 @@ impl FileStore {
         job.transcript_path = None;
         job.pdf_path = None;
         job.postprocessing = false;
-        let result = job.clone();
-        let payload: String =
-            sqlx::query_scalar("SELECT payload FROM collections WHERE name='users'")
-                .fetch_one(&mut *tx)
-                .await?;
-        let mut updated_users: HashMap<Uuid, FileUser> = serde_json::from_str(&payload)?;
-        let user = updated_users.get_mut(&owner).ok_or("OWNER_MISMATCH")?;
+        let mut user: FileUser = read_entity(&mut *tx, "users", owner).await?.ok_or("OWNER_MISMATCH")?;
         user.storage_quota = user.storage_quota.checked_add(1).ok_or("StorageOverflow")?;
         user.updated_at = Utc::now();
-        write_collection(&mut tx, "users", &serde_json::to_string(&updated_users)?).await?;
-        write_collection(
-            &mut tx,
-            "pkuvideo_jobs",
-            &serde_json::to_string(&persisted)?,
-        )
-        .await?;
+        write_entity(&mut tx, "users", owner, &user).await?;
+        write_entity(&mut tx, "pkuvideo_jobs", job.id, &job).await?;
         tx.commit().await?;
-        *users = updated_users;
-        *jobs = persisted;
-        Ok(result)
+        Ok(job)
     }
 }
 #[cfg(test)]
@@ -165,7 +112,7 @@ mod tests {
         assert_eq!(
             store
                 .get_all_pkuvideo_jobs()
-                .await
+                .await.unwrap()
                 .values()
                 .filter(|j| j.is_stored_standalone())
                 .count(),

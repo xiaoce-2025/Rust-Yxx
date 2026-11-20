@@ -115,11 +115,11 @@ impl AppState {
         state
     }
 
-    pub async fn load_pkuvideo_jobs(&self) {
+    pub async fn load_pkuvideo_jobs(&self) -> Result<(), crate::store::StoreError> {
         use crate::services::{
             pkuvideo::PipelineStatus, prepared_media::PreparedMedia, video_jobs::enqueue_prepared_job,
         };
-        let mut jobs = self.store.get_all_pkuvideo_jobs().await;
+        let mut jobs = self.store.get_all_pkuvideo_jobs().await?;
         let mut accelerated = Vec::new();
         for job in jobs.values_mut() {
             if job.status == PipelineStatus::Pending
@@ -241,11 +241,22 @@ impl AppState {
                 task_id:job.id, user_id:job.user_id, target, result:Ok(()),
             }).await { handler.failed(job.id,error).await; }
         }
+        Ok(())
     }
 
-    pub async fn load_pkuvideo_fw_jobs(&self) {
-        let jobs = self.store.get_all_pkuvideo_fw_jobs().await;
-        let mut in_memory_jobs = self.pkuvideo_fw_jobs.write().await;
-        *in_memory_jobs = jobs;
+    pub async fn load_pkuvideo_fw_jobs(&self) -> Result<(), crate::store::StoreError> {
+        use crate::services::pkuvideo_fw::PipelineStatus;
+
+        let mut jobs = self.store.get_all_pkuvideo_fw_jobs().await?;
+        for job in jobs.values_mut() {
+            if matches!(job.status, PipelineStatus::Pending | PipelineStatus::Running) {
+                job.status = PipelineStatus::Failed;
+                job.updated_at = Utc::now();
+                job.error = Some("服务重启中断下载，请重新提交".into());
+                self.store.update_pkuvideo_fw_job(job.clone()).await?;
+            }
+        }
+        *self.pkuvideo_fw_jobs.write().await = jobs;
+        Ok(())
     }
 }

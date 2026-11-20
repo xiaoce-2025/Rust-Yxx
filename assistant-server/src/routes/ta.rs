@@ -283,11 +283,7 @@ async fn load_drafts(
     course: &str,
     column: &str,
 ) -> Result<Vec<Draft>, String> {
-    Ok(state
-        .store
-        .load_sidecar::<Vec<Draft>>(&draft_path(user, course, column)?)
-        .await?
-        .unwrap_or_default())
+    state.store.grading_drafts(&draft_path(user, course, column)?).await.map_err(|error| error.to_string())
 }
 async fn persist(
     state: &AppState,
@@ -296,11 +292,8 @@ async fn persist(
     column: &str,
     drafts: &[Draft],
 ) -> Result<(), String> {
-    let payload = serde_json::to_string(drafts).map_err(|_| "无法保存评分草稿")?;
-    state
-        .store
-        .save_sidecar(&draft_path(user, course, column)?, &payload)
-        .await
+    state.store.save_grading_drafts(&draft_path(user, course, column)?, drafts, true)
+        .await.map(|_| ()).map_err(|error| error.to_string())
 }
 
 fn csrf_token(headers: &HeaderMap, user: uuid::Uuid) -> Option<String> {
@@ -494,15 +487,8 @@ async fn mutate_with_client(
         if selected.is_empty() {
             return Err("请先选择要丢弃的草稿".into());
         }
-        drafts.retain(|d| !selected.contains(d.attempt_id.as_str()) || d.synced);
-        persist(
-            state,
-            user.id,
-            &selection.course,
-            &selection.column,
-            &drafts,
-        )
-        .await?;
+        state.store.discard_grading_drafts(&draft_path(user.id, &selection.course, &selection.column)?, &selected)
+            .await.map_err(|error| error.to_string())?;
         selection.review = "1".into();
         return Ok("已丢弃选中的本地草稿".into());
     }
@@ -563,7 +549,7 @@ async fn mutate_with_client(
                 user.id,
                 &selection.course,
                 &selection.column,
-                &drafts,
+                std::slice::from_ref(&drafts[i]),
             )
             .await?;
             let d = &drafts[i];
@@ -589,7 +575,7 @@ async fn mutate_with_client(
                         user.id,
                         &selection.course,
                         &selection.column,
-                        &drafts,
+                        std::slice::from_ref(&drafts[i]),
                     )
                     .await?;
                     selection.review = "1".into();
@@ -601,7 +587,7 @@ async fn mutate_with_client(
                 user.id,
                 &selection.course,
                 &selection.column,
-                &drafts,
+                std::slice::from_ref(&drafts[i]),
             )
             .await?;
         }
@@ -675,10 +661,10 @@ async fn mutate_with_client(
             return Err("这份提交有结果未确认的登分，请先核对教学网并丢弃旧草稿".into());
         }
     }
+    let mut edits = Vec::with_capacity(selected.len());
     for &(id, _) in &selected {
         let a = attempts.iter().find(|a| a.id == id).unwrap();
-        drafts.retain(|d| d.attempt_id != id);
-        drafts.push(Draft {
+        edits.push(Draft {
             attempt_id: id.into(),
             student_id: a.user_id.clone(),
             score,
@@ -689,13 +675,7 @@ async fn mutate_with_client(
             error: None,
         });
     }
-    persist(
-        state,
-        user.id,
-        &selection.course,
-        &selection.column,
-        &drafts,
-    )
+    persist(state, user.id, &selection.course, &selection.column, &edits)
     .await?;
     if action == "save_single_next" {
         let next = field(form, "next");
