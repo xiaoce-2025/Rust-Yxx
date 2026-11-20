@@ -62,6 +62,10 @@ pub struct FileUser {
     pub iaaa_encrypted_password: Option<String>,
     #[serde(default)]
     pub iaaa_public_key: Option<String>,
+    #[serde(default)]
+    pub iaaa_key_version: Option<String>,
+    #[serde(default)]
+    pub iaaa_username: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -105,8 +105,7 @@ async fn submit_api(
         state,
         user.id,
         req.video_url,
-        req.pku_auth_one,
-        req.pku_auth_two,
+        Some((req.pku_auth_one, req.pku_auth_two)),
         req.manual_key,
         req.regenerate,
     )
@@ -130,8 +129,7 @@ async fn submit_web(
         state,
         current_user.id,
         req.video_url,
-        req.pku_auth_one,
-        req.pku_auth_two,
+        Some((req.pku_auth_one, req.pku_auth_two)),
         req.manual_key,
         req.regenerate,
     )
@@ -292,10 +290,7 @@ async fn reexecute_step(
     if matches!(job.status, PipelineStatus::Pending | PipelineStatus::Running) || job.course_id.is_some() {
         return Err(ApiError::Conflict("活动任务不能重执行；课节任务请通过课节重新处理接口提交".into()));
     }
-    let user = state.store.get_user(current_user.id).await.ok_or(ApiError::Unauthorized)?;
-    let job_id = enqueue_job(state, current_user.id, job.video_url,
-        user.email.split('@').next().unwrap_or_default().into(),
-        user.iaaa_encrypted_password.unwrap_or_default(), req.manual_key, true).await?;
+    let job_id = enqueue_job(state, current_user.id, job.video_url, None, req.manual_key, true).await?;
     Ok(super::operations::job_response(job_id, Json(serde_json::json!({"success":true,"job_id":job_id,"status":"queued",
         "status_url":format!("/api/pkuvideo/jobs/{job_id}"),"message":"已加入重新生成队列"}))))
 }
@@ -361,8 +356,7 @@ async fn enqueue_job(
     state: AppState,
     user_id: Uuid,
     video_url: String,
-    pku_auth_one: String,
-    pku_auth_two: String,
+    submitted_credentials: Option<(String, String)>,
     manual_key: Option<String>,
     regenerate: bool,
 ) -> Result<Uuid, ApiError> {
@@ -373,7 +367,9 @@ async fn enqueue_job(
     let email_student_id = user.email.split('@').next().unwrap_or("").trim();
     
     // 校验 IAAA 账号与邮箱学号是否匹配
-    if !pku_auth_one.trim().is_empty() && email_student_id != pku_auth_one.trim() {
+    if submitted_credentials.as_ref().is_some_and(|(account, _)| {
+        !account.trim().is_empty() && email_student_id != account.trim()
+    }) {
         return Err(ApiError::BadRequest("IAAA账号与注册邮箱学号不匹配，请检查".to_string()));
     }
     
@@ -382,8 +378,14 @@ async fn enqueue_job(
         return Err(ApiError::Forbidden("储存资源限额不足，请删除已完成的任务释放空间".to_string()));
     }
 
-    let media = crate::services::prepared_media::prepare_teaching(&video_url, &pku_auth_one,
-        &pku_auth_two, &state.login_cache, manual_key.as_deref()).await.map_err(ApiError::BadRequest)?;
+    let media = match submitted_credentials {
+        Some((account, password)) => crate::services::prepared_media::prepare_teaching(
+            &video_url, &account, &password, &state.login_cache, manual_key.as_deref(),
+        ).await,
+        None => crate::services::prepared_media::prepare_bound_teaching(
+            &state, &user, &video_url, manual_key.as_deref(),
+        ).await,
+    }.map_err(ApiError::BadRequest)?;
 
     let job_id = Uuid::new_v4();
     let artifacts_dir = format!("./data/pkuvideo_jobs/{job_id}");
@@ -498,7 +500,7 @@ mod history_tests {
         })).unwrap();
         let store=Arc::new(FileStore::new(temp.path().into()).await.unwrap());
         let owner=Uuid::new_v4();let token=Uuid::new_v4();let stranger=Uuid::new_v4();
-        store.insert_user(FileUser{id:owner,username:"owner".into(),email:"owner@example.invalid".into(),password_hash:String::new(),is_active:true,created_at:Utc::now(),updated_at:Utc::now(),storage_quota:3,processing_quota:10,processing_priority:5,iaaa_encrypted_password:None,iaaa_public_key:None}).await.unwrap();
+        store.insert_user(FileUser{id:owner,username:"owner".into(),email:"owner@example.invalid".into(),password_hash:String::new(),is_active:true,created_at:Utc::now(),updated_at:Utc::now(),storage_quota:3,processing_quota:10,processing_priority:5,iaaa_encrypted_password:None,iaaa_public_key: None, iaaa_key_version: None, iaaa_username: None}).await.unwrap();
         store.insert_session(FileUserSession{session_id:token,user_id:owner,expires_at:Utc::now()+Duration::hours(1),created_at:Utc::now(),user_agent:None,ip_address:None}).await.unwrap();
         let direct=Uuid::new_v4();let course=Uuid::new_v4();let deleted=Uuid::new_v4();let foreign=Uuid::new_v4();
         for (id,user,course_id,removed) in [(direct,owner,None,false),(course,owner,Some("course"),false),(deleted,owner,None,true),(foreign,stranger,None,false)] {

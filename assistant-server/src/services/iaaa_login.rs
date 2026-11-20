@@ -8,6 +8,42 @@ use crate::error::ApiError;
 const IAAA: &str = "https://iaaa.pku.edu.cn/iaaa/";
 const REDIRECT: &str = "http://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin";
 
+pub(crate) const PUBLIC_KEY_URL: &str = "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do";
+pub(crate) const BINDING_EXPIRED: &str = "IAAA 公钥已更新，原绑定已失效，请重新绑定";
+
+pub(crate) struct PublicKey {
+    pub key: String,
+    pub version: String,
+}
+
+impl PublicKey {
+    pub fn parse(response: &Value) -> Result<Self, String> {
+        let key = response.get("key").and_then(Value::as_str)
+            .filter(|key| response["success"] == true && !key.trim().is_empty())
+            .ok_or("无法获取 IAAA 公钥，请稍后重试")?;
+        Ok(Self { key: key.to_owned(), version: key_version(response)? })
+    }
+
+    pub async fn fetch() -> Result<Self, String> {
+        let response = reqwest::Client::new().get(PUBLIC_KEY_URL)
+            .timeout(Duration::from_secs(10)).send().await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|_| "获取 IAAA 公钥失败，请稍后重试")?;
+        Self::parse(&response.json().await.map_err(|_| "IAAA 公钥响应无效，请稍后重试")?)
+    }
+
+    pub fn check_binding(&self, key: Option<&str>, version: Option<&str>) -> Result<(), String> {
+        // Older records have only the PEM. Whitespace differences do not change the RSA key.
+        if key.is_some_and(|key| key.split_whitespace().flat_map(str::chars)
+            .eq(self.key.split_whitespace().flat_map(str::chars)))
+            && version.is_none_or(|version| version == self.version.as_str()) {
+            Ok(())
+        } else {
+            Err(BINDING_EXPIRED.into())
+        }
+    }
+}
+
 /// Preserve the upstream key version exactly, including numeric versions and zero.
 pub(crate) fn key_version(key: &Value) -> Result<String, String> {
     match key.get("version") {
@@ -43,11 +79,8 @@ pub async fn verify(username: &str, password: &str) -> Result<(), ApiError> {
         .send().await.and_then(reqwest::Response::error_for_status)
         .map_err(|source| upstream_error("获取公钥（getPublicKey.do）", source))?
         .json().await.map_err(|source| upstream_error("解析公钥响应", source))?;
-    let version = key_version(&key).map_err(ApiError::Internal)?;
-    let key = key.get("key").and_then(Value::as_str)
-        .filter(|key| !key.is_empty())
-        .ok_or_else(|| ApiError::Internal("无法获取 IAAA 公钥，请稍后重试".into()))?;
-    let encrypted = super::app_replay::encrypt_binding_password(key, password)
+    let key = PublicKey::parse(&key).map_err(ApiError::Internal)?;
+    let encrypted = super::app_replay::encrypt_binding_password(&key.key, password)
         .map_err(|_| ApiError::Internal("IAAA 密码加密失败，请稍后重试".into()))?;
     tracing::debug!(host="iaaa.pku.edu.cn", stage="校验凭据", "IAAA public key loaded; submitting encrypted credentials");
     let result: Value = client.post(format!("{IAAA}oauthlogin.do"))
@@ -55,7 +88,7 @@ pub async fn verify(username: &str, password: &str) -> Result<(), ApiError> {
         .header("Origin", "https://iaaa.pku.edu.cn")
         .header("X-Requested-With", "XMLHttpRequest")
         .form(&[("appid", "blackboard"), ("userName", username), ("password", encrypted.as_str()),
-            ("keyVersion", version.as_str()), ("randCode", ""), ("smsCode", ""), ("otpCode", ""),
+            ("keyVersion", key.version.as_str()), ("randCode", ""), ("smsCode", ""), ("otpCode", ""),
             ("remTrustChk", "false"), ("redirUrl", REDIRECT)])
         .send().await.and_then(reqwest::Response::error_for_status)
         .map_err(|source| upstream_error("校验账号密码（oauthlogin.do）", source))?
@@ -140,6 +173,21 @@ mod tests {
         for key in [json!({}), json!({"version":null}), json!({"version":" "}), json!({"version":true})] {
             assert!(key_version(&key).is_err());
         }
+    }
+
+    #[test]
+    fn binding_requires_the_same_pem_and_any_recorded_version() {
+        let key = PublicKey::parse(&json!({"success": true, "key":"PEM\nbody", "version":"202512"})).unwrap();
+        assert!(key.check_binding(Some("PEM\r\nbo\ndy"), Some("202512")).is_ok());
+        assert!(key.check_binding(Some("PEM\nbody"), None).is_ok());
+        for (pem, version) in [
+            (Some("PEM\nbody"), Some("202601")),
+            (Some("PEM\nrotated"), Some("202512")),
+            (None, None),
+        ] {
+            assert_eq!(key.check_binding(pem, version).unwrap_err(), BINDING_EXPIRED);
+        }
+        assert!(PublicKey::parse(&json!({"success":false, "key":"PEM", "version":"202512"})).is_err());
     }
 
     #[test]

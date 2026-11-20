@@ -342,6 +342,8 @@ mod tests {
                 processing_priority: 5,
                 iaaa_encrypted_password: None,
                 iaaa_public_key: None,
+                iaaa_key_version: None,
+                iaaa_username: None,
             })
             .await
             .unwrap();
@@ -559,6 +561,8 @@ mod tests {
             processing_priority: 5,
             iaaa_encrypted_password: None,
             iaaa_public_key: None,
+            iaaa_key_version: None,
+            iaaa_username: None,
         };
         std::fs::write(
             temp.path().join("users.json"),

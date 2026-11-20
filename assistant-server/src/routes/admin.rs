@@ -248,7 +248,9 @@ mod tests {
             store.insert_user(FileUser {
                 id, username: id.to_string(), email: format!("{}@example.com",if id==member{note_username.clone()}else{id.to_string()}), password_hash:"SECRET_HASH".into(),
                 is_active:true, created_at:Utc::now(), updated_at:Utc::now(), processing_priority:5,
-                storage_quota:3, processing_quota:1, iaaa_encrypted_password:Some("SECRET_IAAA".into()), iaaa_public_key:None,
+                storage_quota:3, processing_quota:1, iaaa_encrypted_password:Some("SECRET_IAAA".into()), iaaa_public_key: None,
+                iaaa_key_version: None,
+                iaaa_username: None,
             }).await.unwrap();
             let token = Uuid::new_v4(); tokens.push(token);
             store.insert_session(FileUserSession {

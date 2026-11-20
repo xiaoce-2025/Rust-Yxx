@@ -216,7 +216,7 @@ pub(crate) fn site_page(source: &str, active_path: &str) -> Html<String> {
         &format!("href=\"{active_path}\" aria-current=\"page\""),
         1,
     );
-    let teaching_script = if matches!(active_path, "/" | "/ta" | "/pkuvideo_sequence") {
+    let teaching_script = if matches!(active_path, "/" | "/ta" | "/pkuvideo_sequence" | "/pkuvideo" | "/pkuvideo_fw") {
         "<script src=\"/teaching-session.js\"></script>"
     } else { "" };
     Html(source
@@ -308,6 +308,8 @@ mod tests {
                 id, username: id.to_string(), email: format!("{id}@example.com"), password_hash: "unused".into(),
                 is_active: active, created_at: now, updated_at: now, processing_priority: 5,
                 storage_quota: 3, processing_quota: 1, iaaa_encrypted_password: None, iaaa_public_key: None,
+                iaaa_key_version: None,
+                iaaa_username: None,
             }).await.unwrap();
             let token = Uuid::new_v4();
             state.store.insert_session(FileUserSession {

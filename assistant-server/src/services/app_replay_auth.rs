@@ -292,6 +292,8 @@ impl AppAuth {
         {
             return Err("请填写统一认证账号和密码".into());
         }
+        let key = super::iaaa_login::PublicKey::parse(&self.endpoint("getPublicKey.do", &[], None).await?)?;
+        let encrypted = login_password(&key, request)?;
         let policy = self.prepare(account).await?;
         for (required, field, message) in [
             (
@@ -310,19 +312,11 @@ impl AppAuth {
                 return Err(message.into());
             }
         }
-        // Fetch the live key each time; legacy ciphertext is usable only for that exact key.
-        let key = self.endpoint("getPublicKey.do", &[], None).await?;
-        if key["success"] != true {
-            return Err("无法获取 IAAA RSA 公钥".into());
-        }
-        let public_key = key["key"].as_str().ok_or("IAAA 未返回公钥")?;
-        let version = super::iaaa_login::key_version(&key)?;
-        let encrypted = login_password(public_key, request)?;
         let mut form: BTreeMap<String, String> = [
             ("appid", "resource"),
             ("userName", account),
             ("password", encrypted.as_str()),
-            ("keyVersion", version.as_str()),
+            ("keyVersion", key.version.as_str()),
             ("randCode", request["randCode"].as_str().unwrap_or("")),
             ("smsCode", request["smsCode"].as_str().unwrap_or("")),
             ("otpCode", request["otpCode"].as_str().unwrap_or("")),
@@ -419,13 +413,13 @@ fn rejected_message(v: &Value) -> String {
         .unwrap_or("统一认证失败")
         .into()
 }
-fn login_password(public_key: &str, request: &Value) -> Result<String, String> {
+fn login_password(key: &super::iaaa_login::PublicKey, request: &Value) -> Result<String, String> {
+    if request.get("stored_public_key").is_some() || request["encrypted_password"].is_string() {
+        key.check_binding(request["stored_public_key"].as_str(), request["stored_key_version"].as_str())?;
+    }
     let password = request["password"].as_str().unwrap_or("");
     if !password.is_empty() {
-        return encrypt_password(public_key, password);
-    }
-    if request["stored_public_key"].as_str().map(str::trim) != Some(public_key.trim()) {
-        return Err("绑定只保存了旧公钥密文，公钥已变更；请在 IAAA 绑定页重新绑定一次，之后好学 App 将自动登录".into());
+        return encrypt_password(&key.key, password);
     }
     request["encrypted_password"]
         .as_str()
@@ -672,15 +666,17 @@ mod tests {
     #[test]
     fn legacy_ciphertext_requires_exact_live_public_key() {
         let request = serde_json::json!({"stored_public_key":" current-key ","encrypted_password":"legacy-cipher"});
+        let key = super::super::iaaa_login::PublicKey { key: "current-key".into(), version: "202512".into() };
+        let rotated = super::super::iaaa_login::PublicKey { key: "rotated-key".into(), version: "202601".into() };
         assert_eq!(
-            super::login_password("current-key", &request).unwrap(),
+            super::login_password(&key, &request).unwrap(),
             "legacy-cipher"
         );
-        assert!(super::login_password("rotated-key", &request)
+        assert!(super::login_password(&rotated, &request)
             .unwrap_err()
             .contains("重新绑定"));
         assert!(super::login_password(
-            "current-key",
+            &key,
             &serde_json::json!({"stored_public_key":"current-key"})
         )
         .is_err());

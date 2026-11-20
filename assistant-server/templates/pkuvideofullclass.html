@@ -7,7 +7,6 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Serif+SC:wght@600&display=swap" rel="stylesheet" />
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jsencrypt/3.3.0/jsencrypt.min.js"></script>
   <style>
     :root {
       --ink: #13241d;
@@ -166,7 +165,6 @@
     const unbindBtnEl = document.getElementById("unbindBtn");
     const bindTitleEl = document.getElementById("bindTitle");
 
-    let currentKey = null;
     let isBound = false;
     let keyExpired = false;
 
@@ -189,19 +187,6 @@
         await api("/api/auth/me");
       } catch {
         location.href = "/auth?next=/pkuvideofullclass";
-      }
-    }
-
-    async function getCurrentIaaaKey() {
-      try {
-        const resp = await api("/api/pkuvideofullclass/current-iaaa-key");
-        if (resp.success && resp.key) {
-          currentKey = resp.key;
-        }
-        return currentKey;
-      } catch (err) {
-        console.error("Failed to get IAAA key:", err);
-        return null;
       }
     }
 
@@ -241,23 +226,6 @@
       }
     }
 
-    async function encryptPassword(password, publicKey) {
-      return new Promise((resolve, reject) => {
-        try {
-          const crypt = new JSEncrypt();
-          crypt.setPublicKey(publicKey);
-          const encrypted = crypt.encrypt(password);
-          if (encrypted) {
-            resolve(encrypted);
-          } else {
-            reject(new Error("Encryption failed"));
-          }
-        } catch (err) {
-          reject(err);
-        }
-      });
-    }
-
     async function handleBind() {
       if (bindBtnEl.disabled) return;
       const username = document.getElementById("iaaaUsername").value.trim();
@@ -275,26 +243,13 @@
         return;
       }
 
-      statusEl.textContent = "正在获取IAAA公钥并加密密码...";
+      statusEl.textContent = "正在验证并提交绑定...";
       statusEl.className = "status";
+      bindBtnEl.disabled = true;
+      let loginLimited = false;
 
       try {
-        const key = await getCurrentIaaaKey();
-        if (!key) {
-          statusEl.textContent = "获取IAAA公钥失败，请稍后重试";
-          statusEl.className = "status error";
-          return;
-        }
-
-        statusEl.textContent = "正在加密密码...";
-        const encryptedPassword = await encryptPassword(password, key);
-
-        statusEl.textContent = "正在提交绑定...";
-        const resp = await api("/api/pkuvideofullclass/bind", "POST", {
-          username: username,
-          encrypted_password: encryptedPassword, password: password,
-          iaaa_public_key: key
-        });
+        const resp = await api("/api/pkuvideofullclass/bind", "POST", { username, password });
 
         if (resp.success) {
           statusEl.textContent = "绑定成功！";
@@ -306,9 +261,11 @@
           statusEl.className = "status error";
         }
       } catch (err) {
-        if (err.message.includes("次数过多")) bindBtnEl.disabled = true;
+        loginLimited = err.message.includes("次数过多");
         statusEl.textContent = "绑定失败: " + err.message;
         statusEl.className = "status error";
+      } finally {
+        bindBtnEl.disabled = loginLimited;
       }
     }
 

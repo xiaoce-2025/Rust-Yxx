@@ -274,7 +274,11 @@
       const txt = await res.text();
       let payload = {};
       try { payload = txt ? JSON.parse(txt) : {}; } catch { payload = { raw: txt }; }
-      if (!res.ok) throw new Error(payload.error || payload.raw || ("HTTP " + res.status));
+      if (!res.ok) {
+        const message = payload.error || payload.raw || ("HTTP " + res.status);
+        void window.TeachingSession.handleError(message);
+        throw new Error(message);
+      }
       return payload;
     }
 

@@ -9,7 +9,7 @@ function environment(status = {is_bound:false,has_session:false}) {
   const location = {origin:'https://assistant.example',pathname:'/ta',search:'?course=_c_1',hash:'#work',href:''};
   const document = {body:{append(dialog) {dialogs.push(dialog);}},createElement(tag) {
     assert.equal(tag,'dialog');
-    const nodes = new Map(['[data-bind]','[data-once]','[data-cancel]'].map(key => [key,{style:{},listeners:{},
+    const nodes = new Map(['p','[data-bind]','[data-once]','[data-cancel]'].map(key => [key,{style:{},listeners:{},
       addEventListener(name,fn) {this.listeners[name] = fn;}}]));
     return {style:{},listeners:{},removed:false,shown:false,
       setAttribute() {}, querySelector:key=>nodes.get(key),querySelectorAll:()=>[...nodes.values()],
@@ -39,6 +39,18 @@ test('a persisted temporary cookie and a binding each skip the choice dialog', a
     const env=environment(status); assert.equal(await env.window.TeachingSession.ensure(),true);
     assert.equal(env.dialogs.length,0);
   }
+});
+
+test('a rotated IAAA key offers rebind, one-time login and cancel', async () => {
+  const env = environment({is_bound:true,has_session:false});
+  const result = env.window.TeachingSession.handleError('IAAA 登录失败: IAAA 公钥已更新，原绑定已失效，请重新绑定');
+  const dialog = env.dialogs[0];
+  assert.match(dialog.querySelector('p').textContent, /IAAA 公钥已更新，原绑定已失效/);
+  assert.equal(dialog.querySelector('[data-bind]').textContent, '重新绑定');
+  assert.equal(dialog.querySelector('[data-bind]').href, '/pkuvideofullclass?callback=%2Fta%3Fcourse%3D_c_1%23work');
+  assert.equal(dialog.querySelector('[data-once]').href, '/teaching-login?next=%2Fta%3Fcourse%3D_c_1%23work');
+  dialog.querySelector('[data-cancel]').listeners.click();
+  assert.equal(await result, false);
 });
 
 test('authentication failure opens one dialog and Escape allows a later attempt', async () => {

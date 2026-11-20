@@ -1,5 +1,5 @@
 【重要提醒】
-本文档参照20251215版的认证逻辑编写。其余认证行为如有变化，请自行验证。
+本文档参照仓库中的 20261113 版 IAAA 登录脚本。
 
 流程：IAAA账密认证获取token→相关app使用token登录
 
@@ -9,13 +9,14 @@ curl "https://iaaa.pku.edu.cn/iaaa/oauthlogin.do" \
   -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
   --data-urlencode "appid=【填入应用id】" \
   --data-urlencode "userName=【此处填入学号】" \
-  --data-urlencode "password=【此处填入密码（明文或RSA加密后的Base64密文）】" \
+  --data-urlencode "password=【使用本次公钥加密后的 Base64 密文】" \
+  --data-urlencode "keyVersion=【同一个公钥响应中的 version】" \
   --data-urlencode "remTrustChk=false" \
   --data-urlencode "redirUrl=【填入重定向url】"
 ```
 注意，此处的应用id会和重定向url在后端进行一致性校验，二者必须全部正确且匹配
 
-提交格式为 `application/x-www-form-urlencoded`，必须显式包含 `remTrustChk`，值为字符串 `false`（不是 JSON 布尔值，也不要省略）。上例为教学网配置：`appid=blackboard`，`redirUrl` 使用上面的 HTTP 地址；其他应用应替换为各自匹配的应用 id 与回调地址。所有字段值均需进行表单编码，尤其是密码密文中的 `+`、`/`、`=` 等字符；上例的 `--data-urlencode` 会自动完成编码。
+提交格式为 `application/x-www-form-urlencoded`，必须显式包含 `remTrustChk`，值为字符串 `false`（不是 JSON 布尔值，也不要省略）。上例为教学网配置：`appid=blackboard`，`redirUrl` 使用上面的 HTTP 地址；其他应用应替换为各自匹配的应用 id 与回调地址。所有字段值均需进行表单编码，尤其是密码密文中的 `+`、`/`、`=` 等字符。示例中的 `--data-urlencode` 会自动完成编码。
 
 返回格式如：
 
@@ -35,41 +36,17 @@ curl "https://iaaa.pku.edu.cn/iaaa/oauthlogin.do" \
 http://course.pku.edu.cn/webapps/bb-sso-BBLEARN/execute/authValidate/campusLogin?_rand=【随机数，0-1之间，小数点后16位】&token=【填入token】
 ```
 
-【20251212更新】
-自2025年12月12日起，IAAA支持密文和明文两种密码传输方式，在IAAA登陆页面中有
-```
-// 获取RSA公钥
-$.ajax('/iaaa/getPublicKey.do',
-    {
-        dataType:"json",
-        success : function(data,status,xhr) {
-            var json = data;
-            if(true == json.success){
-                crypt = new JSEncrypt();
-                crypt.setPublicKey(json.key); // 设置公钥
-            }
-        },
-        error : function(xhr,status,error) {
-        }
-});
-// 进行RSA加密
-var encryptedPWD = $("#password").val();
-if(crypt!=null)
-    encryptedPWD = crypt.encrypt($("#password").val()); // 使用公钥加密密码
-// 随后在提交的 data 中使用 encryptedPWD
-```
-推测在后续更新中可能会停用明文传输方式，建议使用密文进行密码传输
+【公钥与版本】
 
-RSA公钥可通过访问
-```
-https://iaaa.pku.edu.cn/iaaa/getPublicKey.do
-```
-获得，返回格式如
+认证时从 `https://iaaa.pku.edu.cn/iaaa/getPublicKey.do` 获取公钥。响应示例中的 PEM 已省略正文：
 
-```
-{"success":true,"key":"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqw9PsMk8v9ED\/LiLT62I\nDnelyIA\/s8blyxqNmbgXT4xtq+Y64Bd+THYPZ4dUIRuFmMvPowQm9wL27W3PEtQy\nC8VN+TzW\/nPzc74fy9cRxgaSh1FXNQBqYZtltb6G5YvwBvZlYdKhE3Oo3noUD0FJ\nJC11Nmcy2\/x1V2pwXHRy2DHKaWB1EEtQ9dRxuMZolZIpEwWnT4CHfwEvth83kNRp\nE8471KJEqyQqmqJt3JRerH4X4p41zQFIxCsrznAwku3b1qm0vgGLQ8t7XEiCjDX0\nm5yIJEuW5t1YcteutuJX5+5oXxe2Fo04Wkn1pO6+QoJopqHcHJD5C+7GlnPOLB1c\nDQIDAQAB\n-----END PUBLIC KEY-----"}
+```json
+{"success":true,"key":"-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----","version":"202512"}
 ```
 
+确认 `success` 为 `true` 后，用同一响应的 `key` 加密密码，并将 `version` 原样作为 `keyVersion` 随 `oauthlogin.do` 表单提交。示例中的 `202512` 是上游返回的版本，公钥和版本可能按月更新，应以实时响应为准。
+
+保存绑定时一并记录密文、公钥和公钥版本。使用绑定凭据发起新认证前，先拉取当前公钥并核对绑定记录。公钥或已记录的版本发生变化时，请用户重新绑定。
 
 【北大教学网】
 

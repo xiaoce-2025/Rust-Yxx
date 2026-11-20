@@ -506,6 +506,7 @@
     async function appAuth(action, body = {}) {
       const response = await api(`/api/pkuvideofullclass/app-auth/${action}`, 'POST', body);
       if (!response.ok) {
+        void window.TeachingSession.handleError(response.error);
         if (response.diagnostics) {
           document.getElementById('appDiagnosticsBox').hidden = false;
           document.getElementById('appDiagnostics').textContent = JSON.stringify(response.diagnostics, null, 2);

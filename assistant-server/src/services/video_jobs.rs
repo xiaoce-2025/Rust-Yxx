@@ -624,6 +624,8 @@ mod tests {
                 processing_quota: 10,
                 iaaa_encrypted_password: None,
                 iaaa_public_key: None,
+                iaaa_key_version: None,
+                iaaa_username: None,
             })
             .await
             .unwrap();
@@ -788,7 +790,7 @@ mod tests {
         let state=state(temp.path()).await;
         for balance in [0,-1] {
             let user=Uuid::new_v4();
-            state.store.insert_user(crate::store::FileUser{id:user,username:user.to_string(),email:format!("{user}@example.invalid"),password_hash:String::new(),is_active:true,created_at:Utc::now(),updated_at:Utc::now(),storage_quota:3,processing_quota:balance,processing_priority:5,iaaa_encrypted_password:None,iaaa_public_key:None}).await.unwrap();
+            state.store.insert_user(crate::store::FileUser{id:user,username:user.to_string(),email:format!("{user}@example.invalid"),password_hash:String::new(),is_active:true,created_at:Utc::now(),updated_at:Utc::now(),storage_quota:3,processing_quota:balance,processing_priority:5,iaaa_encrypted_password:None,iaaa_public_key: None, iaaa_key_version: None, iaaa_username: None}).await.unwrap();
             let id=Uuid::new_v4();
             let mut job=super::super::pkuvideo::PkuVideoJob::new(id,user,"https://example.invalid/unreachable".into(),temp.path().join(id.to_string()).to_string_lossy().into());job.share_cache=true;
             state.store.insert_pkuvideo_job(job.clone()).await.unwrap();state.pkuvideo_jobs.write().await.insert(id,job);

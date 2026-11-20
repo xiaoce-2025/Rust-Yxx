@@ -365,6 +365,8 @@ impl FileStore {
                 processing_priority: 5,
                 iaaa_encrypted_password: None,
                 iaaa_public_key: None,
+                iaaa_key_version: None,
+                iaaa_username: None,
             };
             insert_account(&mut tx, &user)
                 .await
@@ -451,10 +453,14 @@ impl FileStore {
         user_id: Uuid,
         encrypted_password: String,
         public_key: String,
+        key_version: String,
+        username: String,
     ) -> Result<(), StoreError> {
         self.update_user_record(user_id, |user| {
             user.iaaa_encrypted_password = Some(encrypted_password);
             user.iaaa_public_key = Some(public_key);
+            user.iaaa_key_version = Some(key_version);
+            user.iaaa_username = Some(username);
             Ok(())
         })
         .await
@@ -464,6 +470,8 @@ impl FileStore {
         self.update_user_record(user_id, |user| {
             user.iaaa_encrypted_password = None;
             user.iaaa_public_key = None;
+            user.iaaa_key_version = None;
+            user.iaaa_username = None;
             Ok(())
         })
         .await

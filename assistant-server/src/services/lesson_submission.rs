@@ -72,7 +72,7 @@ pub async fn submit_lesson_mode(
     } else {
         let lesson = lessons[index].clone();
         let prepared = fallback_once(
-            prepare_teaching_media(&state, &user, &username, &lesson, supplied_key.as_deref()),
+            prepare_teaching_media(&state, &user, &lesson, supplied_key.as_deref()),
             || prepare_app_course_media(&state, &user, &username, &course_id, &lesson),
         )
         .await
@@ -138,6 +138,7 @@ where
 {
     match web.await {
         Ok(prepared) => Ok(prepared),
+        Err(error) if error == super::iaaa_login::BINDING_EXPIRED => Err(error),
         Err(web_error) => {
             tracing::warn!(error=%web_error,"教学网获取回放链接失败，检查 App 登录状态并回退尝试一次");
             match app().await {
@@ -155,22 +156,19 @@ where
 pub(crate) async fn prepare_teaching_media(
     state: &AppState,
     user: &crate::store::FileUser,
-    username: &str,
     lesson: &lesson_storage::LessonInfo,
     supplied_key: Option<&str>,
 ) -> Result<Preparation, String> {
-    let password = user.iaaa_encrypted_password.as_deref().unwrap_or_default();
     if lesson.play_url.is_empty() {
         return Err("播放链接为空，请先刷新课节列表".into());
     }
     let mut login =
         super::teaching_session::login(state, user)
             .await?;
-    let (url, key_uri, key) = pkulogin::session_operation(
+    let (url, key_uri, key) = super::teaching_session::session_operation(
         &mut login,
-        username,
-        password,
-        &state.login_cache,
+        state,
+        user,
         |session| {
             let url = video_downloader::get_video_download_url(&lesson.play_url, session)?;
             if !url.contains(".m3u8") {

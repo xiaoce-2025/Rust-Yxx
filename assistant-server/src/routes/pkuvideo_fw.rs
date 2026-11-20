@@ -240,7 +240,7 @@ async fn submit_lesson_replay(
                 &lesson.video_url, "", "", &state.login_cache, Some(key),
             ).await.map_err(ApiError::BadRequest)?
         } else {
-            match prepare_teaching_media(&state, &user, &username, &lesson, lesson.enc_key.as_deref())
+            match prepare_teaching_media(&state, &user, &lesson, lesson.enc_key.as_deref())
                 .await.map_err(ApiError::BadRequest)?
             {
                 Preparation::Media(media) => media,

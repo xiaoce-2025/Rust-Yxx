@@ -14,7 +14,7 @@ pub async fn cached(state: &AppState, user: &FileUser) -> Option<PkuLoginResult>
         return Some(session);
     }
     // Legacy, bound-account sessions remain compatible; unbound users cannot borrow them.
-    if user.iaaa_encrypted_password.is_some() {
+    if user.iaaa_encrypted_password.is_some() && user.iaaa_username.is_none() {
         return state
             .login_cache
             .get(user.email.split('@').next().unwrap_or_default())
@@ -27,15 +27,28 @@ pub async fn login(state: &AppState, user: &FileUser) -> Result<PkuLoginResult, 
     if let Some(session) = cached(state, user).await {
         return Ok(session);
     }
-    let password = user
-        .iaaa_encrypted_password
-        .as_deref()
-        .filter(|p| !p.is_empty())
-        .ok_or(LOGIN_REQUIRED)?;
-    pkulogin::login_iaaa_and_get_cookies_with_cache(
-        user.email.split('@').next().unwrap_or_default(),
-        password,
-        &state.login_cache,
-    )
-    .await
+    let key = cache_key(user.id);
+    pkulogin::cached_teaching_login(&key, &state.login_cache, || async {
+        let user = state.store.get_user(user.id).await.ok_or(LOGIN_REQUIRED)?;
+        let ciphertext = user.iaaa_encrypted_password
+            .filter(|password| !password.is_empty()).ok_or(LOGIN_REQUIRED)?;
+        let username = user.iaaa_username.as_deref()
+            .unwrap_or_else(|| user.email.split('@').next().unwrap_or_default());
+        let credentials = pkulogin::LoginPassword::Bound {
+            ciphertext,
+            key: user.iaaa_public_key,
+            version: user.iaaa_key_version,
+        };
+        let (session, _, _) = pkulogin::login_iaaa(username, credentials).await?;
+        Ok(session)
+    }).await
+}
+
+pub async fn session_operation<T>(
+    session: &mut PkuLoginResult,
+    state: &AppState,
+    user: &FileUser,
+    operation: impl FnMut(&PkuLoginResult) -> Result<T, String>,
+) -> Result<T, String> {
+    pkulogin::session_operation_with_refresh(session, operation, || login(state, user)).await
 }

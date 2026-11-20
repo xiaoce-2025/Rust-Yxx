@@ -58,7 +58,8 @@ async fn app_auth(
         .ok_or_else(|| ApiError::BadRequest("请求应为对象".into()))?;
     object.insert(
         "account".into(),
-        json!(user.email.split('@').next().unwrap_or_default()),
+        json!(user.iaaa_username.as_deref()
+            .unwrap_or_else(|| user.email.split('@').next().unwrap_or_default())),
     );
     object.insert("action".into(), json!(action));
     let client = state

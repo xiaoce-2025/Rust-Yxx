@@ -118,6 +118,8 @@ async fn register(State(state): State<AppState>, Json(req): Json<RegisterRequest
         processing_quota: 1,
         iaaa_encrypted_password: None,
         iaaa_public_key: None,
+        iaaa_key_version: None,
+        iaaa_username: None,
     };
 
     state.store.insert_user(user.clone()).await
@@ -241,6 +243,8 @@ pub(super) async fn complete_iaaa_login(state: &AppState, headers: &HeaderMap, u
         is_active: true, created_at: now, updated_at: now,
         processing_priority: 5, storage_quota: 3, processing_quota: 1,
         iaaa_encrypted_password: None, iaaa_public_key: None,
+        iaaa_key_version: None,
+        iaaa_username: None,
     };
     let user = state.store.resolve_iaaa_user(candidate).await
         .map_err(|_| ApiError::Internal("创建 IAAA 账户失败，请稍后重试".into()))?
@@ -292,6 +296,8 @@ mod iaaa_tests {
             is_active: true, created_at: Utc::now(), updated_at: Utc::now(),
             processing_priority: 5, storage_quota: 3, processing_quota: 1,
             iaaa_encrypted_password: None, iaaa_public_key: None,
+            iaaa_key_version: None,
+            iaaa_username: None,
         }
     }
 

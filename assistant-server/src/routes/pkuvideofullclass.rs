@@ -14,19 +14,13 @@ use crate::{
     auth::CurrentUser,
     error::ApiError,
     services::{
-        course_parser, course_storage, lesson_parser, lesson_storage, pkulogin, pkuvideo::PipelineStatus
+        course_parser, course_storage, iaaa_login::PublicKey, lesson_parser, lesson_storage, pkulogin,
+        pkuvideo::PipelineStatus, teaching_session,
     },
 };
 use lesson_storage::LessonInfo;
 
-const IAAA_PUBLIC_KEY_URL: &str = "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do";
 const MAX_VIDEO_LIST_PAGES: usize = 100;
-
-#[derive(Debug, Deserialize, Serialize)]
-struct IaaaPublicKeyResponse {
-    success: bool,
-    key: Option<String>,
-}
 
 #[derive(Debug, Serialize)]
 struct BindingStatusResponse {
@@ -34,14 +28,18 @@ struct BindingStatusResponse {
     iaaa_public_key: Option<String>,
     key_expired: bool,
     current_iaaa_key: Option<String>,
+    iaaa_key_version: Option<String>,
+    current_iaaa_key_version: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct BindRequest {
     password: Option<String>,
     username: String,
+    #[serde(default)]
     encrypted_password: String,
-    iaaa_public_key: String,
+    iaaa_public_key: Option<String>,
+    iaaa_key_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,21 +94,9 @@ pub fn routes() -> Router<AppState> {
 
 async fn get_current_iaaa_key(
     _current_user: CurrentUser,
-) -> Result<Json<IaaaPublicKeyResponse>, ApiError> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get(IAAA_PUBLIC_KEY_URL)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch IAAA public key: {}", e)))?;
-
-    let data: IaaaPublicKeyResponse = resp
-        .json()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to parse IAAA response: {}", e)))?;
-
-    Ok(Json(data))
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let key = PublicKey::fetch().await.map_err(ApiError::Internal)?;
+    Ok(Json(serde_json::json!({"success": true, "key": key.key, "version": key.version})))
 }
 
 async fn get_binding_status(
@@ -123,88 +109,74 @@ async fn get_binding_status(
         .await
         .ok_or(ApiError::Unauthorized)?;
 
-    let is_bound = user.iaaa_encrypted_password.is_some() && user.iaaa_public_key.is_some();
-
-    let mut key_expired = false;
-    let mut current_iaaa_key: Option<String> = None;
-
-    if is_bound {
-        let client = reqwest::Client::new();
-        match client
-            .get(IAAA_PUBLIC_KEY_URL)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                if let Ok(key_data) = resp.json::<IaaaPublicKeyResponse>().await {
-                    current_iaaa_key = key_data.key;
-                    if let Some(ref stored_key) = user.iaaa_public_key {
-                        if let Some(ref current_key) = current_iaaa_key {
-                            if stored_key != current_key {
-                                key_expired = true;
-                            }
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                key_expired = true;
-            }
-        }
-    }
+    let is_bound = user.iaaa_encrypted_password.is_some();
+    let current = if is_bound {
+        Some(PublicKey::fetch().await.map_err(ApiError::Internal)?)
+    } else {
+        None
+    };
+    let key_expired = current.as_ref().is_some_and(|key| {
+        key.check_binding(user.iaaa_public_key.as_deref(), user.iaaa_key_version.as_deref()).is_err()
+    });
 
     Ok(Json(BindingStatusResponse {
         is_bound,
-        iaaa_public_key: user.iaaa_public_key,
         key_expired,
-        current_iaaa_key,
+        iaaa_public_key: user.iaaa_public_key,
+        iaaa_key_version: user.iaaa_key_version,
+        current_iaaa_key: current.as_ref().map(|key| key.key.clone()),
+        current_iaaa_key_version: current.map(|key| key.version),
     }))
 }
 
 async fn bind(
     State(state): State<AppState>,
     current_user: CurrentUser,
-    Json(mut req): Json<BindRequest>,
+    Json(req): Json<BindRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if let Some(password) = req.password.as_ref() {
-        let response = reqwest::Client::new().get(IAAA_PUBLIC_KEY_URL)
-            .timeout(std::time::Duration::from_secs(10)).send().await?;
-        let key: IaaaPublicKeyResponse = response.error_for_status()?.json().await?;
-        req.iaaa_public_key = key.key.filter(|_|key.success).ok_or_else(||ApiError::BadRequest("无法获取当前 IAAA 公钥".into()))?;
-        req.encrypted_password = crate::services::app_replay::encrypt_binding_password(&req.iaaa_public_key, password).map_err(ApiError::BadRequest)?;
+    let username = req.username.trim();
+    if username.is_empty() {
+        return Err(ApiError::BadRequest("请输入 IAAA 账号".into()));
     }
-    if req.username.is_empty() || req.encrypted_password.is_empty() || req.iaaa_public_key.is_empty() {
-        return Err(ApiError::BadRequest("Missing required fields".to_string()));
-    }
+    let credentials = match req.password.as_ref() {
+        Some(password) if !password.is_empty() && password.len() <= 1024 =>
+            pkulogin::LoginPassword::Plaintext(password.clone()),
+        None if !req.encrypted_password.is_empty() && req.iaaa_public_key.is_some() =>
+            pkulogin::LoginPassword::Bound {
+                ciphertext: req.encrypted_password,
+                key: req.iaaa_public_key,
+                version: req.iaaa_key_version,
+            },
+        _ => return Err(ApiError::BadRequest("请输入有效的 IAAA 密码".into())),
+    };
 
-    tracing::info!("IAAA binding attempt for user {} with username {}", current_user.id, req.username);
+    tracing::info!("IAAA binding attempt for user {} with username {}", current_user.id, username);
 
-    match pkulogin::login_iaaa_and_get_cookies(&req.username, &req.encrypted_password).await {
-        Ok(login_result) => {
+    match pkulogin::login_iaaa(username, credentials).await {
+        Ok((login_result, key, encrypted_password)) => {
             tracing::info!("IAAA authentication succeeded for user {}, token obtained", req.username);
 
             let refresh_lock = super::assignments::refresh_lock(&state, current_user.id).await;
             let _refresh_guard = refresh_lock.lock().await;
-            let username = current_user.email.split('@').next().unwrap_or_default();
-            let login_lock = state.login_cache.login_lock(username).await;
+            let email_account = current_user.email.split('@').next().unwrap_or_default();
+            let login_lock = state.login_cache.login_lock(email_account).await;
             let _login_guard = login_lock.lock().await;
             let session_key = crate::services::teaching_session::cache_key(current_user.id);
             let session_lock = state.login_cache.login_lock(&session_key).await;
             let _session_guard = session_lock.lock().await;
             super::assignments::clear_snapshot(&state.store, current_user.id).await?;
-            state.login_cache.invalidate(username).await;
+            state.login_cache.invalidate(email_account).await;
             state.login_cache.invalidate(&session_key).await;
 
             crate::services::app_replay::clear_binding(&state.store, current_user.id).await.map_err(ApiError::Internal)?;
             if let Some(password) = req.password.as_ref() {
-                crate::services::app_replay::save_binding(&state.store, current_user.id, &req.username, password).await.map_err(ApiError::Internal)?;
+                crate::services::app_replay::save_binding(&state.store, current_user.id, username, password).await.map_err(ApiError::Internal)?;
             }
             state.app_replay_clients.lock().await.remove(&current_user.id);
 
             state
                 .store
-                .update_iaaa_binding(current_user.id, req.encrypted_password, req.iaaa_public_key)
+                .update_iaaa_binding(current_user.id, encrypted_password, key.key, key.version, username.to_owned())
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to save IAAA binding for user {}: {}", current_user.id, e);
@@ -372,7 +344,6 @@ async fn refresh_lessons(
         ApiError::BadRequest("无效的邮箱格式".to_string())
     })?;
 
-    let password = user.iaaa_encrypted_password.clone().unwrap_or_default();
 
     tracing::info!("用户 {} 开始刷新课程 {} 的课节列表...", username, course_id);
 
@@ -387,8 +358,8 @@ async fn refresh_lessons(
         })?;
 
     // One lease for all pages; retry the full read once only on authentication loss.
-    let mut all_lessons = pkulogin::session_operation(
-        &mut login_result, username, &password, &state.login_cache, |login| {
+    let mut all_lessons = teaching_session::session_operation(
+        &mut login_result, &state, &user, |login| {
             let mut all_lessons = Vec::new();
             let mut current_url = format!("https://course.pku.edu.cn/webapps/bb-streammedia-hqy-BBLEARN/videoList.action?course_id={}&mode=view", course_id);
             let mut visited = HashSet::new();
@@ -504,7 +475,6 @@ async fn refresh_courses(
         ApiError::BadRequest("无效的邮箱格式".to_string())
     })?;
 
-    let password = user.iaaa_encrypted_password.clone().unwrap_or_default();
 
     tracing::info!("用户 {} 开始刷新课程列表...", username);
 
@@ -515,8 +485,8 @@ async fn refresh_courses(
         })?;
 
     let portal_url = "https://course.pku.edu.cn/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1";
-    let courses = pkulogin::session_operation(
-        &mut login_result, username, &password, &state.login_cache, |login| {
+    let courses = teaching_session::session_operation(
+        &mut login_result, &state, &user, |login| {
             let page = pkulogin::fetch_page_in_session(login, portal_url)?;
             if !pkulogin::is_teaching_portal(&page) {
                 return Err("教学网返回的内容不是可识别的课程页面，已保留原有课程".into());

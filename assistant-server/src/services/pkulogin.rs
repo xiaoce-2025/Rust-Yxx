@@ -4,6 +4,7 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::services::login_cache::LoginCache;
+use super::iaaa_login::{PublicKey, PUBLIC_KEY_URL};
 
 const IAAA_OAUTH_LOGIN_URL: &str = "https://iaaa.pku.edu.cn/iaaa/oauthlogin.do";
 pub(crate) const BLACKBOARD_APP_ID: &str = "blackboard";
@@ -90,7 +91,7 @@ pub async fn session_operation<T>(
         }).await
 }
 
-async fn session_operation_with_refresh<T, F, Fut>(
+pub(super) async fn session_operation_with_refresh<T, F, Fut>(
     login: &mut PkuLoginResult,
     mut operation: impl FnMut(&PkuLoginResult) -> Result<T, String>,
     refresh: F,
@@ -155,12 +156,12 @@ pub async fn login_iaaa_and_get_cookies_with_cache(
     login_cache: &LoginCache,
 ) -> Result<PkuLoginResult, String> {
     cached_teaching_login(username, login_cache,
-        || login_iaaa_and_get_cookies(username,password)).await
+        || async { login_iaaa(username, LoginPassword::Submitted(password.to_owned())).await.map(|(session, _, _)| session) }).await
 }
 
 /// A factory encompasses the complete IAAA -> single callback -> portal verification transaction.
 /// Only its successful teaching session can enter the cache; failed callbacks leave no reusable ticket.
-async fn cached_teaching_login<F,Fut>(username:&str, cache:&LoginCache, login:F) -> Result<PkuLoginResult,String>
+pub(super) async fn cached_teaching_login<F,Fut>(username:&str, cache:&LoginCache, login:F) -> Result<PkuLoginResult,String>
 where F:FnOnce()->Fut, Fut:std::future::Future<Output=Result<PkuLoginResult,String>> {
     let lock=cache.login_lock(username).await;
     let _guard=lock.lock().await;
@@ -172,21 +173,23 @@ where F:FnOnce()->Fut, Fut:std::future::Future<Output=Result<PkuLoginResult,Stri
     Ok(cache.insert(username,session).await)
 }
 
-pub async fn login_iaaa_and_get_cookies(username: &str, password: &str) -> Result<PkuLoginResult, String> {
-    login_with_key_version(username, password, None).await
+pub(crate) enum LoginPassword {
+    Plaintext(String),
+    Submitted(String),
+    Bound { ciphertext: String, key: Option<String>, version: Option<String> },
 }
 
-pub async fn login_with_key_version(username: &str, password: &str, key_version: Option<String>) -> Result<PkuLoginResult, String> {
+pub(crate) async fn login_iaaa(username: &str, password: LoginPassword) -> Result<(PkuLoginResult, PublicKey, String), String> {
     // The curl transaction is blocking; do not stall the async page/API executor.
-    let (username, password) = (username.to_owned(), password.to_owned());
+    let username = username.to_owned();
     tokio::task::spawn_blocking(move || {
         let ua = super::user_agents::choose("./user_agents.txt.gz")?;
         // IAAA is rate limited: submit credentials once and return any failure directly.
-        tokio::runtime::Handle::current().block_on(login_with_user_agent(&username, &password, ua, key_version))
+        login_with_user_agent(&username, password, ua)
     }).await.map_err(|_| "教学网登录任务失败".to_string())?
 }
 
-async fn login_with_user_agent(username: &str, password: &str, user_agent: String, key_version: Option<String>) -> Result<PkuLoginResult, String> {
+fn login_with_user_agent(username: &str, password: LoginPassword, user_agent: String) -> Result<(PkuLoginResult, PublicKey, String), String> {
     let start_time = chrono::Utc::now();
     tracing::info!("IAAA登录流程开始 - 时间: {}", start_time);
 
@@ -203,35 +206,39 @@ async fn login_with_user_agent(username: &str, password: &str, user_agent: Strin
     // Establish the same IAAA session as the browser before submitting credentials.
     fetch_with_cookie(&cookie_file_str, &user_agent,
         "https://course.pku.edu.cn/webapps/bb-sso-BBLEARN/login.html")?;
-    run_curl_text(&["-sS".into(), "-L".into(), "-k".into(), "-A".into(), user_agent.clone(),
+    run_curl_text(&["-sS".into(), "-L".into(), "-A".into(), user_agent.clone(),
         "-b".into(), cookie_file_str.clone(), "-c".into(), cookie_file_str.clone(),
         "-e".into(), "https://course.pku.edu.cn/".into(),
         "--data-raw".into(), format!("appID=blackboard&appName=1&redirectUrl={}", urlencoding::encode(BLACKBOARD_REDIR_URL)),
         "https://iaaa.pku.edu.cn/iaaa/oauth.jsp".into()])?;
 
     // Step 1: IAAA oauthlogin -> token
-    let version = match key_version {
-        Some(version) => version,
-        None => {
-            let key: Value = serde_json::from_str(&fetch_with_cookie(
-                &cookie_file_str, &user_agent, "https://iaaa.pku.edu.cn/iaaa/getPublicKey.do",
-            )?).map_err(|_| "IAAA 公钥响应无效".to_string())?;
-            super::iaaa_login::key_version(&key)?
+    let key_response = run_curl_text(&[
+        "-sS".into(), "--max-time".into(), "15".into(), "-A".into(), user_agent.clone(),
+        "-b".into(), cookie_file_str.clone(), "-c".into(), cookie_file_str.clone(),
+        PUBLIC_KEY_URL.into(),
+    ])?;
+    let key = PublicKey::parse(&serde_json::from_str(&key_response).map_err(|_| "IAAA 公钥响应无效")?)?;
+    let encrypted = match password {
+        LoginPassword::Plaintext(password) => super::app_replay::encrypt_binding_password(&key.key, &password)?,
+        LoginPassword::Submitted(password) => password,
+        LoginPassword::Bound { ciphertext, key: stored_key, version } => {
+            key.check_binding(stored_key.as_deref(), version.as_deref())?;
+            ciphertext
         }
     };
     let form_body = format!(
         "appid={}&userName={}&password={}&keyVersion={}&randCode=&smsCode=&otpCode=&remTrustChk=false&redirUrl={}",
         urlencoding::encode(BLACKBOARD_APP_ID),
         urlencoding::encode(username),
-        urlencoding::encode(password),
-        urlencoding::encode(&version),
+        urlencoding::encode(&encrypted),
+        urlencoding::encode(&key.version),
         urlencoding::encode(BLACKBOARD_REDIR_URL)
     );
     tracing::debug!("步骤3: 准备OAuth登录请求 - body长度: {}", form_body.len());
 
     let oauth_args = vec![
         "-sS".to_string(),
-        "-k".to_string(),
         "-A".to_string(),
         user_agent.clone(),
         "-H".to_string(),
@@ -283,7 +290,7 @@ async fn login_with_user_agent(username: &str, password: &str, user_agent: Strin
 
     discard_iaaa_cookies(&session.cookie_file)?;
     session.created_at = Utc::now();
-    Ok(session)
+    Ok((session, key, encrypted))
 }
 
 pub fn fetch_with_cookie(cookie_file: &str, user_agent: &str, url: &str) -> Result<String, String> {

@@ -72,29 +72,8 @@ async fn login(
     let _refresh_guard = refresh_lock.lock().await;
     let lock = state.login_cache.login_lock(&key).await;
     let _guard = lock.lock().await;
-    let response = reqwest::Client::new()
-        .get("https://iaaa.pku.edu.cn/iaaa/getPublicKey.do")
-        .timeout(std::time::Duration::from_secs(15))
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|_| ApiError::BadRequest("获取 IAAA 公钥失败，请稍后重试".into()))?;
-    let public_key: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|_| ApiError::BadRequest("IAAA 公钥响应无效，请稍后重试".into()))?;
-    let version = crate::services::iaaa_login::key_version(&public_key).map_err(ApiError::BadRequest)?;
-    let public_key = public_key
-        .get("key")
-        .and_then(|v| v.as_str())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| ApiError::BadRequest("获取 IAAA 公钥失败，请稍后重试".into()))?;
-    let encrypted =
-        crate::services::app_replay::encrypt_binding_password(public_key, &req.password)
-            .map_err(|_| ApiError::BadRequest("IAAA 密码加密失败，请稍后重试".into()))?;
-    // Always verify submitted credentials using a fresh teaching transaction.
-    // Neither input, ciphertext, nor upstream error bodies enter the store or logs.
-    let session = pkulogin::login_with_key_version(username, &encrypted, Some(version))
+    // Verify fresh credentials without saving the password or its ciphertext.
+    let (session, _, _) = pkulogin::login_iaaa(username, pkulogin::LoginPassword::Plaintext(req.password))
         .await
         .map_err(|error| ApiError::BadRequest(if error.contains("次数过多") {
             crate::services::iaaa_login::LOGIN_LIMIT_MESSAGE.into()
@@ -143,6 +122,8 @@ mod tests {
             processing_priority: 5,
             iaaa_encrypted_password: None,
             iaaa_public_key: None,
+            iaaa_key_version: None,
+            iaaa_username: None,
         };
         store.insert_user(user.clone()).await.unwrap();
         let cache_dir = dir.path().join("teaching_sessions");

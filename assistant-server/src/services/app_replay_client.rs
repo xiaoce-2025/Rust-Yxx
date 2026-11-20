@@ -77,8 +77,11 @@ impl AppReplayClient {
             Some((store, _)) => super::app_replay_vault::load::<Value>(store, user.id, "binding").await?,
             None => None,
         };
-        let mut request = json!({"action":"login","account":user.email.split('@').next().unwrap_or_default(),
-            "encrypted_password":user.iaaa_encrypted_password,"stored_public_key":user.iaaa_public_key});
+        let account = user.iaaa_username.as_deref()
+            .unwrap_or_else(|| user.email.split('@').next().unwrap_or_default());
+        let mut request = json!({"action":"login","account":account,
+            "encrypted_password":user.iaaa_encrypted_password,"stored_public_key":user.iaaa_public_key,
+            "stored_key_version":user.iaaa_key_version});
         if let Some(credential) = credential {
             request["account"] = credential["account"].clone();
             request["password"] = credential["password"].clone();

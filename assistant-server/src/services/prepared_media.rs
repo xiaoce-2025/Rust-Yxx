@@ -117,6 +117,43 @@ pub async fn prepare_teaching(
     cache: &LoginCache,
     key: Option<&str>,
 ) -> Result<PreparedMedia, String> {
+    prepare_teaching_with(url, key, || async {
+        if username.trim().is_empty() || password.is_empty() {
+            return Err("请提供 m3u8 解密密钥，无需填写门户 IAAA 凭证".into());
+        }
+        let mut session =
+            pkulogin::login_iaaa_and_get_cookies_with_cache(username, password, cache).await?;
+        pkulogin::session_operation(&mut session, username, password, cache, |login| {
+            let (_, key) = super::pkuvideo::fetch_m3u8_key_in_session(url, login)?;
+            key
+        }).await
+    }).await
+}
+
+pub(crate) async fn prepare_bound_teaching(
+    state: &crate::app_state::AppState,
+    user: &crate::store::FileUser,
+    url: &str,
+    key: Option<&str>,
+) -> Result<PreparedMedia, String> {
+    prepare_teaching_with(url, key, || async {
+        let mut session = super::teaching_session::login(state, user).await?;
+        super::teaching_session::session_operation(&mut session, state, user, |login| {
+            let (_, key) = super::pkuvideo::fetch_m3u8_key_in_session(url, login)?;
+            key
+        }).await
+    }).await
+}
+
+async fn prepare_teaching_with<F, Fut>(
+    url: &str,
+    key: Option<&str>,
+    fetch_key: F,
+) -> Result<PreparedMedia, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
     if !url.contains(".m3u8") {
         return Ok(PreparedMedia {
             url: url.into(),
@@ -127,16 +164,7 @@ pub async fn prepare_teaching(
         decode_key(key)?;
         key.to_string()
     } else {
-        if username.trim().is_empty() || password.is_empty() {
-            return Err("请提供 m3u8 解密密钥，无需填写门户 IAAA 凭证".into());
-        }
-        let mut session =
-            pkulogin::login_iaaa_and_get_cookies_with_cache(username, password, cache).await?;
-        pkulogin::session_operation(&mut session, username, password, cache, |login| {
-            let (_, key) = super::pkuvideo::fetch_m3u8_key_in_session(url, login)?;
-            key
-        })
-        .await?
+        fetch_key().await?
     };
     Ok(PreparedMedia {
         url: url.into(),

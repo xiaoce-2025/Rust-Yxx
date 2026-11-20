@@ -220,6 +220,8 @@ mod tests {
                     processing_priority: 1,
                     iaaa_encrypted_password: None,
                     iaaa_public_key: None,
+                    iaaa_key_version: None,
+                    iaaa_username: None,
                 })
                 .await
                 .unwrap();
