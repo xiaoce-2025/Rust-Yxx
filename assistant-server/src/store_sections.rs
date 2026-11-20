@@ -330,6 +330,23 @@ impl FileStore {
         Ok(exists)
     }
 
+    pub async fn pending_grading_columns(&self, directory: &Path, course: &str) -> Result<Vec<String>, StoreError> {
+        let prefix = format!("{}/{}.", Self::sidecar_key(directory), course);
+        let scopes: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT scope FROM ta_drafts WHERE scope GLOB ?1 AND synced=0
+             UNION
+             SELECT name FROM store_documents, json_each(payload)
+             WHERE name GLOB ?1 AND json_each.type='object'
+               AND coalesce(json_extract(value, '$.synced'), 0)=0",
+        )
+        .bind(format!("{prefix}*.json"))
+        .fetch_all(&self.db)
+        .await?;
+        Ok(scopes.iter().filter_map(|scope| {
+            Some(scope.strip_prefix(&prefix)?.strip_suffix(".json")?.to_owned())
+        }).collect())
+    }
+
     pub async fn grading_drafts(&self, path: &Path) -> Result<Vec<Draft>, StoreError> {
         let scope = Self::sidecar_key(path);
         let rows: Vec<Option<String>> = sqlx::query_scalar(

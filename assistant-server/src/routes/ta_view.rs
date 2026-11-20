@@ -1,5 +1,5 @@
 //! HTML/CSS rendered by Rust; no frontend build or separate grading runtime.
-use super::{can_grade, is_graded, visible_attempts, Selection, Workspace};
+use super::{visible_attempts, Selection, Workspace};
 use crate::services::ta::{Attempt, Draft};
 use std::fmt::Write;
 
@@ -18,10 +18,9 @@ fn context(s: &Selection, csrf: &str) -> String {
         ("csrf", csrf),
         ("course", &s.course),
         ("column", &s.column),
-        ("group", &s.group),
         ("filter", &s.filter),
         ("search", &s.search),
-        ("history", &s.history),
+        ("review", &s.review),
     ]
     .iter()
     .map(|(k, v)| hidden(k, v))
@@ -40,17 +39,6 @@ fn selected(a: &str, b: &str) -> &'static str {
 }
 fn draft_for<'a>(w: &'a Workspace, a: &Attempt) -> Option<&'a Draft> {
     w.drafts.iter().find(|d| d.attempt_id == a.id && !d.synced)
-}
-fn status(a: &Attempt) -> &'static str {
-    if a.exempt {
-        "已豁免"
-    } else if is_graded(a) {
-        "已评分"
-    } else if a.status.eq_ignore_ascii_case("InProgress") {
-        "提交中"
-    } else {
-        "待评分"
-    }
 }
 fn date(value: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(value)
@@ -139,24 +127,22 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
             .map(|c| c.name.as_str())
             .unwrap_or("课程");
         let _ = write!(html,"<div class=\"section-header\"><div><div class=\"eyebrow\">作业批改工作台</div><h2>{}</h2></div>{}</div>",e(name),refresh(s, csrf, "refresh", "刷新提交"));
-        filters(&mut html, s, w);
-        if w.assignments.iter().any(|a| a.id == s.column) { ai_panel(&mut html, s, w, csrf); }
+        if !w.assignments.is_empty() {
+            filters(&mut html, s, w);
+        }
+        if !w.attempts.is_empty() {
+            let maximum = w.maximum.map(|value| value.to_string()).unwrap_or_default();
+            let _ = write!(html, r#"<form class="filters card" method="post" action="/ta/action">{}{}<label>本作业满分（严小希）<input type="number" name="maximum" min="0.01" step="0.01" value="{}" required></label><button name="action" value="save_maximum">保存满分</button></form>"#,
+                context(s, csrf), hidden("attempt", &s.attempt), e(&maximum));
+            if w.maximum.is_some() {
+                ai_panel(&mut html, s, w, csrf);
+            }
+        }
         if w.assignments.is_empty() {
-            html.push_str("<div class=\"empty card\"><h3>暂无可批改作业</h3><p>教学网还没有返回这门课程的作业成绩列。</p></div>");
-        } else if w.error.is_none() || !w.attempts.is_empty() {
-            let latest = crate::services::ta::latest_attempts(&w.attempts);
-            let latest: Vec<_> = w
-                .attempts
-                .iter()
-                .filter(|a| latest.contains(&a.id))
-                .collect();
-            let ungraded = latest.iter().filter(|a| !is_graded(a) && !a.exempt).count();
-            let pending = w
-                .drafts
-                .iter()
-                .filter(|d| !d.synced && w.students.contains_key(&d.student_id))
-                .count();
-            let _ = write!(html,"<div class=\"stats\"><div><strong>{}</strong><span>已提交学生</span></div><div><strong>{ungraded}</strong><span>待评分</span></div><div><strong>{}</strong><span>已评分</span></div><div><strong>{pending}</strong><span>待同步草稿</span></div></div>",latest.len(),latest.iter().filter(|a|is_graded(a)).count());
+            html.push_str("<div class=\"empty card\"><h3>暂无可批改作业</h3><p>这门课程的教学网队列中暂无待评分作业。</p></div>");
+        } else if w.error.is_none() || !w.attempts.is_empty() || !w.drafts.is_empty() {
+            let pending = w.drafts.iter().filter(|d| !d.synced).count();
+            let _ = write!(html, r#"<div class="stats"><div><strong>{}</strong><span>待评分</span></div><div><strong>{pending}</strong><span>待同步草稿</span></div></div>"#, w.attempts.len());
             let mut review = s.clone();
             review.review = "1".into();
             review.notice.clear();
@@ -186,7 +172,8 @@ pub(super) fn ai_status(job: Option<&crate::services::ta_ai::Job>, s: &Selection
             let mut target = s.clone();
             target.attempt = result.attempt.clone();
             target.review.clear();
-            target.history = "1".into();
+            target.filter.clear();
+            target.search.clear();
             target.notice.clear();
             let score = result.score.map(|v| v.to_string()).unwrap_or_else(|| "未提供有效分数".into());
             let _ = write!(html, "<li><a class=\"text-link\" href=\"{}\">{}</a><p>需要人工复核：{}</p><p>AI 参考分数：{}</p><p>AI 参考评语：{}</p></li>", e(&target.url()), e(&result.label), e(&result.reason), e(&score), e(&result.feedback));
@@ -205,51 +192,35 @@ fn ai_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
     let question=job.map(|j|j.question.as_str()).unwrap_or("");
     let rubric=job.map(|j|j.rubric.as_str()).unwrap_or("");
     let symbolic=job.is_some_and(|j|j.mode==crate::services::ta_ai::Mode::Symbolic);
-    if let Some(assignment)=w.assignments.iter().find(|a|a.id==s.column) {
-        let _=write!(html,"<p class=\"muted\">本作业满分：{:.2}（来自教学网）；象征性模式每处扣 {:.2}，最低 {:.2}。</p>",assignment.possible,assignment.possible*0.01,assignment.possible*0.9);
+    if let Some(maximum) = w.maximum {
+        let _=write!(html,"<p class=\"muted\">本作业满分：{:.2}（严小希设置）；象征性模式每处扣 {:.2}，最低 {:.2}。</p>",maximum,maximum*0.01,maximum*0.9);
     }
     let _=write!(html,r#"<details class="quick card" id="ta-ai-panel" {}><summary>AI 自动批改 <span>DeepSeek · 支持带图 PDF · 先生成草稿</span></summary>
-<p class="muted">将本作业每位学生最新一次提交的正文和附件发送至已配置的 DeepSeek API，产生 API 用量。范围为整份作业，不受当前分组、搜索或筛选影响。已有草稿、免评及正在作答的提交会跳过。请核对后手动同步成绩。</p>
+<p class="muted">将本作业待评分提交的正文和附件发送至已配置的 DeepSeek API，产生 API 用量。范围为整份作业的待评分队列，已有草稿会跳过。请核对后手动同步成绩。</p>
 <form action="/ta/action" method="post">{}
 <label>题目（必填）<textarea name="question" rows="4" required maxlength="30000" placeholder="请键入本次作业的完整题目">{}</textarea></label>
 <label style="margin-top:12px">评分标准（可选）<textarea name="rubric" rows="2" maxlength="10000" placeholder="可补充参考答案、各题分值与扣分要求">{}</textarea></label>
 <label style="margin-top:12px">评分模式<select name="ai_mode"><option value="strict"{}>严格评分</option><option value="symbolic"{}>象征性评分</option></select></label>
 <p class="muted">严格：按正确性和评分标准打分。象征性：有实质作答即给分，每处错误扣满分的 1%，最低保留 90%（10 分制：错一处扣 0.1，最低 9 分）。空白、无关或无法读取的提交需人工处理。两种模式的评语均为简洁、具体的 2—4 句。</p>
-<label class="check"><input type="checkbox" name="include_graded" value="1"{}>也为教学网已评分提交生成新草稿（已有草稿仍跳过）</label>
 <div class="form-bottom" style="margin-top:14px"><button name="action" value="ai_start" data-ai-start{}>开始批改整份作业</button></div></form>
 <div id="ta-ai-status" role="status" aria-live="polite" data-course="{}" data-column="{}" data-active="{}" style="margin-top:16px">{}</div>
 <form action="/ta/action" method="post" data-ai-cancel {}>{}<input type="hidden" name="job_id" value="{}"><button class="ghost small" name="action" value="ai_cancel">取消后台批改</button></form>
-</details>"#,if active{"open"}else{""},context(s,csrf),e(question),e(rubric),if symbolic{""}else{" selected"},if symbolic{" selected"}else{""},if job.is_some_and(|j|j.include_graded){" checked"}else{""},if active{" disabled"}else{""},e(&s.course),e(&s.column),active,ai_status(job,s),if active{""}else{"hidden"},context(s,csrf),job.map(|j|j.id.to_string()).unwrap_or_default());
+</details>"#,if active{"open"}else{""},context(s,csrf),e(question),e(rubric),if symbolic{""}else{" selected"},if symbolic{" selected"}else{""},if active{" disabled"}else{""},e(&s.course),e(&s.column),active,ai_status(job,s),if active{""}else{"hidden"},context(s,csrf),job.map(|j|j.id.to_string()).unwrap_or_default());
 }
 fn filters(html: &mut String, s: &Selection, w: &Workspace) {
     let _ = write!(html,"<form class=\"filters card\" method=\"get\" action=\"/ta\">{}<label>作业<select name=\"column\">",hidden("course",&s.course));
     for a in &w.assignments {
         let _ = write!(
             html,
-            "<option value=\"{}\"{}>{} · 满分 {}</option>",
+            "<option value=\"{}\"{}>{}</option>",
             e(&a.id),
             selected(&s.column, &a.id),
-            e(&a.name),
-            a.possible
-        );
-    }
-    html.push_str(
-        "</select></label><label>批改组<select name=\"group\"><option value=\"\">全部学生</option>",
-    );
-    for g in &w.groups {
-        let _ = write!(
-            html,
-            "<option value=\"{}\"{}>{}</option>",
-            e(&g.id),
-            selected(&s.group, &g.id),
-            e(&g.name)
+            e(&a.name)
         );
     }
     html.push_str("</select></label><label>评分状态<select name=\"filter\">");
     for (value, label) in [
-        ("", "全部提交"),
-        ("ungraded", "待评分"),
-        ("graded", "已评分"),
+        ("", "全部待评分提交"),
         ("draft", "有待同步草稿"),
     ] {
         let _ = write!(
@@ -258,37 +229,33 @@ fn filters(html: &mut String, s: &Selection, w: &Workspace) {
             selected(&s.filter, value)
         );
     }
-    let _ = write!(html,"</select></label><label class=\"search\">查找学生<input name=\"search\" value=\"{}\" placeholder=\"姓名或学号\" maxlength=\"100\"></label><label class=\"check\"><input type=\"checkbox\" name=\"history\" value=\"1\"{}>显示历史提交</label><button>应用筛选</button></form>",e(&s.search),if s.history == "1" {" checked"}else{""});
+    let _ = write!(html, r#"</select></label><label class="search">查找学生<input name="search" value="{}" placeholder="学生姓名" maxlength="100"></label><button>应用筛选</button></form>"#, e(&s.search));
 }
 
 fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
     let visible = visible_attempts(s, w);
-    let possible = w
-        .assignments
-        .iter()
-        .find(|a| a.id == s.column)
-        .map(|a| a.possible)
-        .unwrap_or(0.0);
-    let _ = write!(html,"<details class=\"quick card\"><summary><strong>快速批改</strong><span>选中提交，统一填写分数与评语</span></summary><form id=\"bulk-form\" method=\"post\" action=\"/ta/action\">{}<div class=\"quick-fields\"><label>统一分数 / {possible}<input type=\"number\" name=\"score\" min=\"0\" max=\"{possible}\" step=\"0.01\" required placeholder=\"请输入分数\"></label><label>统一评语<textarea name=\"feedback\" rows=\"2\" maxlength=\"10000\" placeholder=\"可选，应用到选中的提交\"></textarea></label></div><label class=\"check\"><input type=\"checkbox\" name=\"select_visible\" value=\"yes\">选择当前筛选下的全部可评分提交</label><div class=\"form-bottom\"><label class=\"check\"><input type=\"checkbox\" name=\"overwrite\" value=\"yes\">允许修改已评分记录</label><button class=\"ghost\" name=\"action\" value=\"full_bulk\" formnovalidate>选中项满分草稿</button><button name=\"action\" value=\"save_bulk\">保存选中项为草稿</button></div><p class=\"muted\">在下方列表勾选提交，每次最多 200 份。不会自动修改未选中的学生或历史提交。</p></form></details>",context(s,csrf));
-    for a in &visible {
-        if can_grade(a) {
-            html.push_str(&format!(
-                "<input type=\"hidden\" name=\"visible\" value=\"{}:{}\" form=\"bulk-form\">",
-                e(&a.id),
-                e(&a.revision)
-            ));
+    if let Some(possible) = w.maximum {
+        let _ = write!(html,"<details class=\"quick card\"><summary><strong>快速批改</strong><span>选中提交，统一填写分数与评语</span></summary><form id=\"bulk-form\" method=\"post\" action=\"/ta/action\">{}<div class=\"quick-fields\"><label>统一分数 / {possible}<input type=\"number\" name=\"score\" min=\"0\" max=\"{possible}\" step=\"0.01\" required placeholder=\"请输入分数\"></label><label>统一评语<textarea name=\"feedback\" rows=\"2\" maxlength=\"10000\" placeholder=\"可选，应用到选中的提交\"></textarea></label></div><label class=\"check\"><input type=\"checkbox\" name=\"select_visible\" value=\"yes\">选择当前筛选下的全部可评分提交</label><div class=\"form-bottom\"><button class=\"ghost\" name=\"action\" value=\"full_bulk\" formnovalidate>选中项满分草稿</button><button name=\"action\" value=\"save_bulk\">保存选中项为草稿</button></div><p class=\"muted\">在下方列表勾选提交，每次最多 200 份。</p></form></details>",context(s,csrf));
+        for a in &visible {
+            let _ = write!(html, r#"<input type="hidden" name="visible" value="{}:{}" form="bulk-form">"#,
+                e(&a.id), e(&a.revision));
         }
+    } else {
+        html.push_str("<p class=\"muted\">请先设置本作业满分，再保存评分或启动 AI 批改。</p>");
     }
     html.push_str("<div class=\"grading-layout\"><section class=\"submission-list card\"><div class=\"list-heading\"><h3>学生提交</h3><span class=\"muted\">勾选可快速批改</span></div><div class=\"student-scroll\">");
     for a in &visible {
-        let student = &w.students[&a.user_id];
         let mut target = s.clone();
         target.attempt = a.id.clone();
         target.notice.clear();
-        let _ = write!(html,"<div class=\"student-row{}\"><input type=\"checkbox\" name=\"selected\" value=\"{}:{}\" form=\"bulk-form\" aria-label=\"选择 {} 的这次提交\"{}><a href=\"{}\"{}><div class=\"row-title\"><strong>{}</strong><span class=\"badge{}\">{}</span></div><small>{} · {}</small><small>{}{}</small></a></div>",
-            if a.id == s.attempt {" active"}else{""},e(&a.id),e(&a.revision),e(&student.name),if !can_grade(a) {" disabled"}else{""},e(&target.url()),
-            if a.id == s.attempt {" aria-current=\"true\""}else{""},e(&student.name),if is_graded(a) {" done"}else{""},status(a),e(&student.number),e(&date(&a.date)),
-            a.score.map(|v|format!("得分 {v} / {possible}")).unwrap_or_else(||"尚未评分".into()),if draft_for(w,a).is_some(){" · 有草稿"}else{""});
+        let _ = write!(html, r#"<div class="student-row{}">"#, if a.id == s.attempt { " active" } else { "" });
+        if w.maximum.is_some() {
+            let _ = write!(html, r#"<input type="checkbox" name="selected" value="{}:{}" form="bulk-form" aria-label="选择 {} 的这次提交">"#,
+                e(&a.id), e(&a.revision), e(&a.student_name));
+        }
+        let _ = write!(html, r#"<a href="{}"{}><div class="row-title"><strong>{}</strong><span class="badge">{}</span></div><small>{}</small></a></div>"#,
+            e(&target.url()), if a.id == s.attempt { r#" aria-current="true""# } else { "" },
+            e(&a.student_name), if draft_for(w, a).is_some() { "有草稿" } else { "待评分" }, e(&date(&a.date)));
     }
     if visible.is_empty() {
         html.push_str("<div class=\"empty compact\">没有符合筛选条件的提交</div>");
@@ -297,13 +264,13 @@ fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
     let current = visible.iter().position(|a| a.id == s.attempt);
     if let Some(index) = current {
         let a = visible[index];
-        let student = &w.students[&a.user_id];
         let draft = draft_for(w, a);
         let ai_review = w.ai_job.as_ref().and_then(|job| job.reviews.iter().find(|r| r.attempt == a.id && r.revision == a.revision));
         if let Some(result) = ai_review {
             let _ = write!(html, "<div class=\"alert\">需要人工复核：{}。以下为 AI 参考结果，请核对后保存。</div>", e(&result.reason));
         }
-        let _ = write!(html,"<div class=\"reviewer-heading\"><div><h3>{} <span class=\"muted\">{}</span></h3><p class=\"muted\">提交于 {} · 第 {} / {} 份</p></div><span class=\"badge\">{}</span></div><nav class=\"attempt-nav\" aria-label=\"切换学生\">",e(&student.name),e(&student.number),e(&date(&a.date)),index+1,visible.len(),status(a));
+        let _ = write!(html, r#"<div class="reviewer-heading"><div><h3>{}</h3><p class="muted">提交于 {} · 第 {} / {} 份</p></div></div><nav class="attempt-nav" aria-label="切换学生">"#,
+            e(&a.student_name), e(&date(&a.date)), index + 1, visible.len());
         for (label, position) in [
             ("← 上一份", index.checked_sub(1)),
             (
@@ -355,7 +322,7 @@ fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
             }
             html.push_str("</div>");
         }
-        let _=write!(html,"<a class=\"text-link source-link\" href=\"https://course.pku.edu.cn/webapps/assignment/gradeAssignmentRedirector?outcomeDefinitionId={}&amp;course_id={}&amp;attempt_id={}&amp;courseMembershipId={}\" target=\"_blank\" rel=\"noopener noreferrer\">在教学网查看原始提交 ↗</a>",e(&s.column),e(&s.course),e(&a.id),e(&student.membership));
+        let _=write!(html,"<a class=\"text-link source-link\" href=\"https://course.pku.edu.cn/webapps/assignment/gradeAssignmentRedirector?course_id={}&amp;attempt_id={}\" target=\"_blank\" rel=\"noopener noreferrer\">在教学网查看原始提交 ↗</a>",e(&s.course),e(&a.id));
         if let Some(error) = draft.and_then(|d| d.error.as_ref()) {
             let _ = write!(
                 html,
@@ -363,24 +330,20 @@ fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
                 e(error)
             );
         }
-        if can_grade(a) {
+        if let Some(possible) = w.maximum {
             let score = draft
                 .map(|d| d.score)
                 .or_else(|| ai_review.and_then(|r| r.score))
-                .or(a.score)
                 .map(|v| v.to_string())
                 .unwrap_or_default();
             let feedback = draft.map(|d| d.feedback.as_str()).or_else(|| ai_review.map(|r| r.feedback.as_str())).unwrap_or("");
             let next = visible.get(index + 1).map(|a| a.id.as_str()).unwrap_or("");
             let _=write!(html,"<form class=\"score-form\" method=\"post\" action=\"/ta/action\">{}{}{}{}<div class=\"score-heading\"><h4>评分与反馈</h4><span class=\"muted\">{}</span></div><label>得分 <span class=\"muted\">/ {possible}</span><input type=\"number\" name=\"score\" value=\"{}\" min=\"0\" max=\"{possible}\" step=\"0.01\" required></label><label>给学生的评语<textarea name=\"feedback\" rows=\"5\" maxlength=\"10000\" placeholder=\"写下扣分理由、改进建议或鼓励…\">{}</textarea></label>",context(s,csrf),hidden("attempt",&a.id),hidden("revision",&a.revision),hidden("next",next),if draft.is_some(){"已载入本地草稿"}else{"保存后可在确认页同步"},e(&score),e(feedback));
-            if is_graded(a) {
-                html.push_str("<label class=\"check\"><input type=\"checkbox\" name=\"overwrite\" value=\"yes\" required>我已核对，允许修改这次提交的已有评分</label>");
-            }
             let blocked = draft.is_some_and(|d| d.error.is_some());
             let _=write!(html,"<div class=\"form-bottom\"><button class=\"ghost\" name=\"action\" value=\"save_single\"{}>保存草稿</button><button name=\"action\" value=\"save_single_next\"{}>{}</button></div><p class=\"muted\">草稿仅自己可见。同步时会把此分数和评语写入教学网当前这一次提交。</p></form>",if blocked{" disabled"}else{""},if blocked{" disabled"}else{""},if next.is_empty(){"保存本份草稿"}else{"保存并批改下一份 →"});
         }
     } else {
-        html.push_str("<div class=\"empty\"><h3>暂时没有可查看的提交</h3><p>可切换作业、批改组或评分状态。</p></div>");
+        html.push_str("<div class=\"empty\"><h3>暂时没有可查看的提交</h3><p>可切换作业或调整筛选条件。</p></div>");
     }
     html.push_str("</section></div>");
 }
@@ -389,7 +352,7 @@ fn review_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
     let drafts: Vec<_> = w
         .drafts
         .iter()
-        .filter(|d| !d.synced && w.students.contains_key(&d.student_id))
+        .filter(|d| !d.synced)
         .collect();
     if drafts.is_empty() {
         html.push_str("<div class=\"empty card\"><h3>所有草稿均已处理</h3><p>先在批改页保存评分，这里会显示待同步的分数和评语。</p></div>");
@@ -397,15 +360,28 @@ fn review_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
     }
     let _=write!(html,"<section class=\"card sync-panel\"><h3>核对评分后，再同步教学网</h3><p class=\"muted\">仅同步勾选的草稿。分数和评语会写入对应的具体提交，不会自动覆盖其他历史提交。</p><form method=\"post\" action=\"/ta/action\">{}<div class=\"table-scroll\"><table><thead><tr><th>选择</th><th>学生 / 提交</th><th>分数</th><th>给学生的评语</th><th>状态</th></tr></thead><tbody>",context(s,csrf));
     for d in drafts {
-        let student = &w.students[&d.student_id];
         let attempt = w.attempts.iter().find(|a| a.id == d.attempt_id);
-        let stale = attempt.is_none_or(|a| a.revision != d.revision);
-        let mut target = s.clone();
-        target.attempt = d.attempt_id.clone();
-        target.review.clear();
-        target.history = "1".into();
-        target.notice.clear();
-        let _=write!(html,"<tr><td><input type=\"checkbox\" name=\"draft\" value=\"{}\" aria-label=\"选择 {} 的草稿\"></td><td><a class=\"text-link\" href=\"{}\">{}</a><small>{} · {}</small></td><td class=\"score-number\">{}</td><td class=\"feedback-cell\">{}</td><td><span class=\"badge\">{}</span>{}</td></tr>",e(&d.attempt_id),e(&student.name),e(&target.url()),e(&student.name),e(&student.number),e(&date(attempt.map(|a|a.date.as_str()).unwrap_or("提交已变化"))),d.score,e(&d.feedback),if d.error.is_some(){"需核对"}else if stale{"状态已变化"}else{"待同步"},d.error.as_ref().map(|error|format!("<small class=\"error-text\">{}</small>",e(error))).unwrap_or_default());
+        let current = attempt.filter(|a| a.revision == d.revision);
+        let stale = current.is_none();
+        let name = attempt.map(|a| a.student_name.as_str()).unwrap_or(&d.student_name);
+        let name = if name.is_empty() { d.attempt_id.as_str() } else { name };
+        let detail = current.map(|a| a.date.as_str()).unwrap_or("提交已不在队列中或版本已变化");
+        let label = if attempt.is_some() {
+            let mut target = s.clone();
+            target.attempt = d.attempt_id.clone();
+            target.filter.clear();
+            target.search.clear();
+            target.review.clear();
+            target.notice.clear();
+            format!(r#"<a class="text-link" href="{}">{}</a>"#, e(&target.url()), e(name))
+        } else {
+            e(name)
+        };
+        let status = if d.error.is_some() { "需核对" } else if stale { "状态已变化" } else { "待同步" };
+        let error = d.error.as_ref()
+            .map(|error| format!(r#"<small class="error-text">{}</small>"#, e(error))).unwrap_or_default();
+        let _ = write!(html, r#"<tr><td><input type="checkbox" name="draft" value="{}" aria-label="选择 {} 的草稿"></td><td>{label}<small>{}</small></td><td class="score-number">{}</td><td class="feedback-cell">{}</td><td><span class="badge">{status}</span>{error}</td></tr>"#,
+            e(&d.attempt_id), e(name), e(&date(detail)), d.score, e(&d.feedback));
     }
     html.push_str("</tbody></table></div><label class=\"check confirm-check\"><input type=\"checkbox\" name=\"confirmed\" value=\"yes\">我已核对选中的分数、评语和提交记录，确认写入教学网</label><div class=\"form-bottom\"><button class=\"ghost\" name=\"action\" value=\"discard\" formnovalidate>丢弃选中草稿</button><button name=\"action\" value=\"commit\">确认同步选中评分</button></div><p class=\"muted\">同步后会回读核验。遇到提交变更或未确认结果时停止，已保存的草稿会保留。曾登分但结果未确认的记录，请先在教学网核对。</p></form></section>");
 }
@@ -528,13 +504,13 @@ const SCRIPT: &str = r#"<script>
 </script>"#;
 
 const CSS: &str = r#"
-button,.button{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid transparent;border-radius:10px;padding:10px 14px;background:var(--accent);color:white;font:inherit;text-decoration:none;cursor:pointer;font-weight:600}button:hover,.button:hover{filter:brightness(.94)}button:disabled{opacity:.45;cursor:not-allowed}.ghost{background:#fffafa;color:var(--ink);border-color:var(--line)}.small{padding:6px 10px;font-size:13px}a{color:inherit}.text-link{color:var(--accent);text-decoration:none;font-weight:600}.text-link:hover{text-decoration:underline}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}h2,h3,h4,p{margin-top:0}h2{font-size:21px;margin-bottom:0}h3{font-size:17px;margin-bottom:10px}h4{font-size:15px;margin-bottom:10px}.muted,small{color:var(--muted);font-size:13px}.ta-workspace{display:grid;grid-template-columns:minmax(220px,23%) minmax(0,1fr);gap:clamp(12px,1.6vw,28px);padding:16px var(--replay-gutter) 40px}.course-panel{background:linear-gradient(150deg,#fcf5f5,#fcf0f0);border-radius:12px;padding:20px 18px;min-width:0;align-self:start}.panel-heading,.section-header,.reviewer-heading,.form-bottom,.list-heading,.score-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}.panel-heading h2{font-size:18px}.course-panel>.muted{margin:10px 0 18px}.course-list{display:grid;gap:6px}.course-item{display:flex;align-items:flex-start;gap:10px;padding:13px 10px;border-radius:10px;text-decoration:none;overflow-wrap:anywhere}.course-item.active,.course-item:hover{background:#fce5e5;color:var(--accent)}.course-item strong{display:block;font-size:14px}.course-item small{display:block;margin-top:5px}.course-symbol{font-size:22px;line-height:1.2;color:var(--accent)}.sidebar-note{border-top:1px solid var(--line);margin-top:28px;padding-top:18px;font-size:13px}.sidebar-note p{color:var(--muted);margin:9px 0 14px}.ta-content{min-width:0}.section-header{padding:12px 0 18px;border-bottom:1px solid var(--line);margin-bottom:16px}.section-header h2{margin-top:5px}.card{background:#fffdfd;border:1px solid var(--line);border-radius:12px}.filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end;padding:16px;margin-bottom:16px}label{display:grid;gap:6px;font-size:13px;font-weight:600}input,select,textarea{font:inherit;color:var(--ink);border:1px solid #ddc8ca;background:white;border-radius:8px;padding:9px 10px;max-width:100%}select{min-width:130px}input[type=number]{width:145px}textarea{width:100%;resize:vertical}input[type=checkbox]{width:17px;height:17px;accent-color:var(--accent);flex:none;margin:0}.check{display:flex;gap:8px;align-items:center;font-weight:400;line-height:1.5}.filters .check{padding:10px 0}.filters .search{flex:1;min-width:140px}.filters input:not([type=checkbox]){width:100%;min-width:0}.stats{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:12px;background:linear-gradient(120deg,#fffafa,#fdf1f1);padding:18px 0;margin:16px 0}.stats>div{display:grid;gap:2px;padding:0 20px;border-right:1px solid var(--line)}.stats>div:last-child{border:0}.stats strong{font-size:26px;color:var(--accent);font-weight:600}.stats span{font-size:13px;color:var(--muted)}.workspace-tabs{display:flex;gap:24px;border-bottom:1px solid var(--line);margin:22px 0 18px}.workspace-tabs a{padding:10px 0;text-decoration:none;color:var(--muted);font-weight:600}.workspace-tabs a[aria-current=page]{color:var(--accent);border-bottom:2px solid var(--accent)}.badge{display:inline-block;padding:3px 8px;border-radius:6px;background:#f8e8e8;color:#963b42;font-size:12px;white-space:nowrap;font-weight:500}.badge.done{background:#edf4ee;color:#386b43}.quick{padding:16px 18px;margin-bottom:18px}.quick summary{cursor:pointer;color:var(--accent)}.quick summary span{font-size:13px;color:var(--muted);margin-left:12px}.quick form{margin-top:18px}.quick-fields{display:grid;grid-template-columns:160px minmax(0,1fr);gap:16px;margin-bottom:14px}.quick p,.score-form>p{margin:12px 0 0}.grading-layout{display:grid;grid-template-columns:minmax(215px,30%) minmax(0,1fr);gap:16px;align-items:start}.submission-list{overflow:hidden}.list-heading{padding:16px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:4px}.list-heading h3{margin:0}.list-heading span{font-size:12px}.student-scroll{max-height:780px;overflow-y:auto}.student-row{display:flex;align-items:center;gap:10px;padding:14px 12px;border-bottom:1px solid #f1e5e5}.student-row:last-child{border-bottom:0}.student-row.active{background:#fbeaea;box-shadow:inset 3px 0 var(--accent)}.student-row>a{flex:1;text-decoration:none;min-width:0}.student-row small{display:block;font-size:12px;margin-top:5px;overflow-wrap:anywhere}.row-title{display:flex;gap:6px;justify-content:space-between;align-items:center;flex-wrap:wrap}.reviewer{padding:22px;min-width:0}.reviewer-heading{align-items:start}.reviewer-heading p{margin-bottom:0}.reviewer-heading h3 .muted{margin-left:6px;font-weight:400}.attempt-nav{display:flex;justify-content:space-between;gap:8px;margin:16px 0 22px}.attachment{display:flex;justify-content:space-between;gap:14px;padding:12px;background:#fcf4f4;border-radius:8px;margin-bottom:8px;overflow-wrap:anywhere}.attachment-list{margin-bottom:12px}.submission-text{white-space:pre-wrap;overflow-wrap:anywhere;background:#fcf6f6;padding:14px;border-radius:8px;font:inherit;max-height:400px;overflow:auto}.source-link{display:inline-block;margin-bottom:20px;font-size:13px}.pdf-details{margin:8px 0 18px}.pdf-details summary{cursor:pointer;color:var(--accent);font-size:13px;padding:5px 0}.pdf-details iframe{width:100%;height:620px;border:1px solid var(--line);border-radius:8px;margin:10px 0}.score-form{border-top:1px solid var(--line);padding-top:20px;display:grid;gap:16px}.score-heading h4{margin:0}.form-bottom{justify-content:flex-end;flex-wrap:wrap}.form-bottom>.check{margin-right:auto}.alert{padding:13px 16px;border-radius:10px;margin-bottom:16px;overflow-wrap:anywhere}.alert a{font-weight:600}.error{background:#fff0ed;border:1px solid #ebc0b8;color:#9b302b}.success{background:#eff6ef;border:1px solid #c7ddc8;color:#386b43}.empty{text-align:center;padding:45px 24px;color:var(--muted)}.empty h2,.empty h3{color:var(--ink);margin-bottom:10px}.empty p{max-width:500px;margin:0 auto 20px}.empty.compact{padding:24px 8px}.welcome{margin-top:12px;min-height:330px;display:flex;flex-direction:column;align-items:center;justify-content:center}.empty-mark{font-size:38px;color:var(--accent);margin-bottom:16px}.sync-panel{padding:22px}.table-scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;text-align:left;margin:16px 0}th{font-size:12px;color:var(--muted);background:#fcf3f3}th,td{padding:13px 12px;border-bottom:1px solid var(--line);vertical-align:top}td small{display:block;margin-top:5px}.score-number{font-size:18px;font-weight:600;color:var(--accent)}.feedback-cell{white-space:pre-wrap;overflow-wrap:anywhere;min-width:160px;max-width:350px;font-size:13px}.error-text{max-width:220px;color:#9b302b;white-space:normal}.confirm-check{padding:16px 0}.sync-panel>form>p{margin:14px 0 0}@media(min-width:1600px){.grading-layout{grid-template-columns:300px minmax(0,1fr)}.reviewer{padding:28px}}@media(max-width:1100px){.ta-workspace{grid-template-columns:210px minmax(0,1fr)}.grading-layout{grid-template-columns:1fr}.student-scroll{max-height:300px}.quick-fields{grid-template-columns:1fr}.quick summary span{display:block;margin:5px 0 0}}@media(max-width:720px){.ta-workspace{grid-template-columns:1fr;padding-top:12px}.course-panel{padding:16px}.course-list{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}.sidebar-note{display:none}.course-panel>.muted{margin-bottom:8px}.filters label{flex:1;min-width:130px}.filters select{width:100%}.stats>div{padding:0 10px}.stats strong{font-size:22px}.stats span{font-size:12px}.reviewer{padding:16px}.reviewer-heading{flex-wrap:wrap}.section-header{align-items:flex-start}.workspace-tabs{gap:16px}.pdf-details iframe{height:450px}.hero-copy{max-width:85%}}
+button,.button{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid transparent;border-radius:10px;padding:10px 14px;background:var(--accent);color:white;font:inherit;text-decoration:none;cursor:pointer;font-weight:600}button:hover,.button:hover{filter:brightness(.94)}button:disabled{opacity:.45;cursor:not-allowed}.ghost{background:#fffafa;color:var(--ink);border-color:var(--line)}.small{padding:6px 10px;font-size:13px}a{color:inherit}.text-link{color:var(--accent);text-decoration:none;font-weight:600}.text-link:hover{text-decoration:underline}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}h2,h3,h4,p{margin-top:0}h2{font-size:21px;margin-bottom:0}h3{font-size:17px;margin-bottom:10px}h4{font-size:15px;margin-bottom:10px}.muted,small{color:var(--muted);font-size:13px}.ta-workspace{display:grid;grid-template-columns:minmax(220px,23%) minmax(0,1fr);gap:clamp(12px,1.6vw,28px);padding:16px var(--replay-gutter) 40px}.course-panel{background:linear-gradient(150deg,#fcf5f5,#fcf0f0);border-radius:12px;padding:20px 18px;min-width:0;align-self:start}.panel-heading,.section-header,.reviewer-heading,.form-bottom,.list-heading,.score-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}.panel-heading h2{font-size:18px}.course-panel>.muted{margin:10px 0 18px}.course-list{display:grid;gap:6px}.course-item{display:flex;align-items:flex-start;gap:10px;padding:13px 10px;border-radius:10px;text-decoration:none;overflow-wrap:anywhere}.course-item.active,.course-item:hover{background:#fce5e5;color:var(--accent)}.course-item strong{display:block;font-size:14px}.course-item small{display:block;margin-top:5px}.course-symbol{font-size:22px;line-height:1.2;color:var(--accent)}.sidebar-note{border-top:1px solid var(--line);margin-top:28px;padding-top:18px;font-size:13px}.sidebar-note p{color:var(--muted);margin:9px 0 14px}.ta-content{min-width:0}.section-header{padding:12px 0 18px;border-bottom:1px solid var(--line);margin-bottom:16px}.section-header h2{margin-top:5px}.card{background:#fffdfd;border:1px solid var(--line);border-radius:12px}.filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end;padding:16px;margin-bottom:16px}label{display:grid;gap:6px;font-size:13px;font-weight:600}input,select,textarea{font:inherit;color:var(--ink);border:1px solid #ddc8ca;background:white;border-radius:8px;padding:9px 10px;max-width:100%}select{min-width:130px}input[type=number]{width:145px}textarea{width:100%;resize:vertical}input[type=checkbox]{width:17px;height:17px;accent-color:var(--accent);flex:none;margin:0}.check{display:flex;gap:8px;align-items:center;font-weight:400;line-height:1.5}.filters .check{padding:10px 0}.filters .search{flex:1;min-width:140px}.filters input:not([type=checkbox]){width:100%;min-width:0}.stats{display:grid;grid-template-columns:repeat(2,1fr);border:1px solid var(--line);border-radius:12px;background:linear-gradient(120deg,#fffafa,#fdf1f1);padding:18px 0;margin:16px 0}.stats>div{display:grid;gap:2px;padding:0 20px;border-right:1px solid var(--line)}.stats>div:last-child{border:0}.stats strong{font-size:26px;color:var(--accent);font-weight:600}.stats span{font-size:13px;color:var(--muted)}.workspace-tabs{display:flex;gap:24px;border-bottom:1px solid var(--line);margin:22px 0 18px}.workspace-tabs a{padding:10px 0;text-decoration:none;color:var(--muted);font-weight:600}.workspace-tabs a[aria-current=page]{color:var(--accent);border-bottom:2px solid var(--accent)}.badge{display:inline-block;padding:3px 8px;border-radius:6px;background:#f8e8e8;color:#963b42;font-size:12px;white-space:nowrap;font-weight:500}.badge.done{background:#edf4ee;color:#386b43}.quick{padding:16px 18px;margin-bottom:18px}.quick summary{cursor:pointer;color:var(--accent)}.quick summary span{font-size:13px;color:var(--muted);margin-left:12px}.quick form{margin-top:18px}.quick-fields{display:grid;grid-template-columns:160px minmax(0,1fr);gap:16px;margin-bottom:14px}.quick p,.score-form>p{margin:12px 0 0}.grading-layout{display:grid;grid-template-columns:minmax(215px,30%) minmax(0,1fr);gap:16px;align-items:start}.submission-list{overflow:hidden}.list-heading{padding:16px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:4px}.list-heading h3{margin:0}.list-heading span{font-size:12px}.student-scroll{max-height:780px;overflow-y:auto}.student-row{display:flex;align-items:center;gap:10px;padding:14px 12px;border-bottom:1px solid #f1e5e5}.student-row:last-child{border-bottom:0}.student-row.active{background:#fbeaea;box-shadow:inset 3px 0 var(--accent)}.student-row>a{flex:1;text-decoration:none;min-width:0}.student-row small{display:block;font-size:12px;margin-top:5px;overflow-wrap:anywhere}.row-title{display:flex;gap:6px;justify-content:space-between;align-items:center;flex-wrap:wrap}.reviewer{padding:22px;min-width:0}.reviewer-heading{align-items:start}.reviewer-heading p{margin-bottom:0}.reviewer-heading h3 .muted{margin-left:6px;font-weight:400}.attempt-nav{display:flex;justify-content:space-between;gap:8px;margin:16px 0 22px}.attachment{display:flex;justify-content:space-between;gap:14px;padding:12px;background:#fcf4f4;border-radius:8px;margin-bottom:8px;overflow-wrap:anywhere}.attachment-list{margin-bottom:12px}.submission-text{white-space:pre-wrap;overflow-wrap:anywhere;background:#fcf6f6;padding:14px;border-radius:8px;font:inherit;max-height:400px;overflow:auto}.source-link{display:inline-block;margin-bottom:20px;font-size:13px}.pdf-details{margin:8px 0 18px}.pdf-details summary{cursor:pointer;color:var(--accent);font-size:13px;padding:5px 0}.pdf-details iframe{width:100%;height:620px;border:1px solid var(--line);border-radius:8px;margin:10px 0}.score-form{border-top:1px solid var(--line);padding-top:20px;display:grid;gap:16px}.score-heading h4{margin:0}.form-bottom{justify-content:flex-end;flex-wrap:wrap}.form-bottom>.check{margin-right:auto}.alert{padding:13px 16px;border-radius:10px;margin-bottom:16px;overflow-wrap:anywhere}.alert a{font-weight:600}.error{background:#fff0ed;border:1px solid #ebc0b8;color:#9b302b}.success{background:#eff6ef;border:1px solid #c7ddc8;color:#386b43}.empty{text-align:center;padding:45px 24px;color:var(--muted)}.empty h2,.empty h3{color:var(--ink);margin-bottom:10px}.empty p{max-width:500px;margin:0 auto 20px}.empty.compact{padding:24px 8px}.welcome{margin-top:12px;min-height:330px;display:flex;flex-direction:column;align-items:center;justify-content:center}.empty-mark{font-size:38px;color:var(--accent);margin-bottom:16px}.sync-panel{padding:22px}.table-scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;text-align:left;margin:16px 0}th{font-size:12px;color:var(--muted);background:#fcf3f3}th,td{padding:13px 12px;border-bottom:1px solid var(--line);vertical-align:top}td small{display:block;margin-top:5px}.score-number{font-size:18px;font-weight:600;color:var(--accent)}.feedback-cell{white-space:pre-wrap;overflow-wrap:anywhere;min-width:160px;max-width:350px;font-size:13px}.error-text{max-width:220px;color:#9b302b;white-space:normal}.confirm-check{padding:16px 0}.sync-panel>form>p{margin:14px 0 0}@media(min-width:1600px){.grading-layout{grid-template-columns:300px minmax(0,1fr)}.reviewer{padding:28px}}@media(max-width:1100px){.ta-workspace{grid-template-columns:210px minmax(0,1fr)}.grading-layout{grid-template-columns:1fr}.student-scroll{max-height:300px}.quick-fields{grid-template-columns:1fr}.quick summary span{display:block;margin:5px 0 0}}@media(max-width:720px){.ta-workspace{grid-template-columns:1fr;padding-top:12px}.course-panel{padding:16px}.course-list{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}.sidebar-note{display:none}.course-panel>.muted{margin-bottom:8px}.filters label{flex:1;min-width:130px}.filters select{width:100%}.stats>div{padding:0 10px}.stats strong{font-size:22px}.stats span{font-size:12px}.reviewer{padding:16px}.reviewer-heading{flex-wrap:wrap}.section-header{align-items:flex-start}.workspace-tabs{gap:16px}.pdf-details iframe{height:450px}.hero-copy{max-width:85%}}
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::ta::{Assignment, Attachment, Course, Student, Submission};
+    use crate::services::ta::{Assignment, Attachment, Course, Submission};
 
     #[test]
     fn refresh_is_an_explicit_csrf_protected_post_and_keeps_selection() {
@@ -563,24 +539,14 @@ mod tests {
         w.assignments.push(Assignment {
             id: s.column.clone(),
             name: "作业一 · 基础练习".into(),
-            possible: 100.0,
+            attempts: Vec::new(),
         });
-        w.students.insert(
-            "_s_1".into(),
-            Student {
-                membership: "_m_1".into(),
-                number: "2600010001".into(),
-                name: "同学甲".into(),
-            },
-        );
+        w.maximum = Some(100.0);
         w.attempts.push(Attempt {
             id: s.attempt.clone(),
-            user_id: "_s_1".into(),
+            student_name: "同学甲".into(),
             date: "2026-11-13T12:30:00Z".into(),
-            status: "NeedsGrading".into(),
-            score: None,
             revision: "abc".into(),
-            exempt: false,
         });
         w.submission = Some(Submission {
             text: "<script>alert('x')</script>这是一份作业".into(),
@@ -602,6 +568,9 @@ mod tests {
         assert!(html.contains("value=\"strict\"") && html.contains("value=\"symbolic\""));
         assert!(html.contains("本作业满分：100.00") && html.contains("name=\"question\""));
         assert!(html.contains("data-ai-start") && html.contains("/api/ta/ai/status"));
+        assert!(html.contains("name=\"maximum\""));
+        assert!(html.contains("gradeAssignmentRedirector?course_id=_c_1&amp;attempt_id=_a_1"));
+        assert!(!html.contains("courseMembershipId"));
     }
     #[test]
     fn review_displays_exact_attempt_and_requires_confirmation() {
@@ -609,7 +578,7 @@ mod tests {
         s.review = "1".into();
         w.drafts.push(Draft {
             attempt_id: s.attempt.clone(),
-            student_id: "_s_1".into(),
+            student_name: "同学甲".into(),
             score: 90.0,
             feedback: "</textarea><script>".into(),
             revision: "abc".into(),
@@ -636,19 +605,19 @@ mod tests {
             if s.column.is_empty(){s.column=initial.column;}
             if s.attempt.is_empty(){s.attempt=initial.attempt;}
             w.courses.push(Course{id:"_c_2".into(),name:"数据结构与算法".into(),term:"26-27学年第1学期".into()});
-            w.groups.push(crate::services::ta::Group{id:"_g_1".into(),name:"第一批改组".into()});
             w.submission.as_mut().unwrap().text="第一题：使用双指针遍历数组，每个元素只访问一次，时间复杂度 O(n)，额外空间复杂度 O(1)。\n第二题：递归终止条件为区间长度小于 2，具体实现见附件。".into();
             for i in 2..=12 {
-                let id=format!("_s_{i}");
-                w.students.insert(id.clone(),Student{membership:format!("_m_{i}"),number:format!("260001{i:04}"),name:format!("同学{}",["乙","丙","丁","戊","己","庚","辛","壬","癸","子","丑"][i-2])});
-                w.attempts.push(Attempt{id:format!("_a_{i}"),user_id:id,date:"2026-11-13T14:15:00Z".into(),status:if i>8{"Completed"}else{"NeedsGrading"}.into(),score:if i>8{Some(95.0)}else{None},revision:"abc".into(),exempt:false});
+                let student_name = format!("同学{}", ["乙","丙","丁","戊","己","庚","辛","壬","癸","子","丑"][i-2]);
+                w.attempts.push(Attempt {
+                    id: format!("_a_{i}"), student_name, date: "2026-11-13T14:15:00Z".into(), revision: "abc".into(),
+                });
             }
-            for i in 1..=3 {w.drafts.push(Draft{attempt_id:format!("_a_{i}"),student_id:format!("_s_{i}"),score:90.0,feedback:"思路正确，请补充边界条件说明。".into(),revision:"abc".into(),updated_at:String::new(),synced:false,error:None});}
+            for i in 1..=3 {w.drafts.push(Draft{attempt_id:format!("_a_{i}"),student_name:format!("同学 {i}"),score:90.0,feedback:"思路正确，请补充边界条件说明。".into(),revision:"abc".into(),updated_at:String::new(),synced:false,error:None});}
             axum::Json(serde_json::json!({"html":fragment(&s,&w,"preview-only"),"url":s.url()}))
         })).route("/ta/action",axum::routing::post(|axum::Form(form):axum::Form<Vec<(String,String)>>|async move {
             let (mut s,mut w)=fixture();
             s.notice="预览：草稿已保存".into();
-            w.drafts.push(Draft{attempt_id:s.attempt.clone(),student_id:"_s_1".into(),score:super::super::field(&form,"score").parse().unwrap_or(100.0),feedback:super::super::field(&form,"feedback").into(),revision:"abc".into(),updated_at:String::new(),synced:false,error:None});
+            w.drafts.push(Draft{attempt_id:s.attempt.clone(),student_name:"同学甲".into(),score:super::super::field(&form,"score").parse().unwrap_or(100.0),feedback:super::super::field(&form,"feedback").into(),revision:"abc".into(),updated_at:String::new(),synced:false,error:None});
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             axum::Json(serde_json::json!({"html":fragment(&s,&w,"preview-only"),"url":s.url()}))
         })).route("/course-replay-hero-v3.webp",get(||async {

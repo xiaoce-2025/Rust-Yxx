@@ -17,7 +17,7 @@ use axum::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::PathBuf,
 };
 
@@ -33,15 +33,11 @@ pub(super) struct Selection {
     #[serde(default)]
     pub column: String,
     #[serde(default)]
-    pub group: String,
-    #[serde(default)]
     pub attempt: String,
     #[serde(default)]
     pub filter: String,
     #[serde(default)]
     pub search: String,
-    #[serde(default)]
-    pub history: String,
     #[serde(default)]
     pub review: String,
     #[serde(default)]
@@ -53,11 +49,9 @@ impl Selection {
         for (key, value) in [
             ("course", &self.course),
             ("column", &self.column),
-            ("group", &self.group),
             ("attempt", &self.attempt),
             ("filter", &self.filter),
             ("search", &self.search),
-            ("history", &self.history),
             ("review", &self.review),
             ("notice", &self.notice),
         ] {
@@ -76,8 +70,7 @@ pub(super) struct Workspace {
     pub ai_job: Option<crate::services::ta_ai::Job>,
     pub courses: Vec<ta::Course>,
     pub assignments: Vec<ta::Assignment>,
-    pub groups: Vec<ta::Group>,
-    pub students: HashMap<String, ta::Student>,
+    pub maximum: Option<f64>,
     pub attempts: Vec<ta::Attempt>,
     pub drafts: Vec<Draft>,
     pub submission: Option<ta::Submission>,
@@ -175,64 +168,42 @@ async fn load_workspace_with_client(
     if !workspace.courses.iter().any(|c| c.id == selection.course) {
         return Err("当前账号不是所选课程的助教".into());
     }
-    workspace.assignments = bb.assignments(&selection.course).await?;
-    workspace.groups = bb.groups(&selection.course).await?;
-    if selection.column.is_empty() {
-        selection.column = workspace
-            .assignments
-            .first()
-            .map(|a| a.id.clone())
-            .unwrap_or_default();
-    }
-    if selection.column.is_empty() {
-        return Ok(());
-    }
-    if !workspace
-        .assignments
-        .iter()
-        .any(|a| a.id == selection.column)
-    {
-        return Err("未找到所选作业".into());
-    }
-    workspace.ai_job = ai::snapshot(state, user.id, &selection.course, &selection.column).await?;
-    workspace.students = bb.students(&selection.course).await?;
-    workspace.attempts = bb.attempts(&selection.course, &selection.column).await?;
-    workspace.drafts = load_drafts(state, user.id, &selection.course, &selection.column).await?;
-    if !selection.group.is_empty() {
-        if !workspace.groups.iter().any(|g| g.id == selection.group) {
-            return Err("批改组不存在".into());
+    workspace.assignments = bb.grading_queue(&selection.course).await?;
+    let pending_columns = state.store.pending_grading_columns(
+        &PathBuf::from("ta_drafts").join(user.id.to_string()), &selection.course,
+    ).await.map_err(|error| error.to_string())?;
+    for column in pending_columns {
+        if ta::valid_id(&column).is_ok() && !workspace.assignments.iter().any(|a| a.id == column) {
+            workspace.assignments.push(ta::Assignment {
+                name: format!("待核对草稿 · {column}"), id: column, attempts: Vec::new(),
+            });
         }
-        let members = bb.group_users(&selection.course, &selection.group).await?;
-        workspace.students.retain(|id, _| members.contains(id));
     }
-    workspace
-        .attempts
-        .retain(|a| workspace.students.contains_key(&a.user_id));
-    workspace.attempts.sort_by(|a, b| {
-        let sa = &workspace.students[&a.user_id];
-        let sb = &workspace.students[&b.user_id];
-        sa.number
-            .cmp(&sb.number)
-            .then(b.date.cmp(&a.date))
-            .then(b.id.cmp(&a.id))
-    });
+    let selected = workspace.assignments.iter().position(|a| a.id == selection.column).unwrap_or_default();
+    let Some(assignment) = workspace.assignments.get_mut(selected) else {
+        selection.column.clear();
+        selection.attempt.clear();
+        return Ok(());
+    };
+    if selection.column != assignment.id {
+        selection.column.clone_from(&assignment.id);
+        selection.attempt.clear();
+    }
+    workspace.maximum = load_maximum(state, user.id, &selection.course, &selection.column).await?;
+    workspace.ai_job = ai::snapshot(state, user.id, &selection.course, &selection.column).await?;
+    workspace.drafts = load_drafts(state, user.id, &selection.course, &selection.column).await?;
+    workspace.attempts = std::mem::take(&mut assignment.attempts);
+    if workspace.attempts.is_empty() {
+        selection.review = "1".into();
+    }
     let visible = visible_attempts(selection, workspace);
     if selection.attempt.is_empty() {
         selection.attempt = visible.first().map(|a| a.id.clone()).unwrap_or_default();
     }
-    if let Some(attempt) = visible
-        .iter()
-        .find(|a| selection.review != "1" && a.id == selection.attempt)
-    {
-        workspace.submission = Some(
-            bb.submission(
-                &selection.course,
-                &selection.column,
-                attempt,
-                &workspace.students[&attempt.user_id],
-            )
-            .await?,
-        );
+    if selection.review != "1" {
+        if let Some(attempt) = visible.iter().find(|a| a.id == selection.attempt) {
+            workspace.submission = Some(bb.submission(&selection.course, attempt).await?);
+        }
     }
     Ok(())
 }
@@ -241,36 +212,34 @@ pub(super) fn visible_attempts<'a>(
     selection: &Selection,
     workspace: &'a Workspace,
 ) -> Vec<&'a ta::Attempt> {
-    let latest = ta::latest_attempts(&workspace.attempts);
     let search = selection.search.to_lowercase();
-    workspace
-        .attempts
-        .iter()
-        .filter(|a| {
-            let student = &workspace.students[&a.user_id];
-            let pending = workspace
-                .drafts
-                .iter()
-                .any(|d| d.attempt_id == a.id && !d.synced);
-            (selection.history == "1" || latest.contains(&a.id))
-                && (search.is_empty()
-                    || format!("{} {}", student.name, student.number)
-                        .to_lowercase()
-                        .contains(&search))
-                && match selection.filter.as_str() {
-                    "ungraded" => !is_graded(a) && !a.exempt,
-                    "graded" => is_graded(a),
-                    "draft" => pending,
-                    _ => true,
-                }
-        })
+    workspace.attempts.iter()
+        .filter(|a| a.student_name.to_lowercase().contains(&search))
+        .filter(|a| selection.filter != "draft" || workspace.drafts.iter()
+            .any(|d| !d.synced && d.attempt_id == a.id))
         .collect()
 }
-pub(super) fn is_graded(attempt: &ta::Attempt) -> bool {
-    ta::attempt_is_graded(&attempt.status, attempt.score)
+
+fn maximum_path(user: uuid::Uuid, course: &str, column: &str) -> Result<PathBuf, String> {
+    ta::valid_id(course)?;
+    ta::valid_id(column)?;
+    Ok(PathBuf::from("ta_maximum").join(user.to_string()).join(format!("{course}.{column}.json")))
 }
-pub(super) fn can_grade(attempt: &ta::Attempt) -> bool {
-    !attempt.exempt && !matches!(attempt.status.to_ascii_lowercase().as_str(), "inprogress" | "inprogressagain")
+
+async fn load_maximum(state: &AppState, user: uuid::Uuid, course: &str, column: &str) -> Result<Option<f64>, String> {
+    state.store.load_sidecar(&maximum_path(user, course, column)?).await
+}
+
+async fn require_maximum(state: &AppState, user: uuid::Uuid, course: &str, column: &str) -> Result<f64, String> {
+    load_maximum(state, user, course, column).await?.ok_or("请先在严小希设置本作业满分".into())
+}
+
+async fn save_maximum(state: &AppState, user: uuid::Uuid, course: &str, column: &str, maximum: f64) -> Result<(), String> {
+    if !maximum.is_finite() || maximum <= 0.0 {
+        return Err("满分必须大于 0".into());
+    }
+    ta::validate_score(maximum, maximum)?;
+    state.store.save_sidecar(&maximum_path(user, course, column)?, &maximum.to_string()).await
 }
 
 fn draft_path(user: uuid::Uuid, course: &str, column: &str) -> Result<PathBuf, String> {
@@ -316,11 +285,10 @@ fn selection_from(form: &[(String, String)]) -> Selection {
     Selection {
         course: field(form, "course").into(),
         column: field(form, "column").into(),
-        group: field(form, "group").into(),
         attempt: field(form, "attempt").into(),
         filter: field(form, "filter").into(),
         search: field(form, "search").into(),
-        history: field(form, "history").into(),
+        review: field(form, "review").into(),
         ..Default::default()
     }
 }
@@ -379,7 +347,12 @@ async fn action(
         }
         match load_workspace_with_client(&state, &user, &mut selection, &mut workspace, &bb).await {
             Ok(()) if operation == "refresh" => {
-                selection.notice = "已从教学网刷新当前课程的作业和提交，本地缓存已更新".into();
+                selection.notice = "已从教学网刷新当前课程的待评分队列".into();
+            }
+            Err(error) if operation == "refresh" => {
+                workspace = Workspace::default();
+                let _ = load_workspace(&state, &user, &mut selection, &mut workspace).await;
+                workspace.error = Some(format!("刷新待评分队列失败：{error}"));
             }
             Err(error) if workspace.error.is_none() => workspace.error = Some(error),
             _ => {}
@@ -436,7 +409,7 @@ async fn action(
                     workspace.drafts.retain(|d| d.attempt_id != attempt.id);
                     workspace.drafts.push(Draft {
                         attempt_id: attempt.id.clone(),
-                        student_id: attempt.user_id.clone(),
+                        student_name: attempt.student_name.clone(),
                         score,
                         feedback: field(&form, "feedback").into(),
                         revision: attempt.revision.clone(),
@@ -480,7 +453,7 @@ async fn mutate(
         "ai_cancel" => return ai::cancel(state,user,form,selection).await,
         _ => {}
     }
-    // Publishing grades must still check live permissions, revisions and score limits.
+    // Publishing grades requires a fresh view of the pending queue.
     let bb = Blackboard::cached(state, user, field(form, "action") == "commit");
     mutate_with_client(state, user, form, selection, &bb).await
 }
@@ -493,8 +466,6 @@ async fn mutate_with_client(
     bb: &Blackboard,
 ) -> Result<String, String> {
     bb.authorize(&selection.course).await?;
-    let assignment = bb.assignment(&selection.course, &selection.column).await?;
-    let mut drafts = load_drafts(state, user.id, &selection.course, &selection.column).await?;
     let action = field(form, "action");
     if action == "discard" {
         let selected: HashSet<_> = form
@@ -510,11 +481,19 @@ async fn mutate_with_client(
         selection.review = "1".into();
         return Ok("已丢弃选中的本地草稿".into());
     }
-    let attempts = bb.attempts(&selection.course, &selection.column).await?;
+    if action == "commit" && field(form, "confirmed") != "yes" {
+        return Err("请勾选确认，将选中草稿的分数和评语写入教学网".into());
+    }
+    let attempts = bb.grading_queue(&selection.course).await?.into_iter()
+        .find(|a| a.id == selection.column).ok_or("该作业当前没有待评分提交")?.attempts;
+    if action == "save_maximum" {
+        let maximum = field(form, "maximum").parse().map_err(|_| "请输入有效的作业满分")?;
+        save_maximum(state, user.id, &selection.course, &selection.column, maximum).await?;
+        return Ok(format!("已将本作业的本地满分设为 {maximum}"));
+    }
+    let maximum = require_maximum(state, user.id, &selection.course, &selection.column).await?;
+    let mut drafts = load_drafts(state, user.id, &selection.course, &selection.column).await?;
     if action == "commit" {
-        if field(form, "confirmed") != "yes" {
-            return Err("请勾选确认，将选中草稿的分数和评语写入教学网".into());
-        }
         let selected: HashSet<_> = form
             .iter()
             .filter(|(k, _)| k == "draft")
@@ -532,12 +511,12 @@ async fn mutate_with_client(
         // Validate the entire set before the first remote write.
         for &i in &indices {
             let d = &drafts[i];
-            ta::validate_score(d.score, assignment.possible)?;
+            ta::validate_score(d.score, maximum)?;
             let a = attempts
                 .iter()
-                .find(|a| a.id == d.attempt_id && a.user_id == d.student_id)
+                .find(|a| a.id == d.attempt_id)
                 .ok_or("提交记录已变化，请重新批改")?;
-            if !can_grade(a) || a.revision != d.revision {
+            if a.revision != d.revision {
                 return Err("教学网提交或评分状态已变化，请丢弃旧草稿并重新核对".into());
             }
             if d.error.is_some() {
@@ -549,12 +528,14 @@ async fn mutate_with_client(
         let mut done = 0;
         for i in indices {
             // Recheck immediately before each write, including changes during a long batch.
-            let fresh = bb.attempts(&selection.course, &selection.column).await?;
+            let fresh = bb.grading_queue(&selection.course).await?;
+            let fresh = fresh.iter().find(|a| a.id == selection.column)
+                .map(|a| a.attempts.as_slice()).unwrap_or_default();
             let d = &drafts[i];
             let a = fresh
                 .iter()
-                .find(|a| a.id == d.attempt_id && a.user_id == d.student_id)
-                .ok_or("提交记录已不存在")?;
+                .find(|a| a.id == d.attempt_id)
+                .ok_or_else(|| format!("已同步 {done} 份；下一份不在待评分队列中"))?;
             if a.revision != d.revision {
                 return Err(format!(
                     "已同步 {done} 份；下一份状态发生变化，已停止，请刷新核对"
@@ -609,6 +590,9 @@ async fn mutate_with_client(
             )
             .await?;
         }
+        if let Err(error) = bb.grading_queue(&selection.course).await {
+            tracing::warn!(target: "teaching_ta", %error, "登分完成后未能刷新待评分队列");
+        }
         selection.review = "1".into();
         return Ok(format!("已同步并回读确认 {done} 份评分"));
     }
@@ -620,11 +604,11 @@ async fn mutate_with_client(
     }
     let score = ta::validate_score(
         if action == "full_bulk" {
-            assignment.possible
+            maximum
         } else {
             field(form, "score").parse().map_err(|_| "请输入有效分数")?
         },
-        assignment.possible,
+        maximum,
     )?;
     let feedback = field(form, "feedback");
     if feedback.chars().count() > 10_000 {
@@ -647,30 +631,13 @@ async fn mutate_with_client(
     if unique.is_empty() || unique.len() != selected.len() || selected.len() > 200 {
         return Err("请选择 1 到 200 份不同的提交".into());
     }
-    let members = if selection.group.is_empty() {
-        None
-    } else {
-        Some(bb.group_users(&selection.course, &selection.group).await?)
-    };
     for &(id, revision) in &selected {
         let a = attempts
             .iter()
             .find(|a| a.id == id)
             .ok_or("所选提交不存在")?;
-        if !can_grade(a) {
-            return Err("所选提交已豁免或仍在提交中，不能评分".into());
-        }
-        if members
-            .as_ref()
-            .is_some_and(|members| !members.contains(&a.user_id))
-        {
-            return Err("所选提交不属于当前批改组".into());
-        }
         if a.revision != revision {
             return Err("提交或成绩已变化，请刷新页面后重新核对".into());
-        }
-        if is_graded(a) && field(form, "overwrite") != "yes" {
-            return Err("包含已评分提交，请明确勾选允许修改已评分记录".into());
         }
         if drafts
             .iter()
@@ -684,7 +651,7 @@ async fn mutate_with_client(
         let a = attempts.iter().find(|a| a.id == id).unwrap();
         edits.push(Draft {
             attempt_id: id.into(),
-            student_id: a.user_id.clone(),
+            student_name: a.student_name.clone(),
             score,
             feedback: feedback.into(),
             revision: a.revision.clone(),
@@ -727,26 +694,11 @@ async fn attachment(
     bb.authorize(&query.course)
         .await
         .map_err(ApiError::Forbidden)?;
-    bb.assignment(&query.course, &query.column)
-        .await
-        .map_err(ApiError::BadRequest)?;
-    let attempts = bb
-        .attempts(&query.course, &query.column)
-        .await
-        .map_err(ApiError::BadRequest)?;
-    let attempt = attempts
-        .iter()
-        .find(|a| a.id == query.attempt)
+    let queue = bb.grading_queue(&query.course).await.map_err(ApiError::BadRequest)?;
+    let attempt = queue.iter().find(|a| a.id == query.column)
+        .and_then(|a| a.attempts.iter().find(|a| a.id == query.attempt))
         .ok_or(ApiError::NotFound)?;
-    let students = bb
-        .students(&query.course)
-        .await
-        .map_err(ApiError::BadRequest)?;
-    let student = students.get(&attempt.user_id).ok_or(ApiError::NotFound)?;
-    let submission = bb
-        .submission(&query.course, &query.column, attempt, student)
-        .await
-        .map_err(ApiError::BadRequest)?;
+    let submission = bb.submission(&query.course, attempt).await.map_err(ApiError::BadRequest)?;
     let file = submission
         .files
         .iter()
@@ -759,7 +711,7 @@ async fn attachment(
     } else {
         "attachment"
     };
-    let filename = format!("{}_{}_{}", student.number, student.name, file.name);
+    let filename = format!("{}_{}", attempt.student_name, file.name);
     let disposition = format!(
         "{disposition}; filename=\"submission\"; filename*=UTF-8''{}",
         urlencoding::encode(&filename)
@@ -843,7 +795,7 @@ mod tests {
     ) {
         use axum::{routing::get, Json};
         use serde_json::json;
-        use std::sync::{Arc, Mutex};
+        use std::{collections::HashMap, sync::{Arc, Mutex}};
         #[derive(Default)]
         struct Remote {
             score: Option<f64>,
@@ -855,11 +807,12 @@ mod tests {
             .route("/webapps/portal/execute/tabs/tabAction", get(|| async {
                 axum::response::Html(r#"<a href=" /webapps/blackboard/execute/launcher?type=Course&amp;id=PkId{key=_c_1, dataType=blackboard.data.course.Course}&amp;url=">编号: 测试课程</a>"#)
             }))
-            .route("/learn/api/public/v2/courses/_c_1/gradebook/columns",get(||async {Json(json!({"results":[{"id":"_h_1","name":"作业","score":{"possible":100}}]}))}))
-            .route("/learn/api/public/v2/courses/_c_1/gradebook/columns/_h_1/attempts",get(|State(r):State<Arc<Mutex<Remote>>>|async move {
-                let r=r.lock().unwrap();Json(json!({"results":[
-                    {"id":"_a_old","userId":"_s_1","status":"NeedsGrading","attemptDate":"2026-11-10T00:00:00Z"},
-                    {"id":"_a_1","userId":"_s_1","status":if r.score.is_some(){"Completed"}else{"NeedsGrading"},"score":r.score,"attemptDate":"2026-11-12T00:00:00Z"}]}))
+            .route("/webapps/gradebook/do/instructor/viewNeedsGrading", get(|State(r): State<Arc<Mutex<Remote>>>| async move {
+                let mut rows = ta::grading_row("_c_1", "_h_1", "作业", "_a_old", "2026年11月10日");
+                if r.lock().unwrap().score.is_none() {
+                    rows.push_str(&ta::grading_row("_c_1", "_h_1", "作业", "_a_1", "2026年11月12日"));
+                }
+                Html(format!("<table>{rows}</table>"))
             }))
             .route("/webapps/gradebook/controller/reconcileGrades",get(||async {Html("<input name='blackboard.platform.security.NonceUtil.nonce.ajax' value='nonce'>")}))
             .route("/webapps/gradebook/controller/saveReconcileGrade",post(|State(r):State<Arc<Mutex<Remote>>>,Form(f):Form<HashMap<String,String>>|async move {
@@ -901,7 +854,14 @@ mod tests {
             column: "_h_1".into(),
             ..Default::default()
         };
-        let attempts = bb.attempts(&s.course, &s.column).await.unwrap();
+        let invalid_max = vec![("action".into(), "save_maximum".into()), ("maximum".into(), "99.999".into())];
+        assert!(mutate_with_client(&state, &user, &invalid_max, &mut s, &bb).await.is_err());
+        let max = vec![("action".into(), "save_maximum".into()), ("maximum".into(), "100".into())];
+        mutate_with_client(&state, &user, &max, &mut s, &bb).await.unwrap();
+        assert_eq!(load_maximum(&state, user.id, &s.course, &s.column).await.unwrap(), Some(100.0));
+        assert_eq!(load_maximum(&state, uuid::Uuid::new_v4(), &s.course, &s.column).await.unwrap(), None);
+        let queue = bb.grading_queue(&s.course).await.unwrap();
+        let attempts = &queue[0].attempts;
         let revision = attempts
             .iter()
             .find(|a| a.id == "_a_1")
@@ -940,6 +900,11 @@ mod tests {
             .is_err());
         assert!(remote.lock().unwrap().writes.is_empty());
         commit.push(("confirmed".into(), "yes".into()));
+        let draft_directory = PathBuf::from("ta_drafts").join(user.id.to_string());
+        assert_eq!(
+            state.store.pending_grading_columns(&draft_directory, &s.course).await.unwrap(),
+            [s.column.clone()],
+        );
         // An external change invalidates the draft before any write.
         remote.lock().unwrap().score = Some(1.0);
         assert!(mutate_with_client(&state, &user, &commit, &mut s, &bb)
@@ -960,6 +925,7 @@ mod tests {
                 .unwrap()[0]
                 .synced
         );
+        assert!(state.store.pending_grading_columns(&draft_directory, &s.course).await.unwrap().is_empty());
         // A second click must never write a synced draft again.
         assert!(mutate_with_client(&state, &user, &commit, &mut s, &bb)
             .await

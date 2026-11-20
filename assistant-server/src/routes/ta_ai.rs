@@ -60,7 +60,7 @@ pub(super) async fn start(
     form: &[(String, String)],
     s: &Selection,
 ) -> Result<String, String> {
-    path(user.id, &s.course, &s.column)?;
+    require_maximum(state, user.id, &s.course, &s.column).await?;
     let question = field(form, "question").trim();
     let rubric = field(form, "rubric").trim();
     if question.is_empty() || question.chars().count() > 30000 || rubric.chars().count() > 10000 {
@@ -87,7 +87,7 @@ pub(super) async fn start(
         question: question.into(),
         rubric: rubric.into(),
         mode,
-        include_graded: field(form, "include_graded") == "1",
+        include_graded: false,
         status: "queued".into(),
         message: "等待后台批改；只生成草稿，不直接登分".into(),
         total: 0,
@@ -214,11 +214,10 @@ async fn assess(
     job: &Job,
     maximum: f64,
     attempt: &ta::Attempt,
-    student: &ta::Student,
     cancel: &AtomicBool,
 ) -> Result<crate::services::ta_ai::Assessment, String> {
     let submission = bb
-        .submission(&job.course, &job.column, attempt, student)
+        .submission(&job.course, attempt)
         .await?;
     if submission.files.iter().filter(|f| {
         let ext = extension(&f.name);
@@ -310,18 +309,9 @@ async fn run_with_client(
     bb: &Blackboard,
 ) -> Result<(), String> {
     bb.authorize(&job.course).await?;
-    let assignment = bb.assignment(&job.course, &job.column).await?;
-    if !assignment.possible.is_finite() || assignment.possible <= 0.0 {
-        return Err("请先在教学网设置有效的作业满分".into());
-    }
-    let students = bb.students(&job.course).await?;
-    let attempts = bb.attempts(&job.course, &job.column).await?;
-    let latest = ta::latest_attempts(&attempts);
-    let mut attempts: Vec<_> = attempts
-        .into_iter()
-        .filter(|a| latest.contains(&a.id) && students.contains_key(&a.user_id))
-        .collect();
-    attempts.sort_by(|a, b| a.id.cmp(&b.id));
+    let maximum = require_maximum(state, user.id, &job.course, &job.column).await?;
+    let attempts = bb.grading_queue(&job.course).await?.into_iter()
+        .find(|a| a.id == job.column).ok_or("该作业当前没有待评分提交")?.attempts;
     job.total = attempts.len();
     job.status = "running".into();
     job.message = "正在读取提交并生成评分草稿".into();
@@ -332,21 +322,16 @@ async fn run_with_client(
         if cancel.load(Ordering::Relaxed) {
             return Ok(());
         }
-        if !can_grade(&attempt)
-            || (!job.include_graded && is_graded(&attempt))
-            || state.store.has_grading_draft(&drafts_path, &attempt.id).await.map_err(|error| error.to_string())?
-        {
+        if state.store.has_grading_draft(&drafts_path, &attempt.id).await.map_err(|error| error.to_string())? {
             job.skipped += 1;
         } else {
-            let student = &students[&attempt.user_id];
             let result: Result<bool, String> = async {
                 let assessment = assess(
                     bb,
                     provider,
                     job,
-                    assignment.possible,
+                    maximum,
                     &attempt,
-                    student,
                     cancel,
                 )
                 .await?;
@@ -354,37 +339,32 @@ async fn run_with_client(
                     job.reviews.push(crate::services::ta_ai::Review {
                         attempt: attempt.id.clone(),
                         revision: attempt.revision.clone(),
-                        label: format!("{} {}", student.number, student.name),
-                        score: assessment.reference_score(assignment.possible),
+                        label: attempt.student_name.clone(),
+                        score: assessment.reference_score(maximum),
                         feedback: assessment.feedback.clone(),
                         reason,
                     });
                     return Ok(false);
                 }
-                let score = assessment.grade(assignment.possible, job.mode)?;
+                let score = assessment.grade(maximum, job.mode)?;
                 let lock = state.ta_mutation(user.id).await;
                 let _guard = lock.lock().await;
                 if cancel.load(Ordering::Relaxed) {
                     return Ok(false);
                 }
-                if bb.assignment(&job.course, &job.column).await?.possible != assignment.possible {
+                if load_maximum(state, user.id, &job.course, &job.column).await? != Some(maximum) {
                     return Err("作业满分已变化，请重新开始批改".into());
                 }
-                // Re-read the attempt before creating a draft. Human edits and newer submissions win.
-                let fresh = bb.attempts(&job.course, &job.column).await?;
-                let latest = ta::latest_attempts(&fresh);
-                if !fresh.iter().any(|a| {
-                    a.id == attempt.id
-                        && a.user_id == attempt.user_id
-                        && a.revision == attempt.revision
-                        && can_grade(a)
-                        && latest.contains(&a.id)
+                // Re-read the attempt before creating a draft. The attempt must still be pending and unchanged.
+                let fresh = bb.grading_queue(&job.course).await?;
+                if !fresh.iter().find(|a| a.id == job.column).is_some_and(|a| {
+                    a.attempts.iter().any(|a| a.id == attempt.id && a.revision == attempt.revision)
                 }) {
                     return Err("提交或教学网成绩已变化，请重新核对".into());
                 }
                 let draft = Draft {
                     attempt_id: attempt.id.clone(),
-                    student_id: attempt.user_id.clone(),
+                    student_name: attempt.student_name.clone(),
                     score,
                     feedback: annotation.apply(&assessment.feedback, job.mode),
                     revision: attempt.revision.clone(),
@@ -420,7 +400,7 @@ async fn run_with_client(
                         .any(|s| error.contains(s));
                     job.failures.push(Failure {
                         attempt: attempt.id,
-                        label: format!("{} {}", student.number, student.name),
+                        label: attempt.student_name.clone(),
                         message: error,
                     });
                     if fatal || consecutive_failures >= 3 {
@@ -443,7 +423,7 @@ mod tests {
     use super::*;
     use axum::{body::Bytes, routing::delete};
     use serde_json::json;
-    use std::sync::Mutex;
+    use std::{collections::HashMap, sync::Mutex};
 
     #[derive(Default)]
     struct Remote {
@@ -482,16 +462,15 @@ mod tests {
             .route("/webapps/portal/execute/tabs/tabAction", get(|| async {
                 axum::response::Html(r#"<a href=" /webapps/blackboard/execute/launcher?type=Course&amp;id=PkId{key=_c_1, dataType=blackboard.data.course.Course}&amp;url=">编号: 测试课程</a>"#)
             }))
-            .route("/learn/api/public/v2/courses/_c_1/gradebook/columns",get(||async{Json(json!({"results":[{"id":"_h_1","name":"多题作业","score":{"possible":50}}]}))}))
-            .route("/learn/api/public/v1/courses/_c_1/users",get(||async{Json(json!({"results":(1..=6).map(|i|json!({"id":format!("_m_{i}"),"userId":format!("_s_{i}"),"user":{"userName":format!("26000{i}"),"name":{"given":"学生"}}})).collect::<Vec<_>>()}))}))
-            .route("/learn/api/public/v2/courses/_c_1/gradebook/columns/_h_1/attempts",get(|State(r):State<Arc<Mutex<Remote>>>|async move{
-                let r=r.lock().unwrap();
-                let mut values:Vec<_>=(1..=6).map(|i|json!({"id":format!("_a_{i}"),"userId":format!("_s_{i}"),"attemptDate":"2026-11-14T00:00:00Z","status":match i{2=>"Completed",3=>"InProgress",_=>"NeedsGrading"},"score":if i==1&&r.changed{Some(1)}else{None},"exempt":i==4})).collect();
-                values.push(json!({"id":"_a_old","userId":"_s_1","attemptDate":"2026-11-01T00:00:00Z","status":"NeedsGrading"}));
-                Json(json!({"results":values}))
+            .route("/webapps/gradebook/do/instructor/viewNeedsGrading", get(|State(r): State<Arc<Mutex<Remote>>>| async move {
+                let changed = r.lock().unwrap().changed;
+                let rows = [1, 5, 6].into_iter().filter(|&i| i != 1 || !changed)
+                    .map(|i| ta::grading_row("_c_1", "_h_1", "多题作业", &format!("_a_{i}"), "2026年11月14日"))
+                    .collect::<String>();
+                Html(format!("<table>{rows}</table>"))
             }))
             .route("/webapps/assignment/gradeAssignmentRedirector",get(|State(r):State<Arc<Mutex<Remote>>>,Query(q):Query<HashMap<String,String>>|async move{
-                assert_eq!(q["attempt_id"],"_a_1");
+                assert_eq!(q, HashMap::from([("course_id".into(), "_c_1".into()), ("attempt_id".into(), "_a_1".into())]));
                 let mut html = "<div id='submissionText'>第一题：计算答案。第二题：证明。</div><a onclick=\"inlineView(event, '_f_1')\">附件</a>".to_string();
                 if r.lock().unwrap().review { html.push_str("<a onclick=\"inlineView(event, '_f_2')\">其他附件</a>"); }
                 Html(html)
@@ -547,11 +526,12 @@ mod tests {
         })
         .unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
+        save_maximum(&state, user.id, "_c_1", "_h_1", 50.0).await.unwrap();
         // One existing human draft, plus a synced draft, both protected against AI overwrites.
         let original: Vec<_> = (5..=6)
             .map(|i| Draft {
                 attempt_id: format!("_a_{i}"),
-                student_id: format!("_s_{i}"),
+                student_name: format!("学生 {i}"),
                 score: 30.0,
                 feedback: "人工评语".into(),
                 revision: "original".into(),
@@ -575,7 +555,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!((j.total, j.processed, j.drafted, j.skipped), (6, 6, 1, 5));
+        assert_eq!((j.total, j.processed, j.drafted, j.skipped), (3, 3, 1, 2));
         let drafts = load_drafts(&state, user.id, "_c_1", "_h_1").await.unwrap();
         let ai = drafts.iter().find(|d| d.attempt_id == "_a_1").unwrap();
         assert_eq!(ai.score, 49.0);
@@ -637,7 +617,7 @@ mod tests {
         }
         let mut j = job();
         run_with_client(&state, &user, &mut j, &provider, &Annotation::default(), &cancel, &bb).await.unwrap();
-        assert_eq!((j.drafted, j.skipped, j.failures.len(), j.reviews.len()), (0, 5, 0, 1));
+        assert_eq!((j.drafted, j.skipped, j.failures.len(), j.reviews.len()), (0, 2, 0, 1));
         assert_eq!(j.reviews[0].score, Some(0.0));
         assert!(j.reviews[0].reason.contains("extra.zip"));
         assert!(j.reviews[0].feedback.contains("第二题"));

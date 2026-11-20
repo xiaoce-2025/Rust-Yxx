@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 const BASE: &str = "https://course.pku.edu.cn";
 const COURSE_PORTAL: &str = "/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1";
+const NEEDS_GRADING: &str = "/webapps/gradebook/do/instructor/viewNeedsGrading";
 const MAX_PAGES: usize = 100;
 
 pub(crate) fn course_portal_cache_pattern() -> String {
@@ -21,63 +22,20 @@ pub struct Course {
     pub name: String,
     pub term: String,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Assignment {
     pub id: String,
     pub name: String,
-    pub possible: f64,
+    pub attempts: Vec<Attempt>,
 }
-#[derive(Clone, Debug)]
-pub struct Group {
-    pub id: String,
-    pub name: String,
-}
-#[derive(Clone, Debug)]
-pub struct Student {
-    pub membership: String,
-    pub number: String,
-    pub name: String,
-}
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Attempt {
     pub id: String,
-    pub user_id: String,
+    pub student_name: String,
     pub date: String,
-    pub status: String,
-    pub score: Option<f64>,
     pub revision: String,
-    pub exempt: bool,
 }
 
-/// Blackboard may return a placeholder score of 0 before manual grading.
-/// Its explicit attempt status takes precedence over the numeric score.
-pub fn attempt_is_graded(status: &str, score: Option<f64>) -> bool {
-    let status = status
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase();
-    match status.as_str() {
-        "completed" | "graded" => true,
-        "needsgrading" | "needsgradingagain" | "needsmanualgrading" | "notattempted"
-        | "inprogress" | "inprogressagain" | "suspended" | "abandoned" | "submitted"
-        | "ungraded" | "pending" => false,
-        // Unknown/missing status + zero is ambiguous, not proof of a grade.
-        _ => score.is_some_and(|score| score.is_finite() && score != 0.0),
-    }
-}
-
-fn attempt_score(value: &Value) -> Option<f64> {
-    let score = value
-        .get("score")
-        .and_then(Value::as_f64)
-        .or_else(|| value.pointer("/grade/score").and_then(Value::as_f64));
-    if attempt_is_graded(string(value, "status"), score) {
-        score
-    } else {
-        None
-    }
-}
 #[derive(Clone, Debug)]
 pub struct Attachment {
     pub id: String,
@@ -92,7 +50,8 @@ pub struct Submission {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Draft {
     pub attempt_id: String,
-    pub student_id: String,
+    #[serde(default, alias = "student_id")]
+    pub student_name: String,
     pub score: f64,
     pub feedback: String,
     pub revision: String,
@@ -297,54 +256,6 @@ impl Blackboard {
     pub(super) async fn get(&self, path: &str) -> Result<Vec<u8>, String> {
         self.cached_get(path, self.cached.as_ref().is_some_and(|c| c.fresh)).await
     }
-    async fn json(&self, path: &str) -> Result<Value, String> {
-        let route = safe_route(&self.url(path)?);
-        serde_json::from_slice(&self.get(path).await?).map_err(|error| {
-            tracing::warn!(target: "teaching_ta", route=%route, line=error.line(), column=error.column(), "教学网响应不是可识别的 JSON");
-            "教学网返回了无法识别的数据，请刷新重试".into()
-        })
-    }
-    async fn list(&self, path: &str) -> Result<Vec<Value>, String> {
-        let mut next = path.to_string();
-        let mut visited = HashSet::new();
-        let mut results = Vec::new();
-        for _ in 0..MAX_PAGES {
-            let url = self.url(&next)?.to_string();
-            if !visited.insert(url.clone()) {
-                return Err("教学网分页出现循环，已停止加载".into());
-            }
-            let page = self.json(&url).await?;
-            if let Some(items) = page.as_array() {
-                results.extend(items.iter().cloned());
-                return Ok(results);
-            }
-            let items = page
-                .get("results")
-                .and_then(Value::as_array)
-                .ok_or("教学网列表格式不正确")?;
-            results.extend(items.iter().cloned());
-            if results.len() > 50_000 {
-                return Err("教学网列表过大，已停止加载".into());
-            }
-            match page
-                .pointer("/paging/nextPage")
-                .or_else(|| page.get("nextPage"))
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                Some(path) => {
-                    next = self
-                        .url(&url)?
-                        .join(path)
-                        .map_err(|_| "教学网分页地址无效")?
-                        .to_string();
-                }
-                None => return Ok(results),
-            }
-        }
-        Err("教学网分页超过限制，未返回不完整列表".into())
-    }
-
     pub async fn courses(&self) -> Result<Vec<Course>, String> {
         let Some(cache) = &self.cached else { return self.refresh_courses().await; };
         let key = self.cache_path(COURSE_PORTAL)?;
@@ -387,131 +298,57 @@ impl Blackboard {
             .find(|c| c.id == course)
             .ok_or("当前账号不是这门课程的助教".into())
     }
-    pub async fn assignments(&self, course: &str) -> Result<Vec<Assignment>, String> {
+    pub async fn grading_queue(&self, course: &str) -> Result<Vec<Assignment>, String> {
         valid_id(course)?;
-        self.list(&format!(
-            "/learn/api/public/v2/courses/{course}/gradebook/columns?limit=100"
-        ))
-        .await?
-        .into_iter()
-        .filter(|v| v.pointer("/grading/type").and_then(Value::as_str) != Some("Calculated"))
-        .map(|v| {
-            Ok(Assignment {
-                id: valid_id(string(&v, "id"))?.into(),
-                name: string(&v, "name").into(),
-                possible: v
-                    .pointer("/score/possible")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0),
-            })
-        })
-        .collect()
-    }
-    pub async fn assignment(&self, course: &str, column: &str) -> Result<Assignment, String> {
-        valid_id(column)?;
-        self.assignments(course)
-            .await?
-            .into_iter()
-            .find(|a| a.id == column)
-            .ok_or("未找到此作业".into())
-    }
-    pub async fn groups(&self, course: &str) -> Result<Vec<Group>, String> {
-        valid_id(course)?;
-        self.list(&format!(
-            "/learn/api/public/v1/courses/{course}/groups?limit=100"
-        ))
-        .await?
-        .into_iter()
-        .filter(|v| v.get("isGroupSet").and_then(Value::as_bool) != Some(true))
-        .map(|v| {
-            Ok(Group {
-                id: valid_id(string(&v, "id"))?.into(),
-                name: string(&v, "name").into(),
-            })
-        })
-        .collect()
-    }
-    pub async fn group_users(&self, course: &str, group: &str) -> Result<HashSet<String>, String> {
-        valid_id(course)?;
-        valid_id(group)?;
-        Ok(self
-            .list(&format!(
-                "/learn/api/public/v2/courses/{course}/groups/{group}/users?limit=100"
-            ))
-            .await?
-            .iter()
-            .map(|v| string(v, "userId").to_string())
-            .collect())
-    }
-    pub async fn students(&self, course: &str) -> Result<HashMap<String, Student>, String> {
-        valid_id(course)?;
-        let mut students = HashMap::new();
-        for v in self
-            .list(&format!(
-                "/learn/api/public/v1/courses/{course}/users?expand=user&limit=100"
-            ))
-            .await?
-        {
-            let id = valid_id(string(&v, "userId"))?.to_string();
-            let user = match v.get("user") {
-                Some(user) if user.is_object() => user.clone(),
-                _ => {
-                    self.json(&format!("/learn/api/public/v1/users/{id}"))
-                        .await?
+        let first = format!("{NEEDS_GRADING}?course_id={course}");
+        if let Some(cache) = &self.cached {
+            if !cache.fresh {
+                if let Some(queue) = cache.state.store.load_sidecar(&self.cache_path(&first)?).await? {
+                    return Ok(queue);
                 }
-            };
-            let given = user
-                .pointer("/name/given")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let family = user
-                .pointer("/name/family")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let name = format!("{family}{given}");
-            students.insert(
-                id.clone(),
-                Student {
-                    membership: valid_id(string(&v, "id"))?.into(),
-                    number: user
-                        .get("userName")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&id)
-                        .into(),
-                    name: if name.is_empty() { id } else { name },
-                },
-            );
+            }
         }
-        Ok(students)
-    }
-    pub async fn attempts(&self, course: &str, column: &str) -> Result<Vec<Attempt>, String> {
-        valid_id(course)?;
-        valid_id(column)?;
-        self.list(&format!("/learn/api/public/v2/courses/{course}/gradebook/columns/{column}/attempts?limit=100")).await?
-            .into_iter().map(|v| {
-                let score = attempt_score(&v);
-                let status = string(&v,"status").to_string();
-                let date = string(&v,"attemptDate").to_string();
-                let revision = format!("{:x}", Sha256::digest(serde_json::to_vec(&serde_json::json!({
-                    "id":v["id"],"userId":v["userId"],"date":date,"status":status,
-                    "score":v["score"],"gradeScore":v.pointer("/grade/score"),"exempt":v["exempt"]
-                })).unwrap()));
-                Ok(Attempt { id: valid_id(string(&v,"id"))?.into(), user_id: valid_id(string(&v,"userId"))?.into(),
-                    date, status, score, revision, exempt: v.get("exempt").and_then(Value::as_bool).unwrap_or(false) })
-            }).collect()
+        let mut next = self.url(&first)?;
+        let mut visited = HashSet::new();
+        let mut attempts = HashSet::new();
+        let mut assignments: Vec<Assignment> = Vec::new();
+        let mut columns = HashMap::new();
+        for _ in 0..MAX_PAGES {
+            if !visited.insert(next.clone()) {
+                return Err("教学网待评分列表分页出现循环".into());
+            }
+            let body = self.request(next.as_str(), Vec::new(), None).await?;
+            let html = std::str::from_utf8(&body).map_err(|_| "教学网待评分列表编码错误")?;
+            let (rows, next_page) = parse_grading_page(html, course)?;
+            for (column, name, attempt) in rows {
+                if !attempts.insert(attempt.id.clone()) {
+                    continue;
+                }
+                let index = *columns.entry(column.clone()).or_insert_with(|| {
+                    let index = assignments.len();
+                    assignments.push(Assignment { id: column, name, attempts: Vec::new() });
+                    index
+                });
+                assignments[index].attempts.push(attempt);
+            }
+            let Some(href) = next_page else {
+                if let Some(cache) = &self.cached {
+                    let payload = serde_json::to_string(&assignments).map_err(|error| error.to_string())?;
+                    cache.state.store.save_sidecar(&self.cache_path(&first)?, &payload).await?;
+                }
+                return Ok(assignments);
+            };
+            next = next.join(&href).map_err(|_| "教学网分页地址无效")?;
+            self.url(next.as_str())?;
+        }
+        Err("教学网待评分列表分页超过限制".into())
     }
 
-    pub async fn submission(
-        &self,
-        course: &str,
-        column: &str,
-        attempt: &Attempt,
-        student: &Student,
-    ) -> Result<Submission, String> {
-        for id in [course, column, &attempt.id, &student.membership] {
+    pub async fn submission(&self, course: &str, attempt: &Attempt) -> Result<Submission, String> {
+        for id in [course, &attempt.id] {
             valid_id(id)?;
         }
-        let path = format!("/webapps/assignment/gradeAssignmentRedirector?outcomeDefinitionId={column}&course_id={course}&attempt_id={}&courseMembershipId={}&mode=inline&currentAttemptIndex=0&numAttempts=1&sequenceId={course}_0", attempt.id, student.membership);
+        let path = format!("/webapps/assignment/gradeAssignmentRedirector?course_id={course}&attempt_id={}", attempt.id);
         let fresh = self.cached.as_ref().is_some_and(|c| c.refresh_submissions);
         let html = String::from_utf8(self.cached_get_version(&path, fresh, &attempt.revision).await?).map_err(|_| "提交页面编码错误")?;
         let (text, file_ids) = parse_submission(&html);
@@ -655,6 +492,7 @@ fn safe_route(url: &Url) -> String {
         || matches!(
             path,
             "/webapps/portal/execute/tabs/tabAction"
+                | NEEDS_GRADING
                 | "/webapps/assignment/gradeAssignmentRedirector"
                 | "/webapps/assignment/inlineView"
         )
@@ -697,6 +535,59 @@ pub fn valid_id(id: &str) -> Result<&str, String> {
 }
 fn string<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn parse_grading_page(html: &str, course: &str) -> Result<(Vec<(String, String, Attempt)>, Option<String>), String> {
+    use scraper::{Html, Selector};
+    let dom = Html::parse_document(html);
+    let rows = Selector::parse("tr").unwrap();
+    let values = Selector::parse("td > .table-data-cell-value").unwrap();
+    let menu = Selector::parse(".contextMenuContainer").unwrap();
+    let link = Selector::parse("a.gradeAttempt[attemptid]").unwrap();
+    let next = Selector::parse("#listContainer_nextpage_bot[href]").unwrap();
+    let text = |element: scraper::ElementRef<'_>| {
+        element.text().collect::<Vec<_>>().join(" ").split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let mut attempts = Vec::new();
+    for row in dom.select(&rows) {
+        let mut cells = row.select(&values);
+        let Some(category) = cells.next() else { continue };
+        if text(category) != "作业" {
+            continue;
+        }
+        let (Some(item), Some(link)) = (cells.next(), row.select(&link).next()) else { continue };
+        let id = link.value().attr("attemptid").unwrap_or_default().trim();
+        if id.is_empty() {
+            continue;
+        }
+        let params = item.select(&menu).find_map(|menu| menu.value().attr("bb:contextparameters"))
+            .ok_or("教学网待评分记录缺少作业信息")?;
+        let params = Url::parse(&format!("https://course.pku.edu.cn/?{params}"))
+            .map_err(|_| "教学网作业参数无效")?;
+        let mut column = None;
+        for (key, value) in params.query_pairs() {
+            match key.as_ref() {
+                "itemId" => column = Some(value.into_owned()),
+                "course_id" if value != course => return Err("教学网待评分记录的课程不匹配".into()),
+                _ => {}
+            }
+        }
+        let column = column.ok_or("教学网待评分记录缺少作业 ID")?;
+        valid_id(&column)?;
+        valid_id(id)?;
+        let date = cells.next().map(text).unwrap_or_default();
+        let revision = format!("{:x}", Sha256::digest(format!("{course}:{column}:{id}:{date}")));
+        let student_name = text(link);
+        attempts.push((column, text(item), Attempt {
+            id: id.into(),
+            student_name: if student_name.is_empty() { id.into() } else { student_name },
+            date,
+            revision,
+        }));
+    }
+    let href = dom.select(&next).find_map(|link| link.value().attr("href"))
+        .map(str::trim).filter(|href| !href.is_empty() && *href != "#").map(str::to_owned);
+    Ok((attempts, href))
 }
 
 fn parse_nonce(html: &str) -> Result<String, String> {
@@ -742,52 +633,21 @@ pub fn validate_score(score: f64, possible: f64) -> Result<f64, String> {
     Ok(score)
 }
 
-/// The default view chooses one attempt per student; history is always explicit.
-pub fn latest_attempts(attempts: &[Attempt]) -> HashSet<String> {
-    let mut latest: HashMap<&str, &Attempt> = HashMap::new();
-    for attempt in attempts {
-        let previous = latest.entry(&attempt.user_id).or_insert(attempt);
-        if (&attempt.date, &attempt.id) > (&previous.date, &previous.id) {
-            *previous = attempt;
-        }
-    }
-    latest.values().map(|a| a.id.clone()).collect()
+#[cfg(test)]
+pub(crate) fn grading_row(course: &str, column: &str, name: &str, attempt: &str, date: &str) -> String {
+    format!(r##"<tr id="listContainer_row:10">
+        <td><span class="mobile-table-label">类别: </span><span class="table-data-cell-value">作业</span></td>
+        <td><span class="mobile-table-label">项目名称: </span><span class="table-data-cell-value">{name}
+        <span class="contextMenuContainer" bb:contextparameters="trueAnonymousGrading=false&amp;itemId={column}&amp;course_id={course}&amp;scoreProviderHandle=resource/x-bb-assignment"><a title="操作"></a></span></span></td>
+        <th scope="row"><a class="gradeAttempt" attemptid="{attempt}" groupattemptid="" href="#"> 测试院系 学生 </a></th>
+        <td><span class="mobile-table-label">提交日期: </span><span class="table-data-cell-value">{date}</span></td>
+        <td><span class="mobile-table-label">到期日期: </span><span class="table-data-cell-value"></span></td>
+    </tr>"##)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn placeholder_zero_is_not_a_grade_but_completed_zero_is() {
-        for status in [
-            "NeedsGrading",
-            "Needs Grading",
-            "InProgress",
-            "Submitted",
-            "",
-        ] {
-            let value = serde_json::json!({"status":status,"score":0});
-            assert_eq!(attempt_score(&value), None, "{status}");
-            assert!(!attempt_is_graded(status, Some(0.0)), "{status}");
-        }
-        for status in ["Completed", "Graded"] {
-            assert_eq!(
-                attempt_score(&serde_json::json!({"status":status,"score":0})),
-                Some(0.0)
-            );
-            assert!(attempt_is_graded(status, Some(0.0)));
-        }
-        assert_eq!(
-            attempt_score(&serde_json::json!({"status":"NeedsGrading","grade":{"score":0}})),
-            None
-        );
-        assert_eq!(
-            attempt_score(&serde_json::json!({"status":"Completed","grade":{"score":85}})),
-            Some(85.0)
-        );
-        assert!(!attempt_is_graded("NeedsGrading", Some(85.0)));
-    }
 
     #[tokio::test]
     async fn curl_reuses_cookie_jar_and_never_replays_post_or_external_redirect() {
@@ -878,9 +738,10 @@ mod tests {
 
     #[test]
     fn diagnostics_hide_query_strings_and_dynamic_paths() {
-        let url = Url::parse("https://course.pku.edu.cn/learn/api/public/v1/courses/_123_1/users/_456_1?token=secret").unwrap();
+        let url = Url::parse("https://course.pku.edu.cn/webapps/gradebook/do/instructor/viewNeedsGrading?course_id=_123_1&token=secret").unwrap();
         let route = safe_route(&url);
-        assert_eq!(route, "/learn/api/public/v1/courses/:id/users/:id");
+        assert_eq!(route, NEEDS_GRADING);
+        assert!(!route.contains("_123_1"));
         assert!(!route.contains("secret"));
         let file =
             Url::parse("https://course.pku.edu.cn/bbcswebdav/student-name.pdf?signature=secret")
@@ -1034,8 +895,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_ta_courses_from_the_portal_and_follows_api_pagination() {
-        use axum::{routing::get, Json, Router};
+    async fn reads_ta_courses_and_paginates_pending_assignment_rows() {
+        use axum::{extract::Query, response::Html, routing::get, Router};
         let app = Router::new()
             .route("/webapps/portal/execute/tabs/tabAction", get(|| async {
                 axum::response::Html(r#"
@@ -1043,10 +904,19 @@ mod tests {
                     <a href=" /webapps/blackboard/execute/launcher?type=Course&amp;id=PkId{key=_104104_1, dataType=blackboard.data.course.Course, container=blackboard.persist.DatabaseContainer@2c7c68e8}&amp;url=" target="_top">26271-00048-04833040-0006161023-00-1: 计算机系统导论(26-27学年第1学期)</a>
                 "#)
             }))
-            .route("/first", get(|| async {
-                Json(serde_json::json!({"results":[1],"paging":{"nextPage":"/second"}}))
-            }))
-            .route("/second", get(|| async { Json(serde_json::json!({"results":[2]})) }));
+            .route(NEEDS_GRADING, get(|Query(query): Query<HashMap<String, String>>| async move {
+                let course = &query["course_id"];
+                let first = grading_row(course, "_h_1", "作业一", "_a_1", "2026年11月11日 21:38:02");
+                let second = grading_row(course, "_h_1", "作业一", "_a_2", "2026年11月12日");
+                let other = grading_row(course, "_h_2", "作业二", "_a_3", "2026年11月12日");
+                let test = grading_row(course, "_quiz_1", "测试", "_quiz_attempt", "")
+                    .replace(">作业</span>", ">测试</span>");
+                let body = match query.get("page").map(String::as_str) {
+                    Some("2") => format!("<table>{first}{second}{other}</table>"),
+                    _ => format!(r#"<table>{first}{test}</table><a id="listContainer_nextpage_bot" href="?course_id={course}&amp;page=2">下一页</a>"#),
+                };
+                Html(body)
+            }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let server = tokio::spawn(async move {
@@ -1059,8 +929,13 @@ mod tests {
         assert_eq!(courses[0].name, "计算机系统导论");
         assert_eq!(courses[0].term, "26-27学年第1学期");
         assert!(bb.authorize("_student_1").await.is_err());
-        assert_eq!(bb.list("/first").await.unwrap(), vec![Value::from(1), Value::from(2)]);
-        assert!(bb.list("https://evil.test/leak").await.is_err());
+        let queue = bb.grading_queue("_104104_1").await.unwrap();
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].name, "作业一");
+        assert_eq!(queue[0].attempts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["_a_1", "_a_2"]);
+        assert_eq!(queue[0].attempts[0].student_name, "测试院系 学生");
+        assert_eq!(queue[0].attempts[0].date, "2026年11月11日 21:38:02");
+        assert_eq!(queue[1].attempts[0].id, "_a_3");
         server.abort();
     }
 }
