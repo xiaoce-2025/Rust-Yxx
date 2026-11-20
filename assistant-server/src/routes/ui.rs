@@ -407,7 +407,8 @@ mod tests {
                 assert_eq!(data.headers()["cache-control"], "no-store");
                 let data: serde_json::Value = data.json().await.unwrap();
                 let fragment = data["html"].as_str().unwrap();
-                assert!(fragment.contains("尚未绑定教学网"));
+                assert!(fragment.contains("暂无助教课程") && fragment.contains("value=\"refresh_courses\""));
+                assert!(!fragment.contains("尚未绑定教学网"));
                 assert!(!fragment.contains("<html") && !fragment.contains("<script"));
                 let csrf = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(format!("ta-action-v1:{id}:{token}")));
                 let failed_action = client.post(format!("{base}/ta/action"))
@@ -417,8 +418,15 @@ mod tests {
                     .send().await.unwrap();
                 assert_eq!(failed_action.status(), 400);
                 let failure: serde_json::Value = failed_action.json().await.unwrap();
-                assert!(failure["html"].as_str().unwrap().contains("尚未绑定教学网"));
+                assert!(failure["html"].as_str().unwrap().contains("当前账号不是这门课程的助教"));
                 assert_eq!(failure["url"], "/ta?course=_c_1&column=_h_1");
+                let refresh = client.post(format!("{base}/ta/action"))
+                    .header("cookie", format!("assistant_token={token}"))
+                    .header("x-ta-partial", "1")
+                    .form(&[("csrf", csrf.as_str()), ("action", "refresh_courses")])
+                    .send().await.unwrap();
+                let refresh: serde_json::Value = refresh.json().await.unwrap();
+                assert!(refresh["html"].as_str().unwrap().contains("尚未绑定教学网"));
 
                 let submitter = Arc::new(HeldSubmission(tokio::sync::Notify::new()));
                 state.batch_submissions.start(

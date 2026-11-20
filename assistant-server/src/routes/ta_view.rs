@@ -27,9 +27,9 @@ fn context(s: &Selection, csrf: &str) -> String {
     .map(|(k, v)| hidden(k, v))
     .collect()
 }
-fn refresh(s: &Selection, csrf: &str, label: &str) -> String {
-    format!("<form method=\"post\" action=\"/ta/action\">{}{}<button class=\"button ghost\" name=\"action\" value=\"refresh\" type=\"submit\">{}</button></form>",
-        context(s, csrf), hidden("attempt", &s.attempt), e(label))
+fn refresh(s: &Selection, csrf: &str, action: &str, label: &str) -> String {
+    format!("<form method=\"post\" action=\"/ta/action\">{}{}<button class=\"button ghost\" name=\"action\" value=\"{}\" type=\"submit\">{}</button></form>",
+        context(s, csrf), hidden("attempt", &s.attempt), e(action), e(label))
 }
 fn selected(a: &str, b: &str) -> &'static str {
     if a == b {
@@ -95,7 +95,7 @@ fn wrap(content: &str, loading: bool) -> String {
 pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
     let mut html = String::new();
     html.push_str("<div class=\"ta-workspace\"><aside class=\"course-panel\"><div class=\"panel-heading\"><h2>我的助教课程</h2>");
-    html.push_str(&refresh(s, csrf, "刷新"));
+    html.push_str(&refresh(s, csrf, "refresh_courses", "刷新"));
     html.push_str("</div><p class=\"muted\">已拉取的数据保存在本地，点击刷新更新教学网数据。</p><nav class=\"course-list\" aria-label=\"助教课程\">");
     for c in &w.courses {
         let target = Selection {
@@ -130,7 +130,7 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
         );
     }
     if w.courses.is_empty() {
-        html.push_str("<div class=\"empty card welcome\"><span class=\"empty-mark\" aria-hidden=\"true\">▤</span><h2>从一门助教课程开始</h2><p>页面会自动识别你在教学网担任助教的课程。可使用已绑定账号或一次性登录教学网。</p><a class=\"button\" href=\"/user-center\">前往用户中心</a></div>");
+        html.push_str("<div class=\"empty card welcome\"><span class=\"empty-mark\" aria-hidden=\"true\">▤</span><h2>从一门助教课程开始</h2><p>点击侧栏的「刷新」从教学网获取助教课程。可使用已绑定账号或一次性登录教学网。</p><a class=\"button\" href=\"/user-center\">前往用户中心</a></div>");
     } else {
         let name = w
             .courses
@@ -138,7 +138,7 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
             .find(|c| c.id == s.course)
             .map(|c| c.name.as_str())
             .unwrap_or("课程");
-        let _ = write!(html,"<div class=\"section-header\"><div><div class=\"eyebrow\">作业批改工作台</div><h2>{}</h2></div>{}</div>",e(name),refresh(s, csrf, "刷新提交"));
+        let _ = write!(html,"<div class=\"section-header\"><div><div class=\"eyebrow\">作业批改工作台</div><h2>{}</h2></div>{}</div>",e(name),refresh(s, csrf, "refresh", "刷新提交"));
         filters(&mut html, s, w);
         if w.assignments.iter().any(|a| a.id == s.column) { ai_panel(&mut html, s, w, csrf); }
         if w.assignments.is_empty() {
@@ -522,17 +522,7 @@ const SCRIPT: &str = r#"<script>
   });
   window.addEventListener('popstate', () => load(location.href, 'replace'));
   window.addEventListener('beforeunload', event => { if (writing) { event.preventDefault(); event.returnValue = ''; } });
-  if (region.dataset.loading === 'true') {
-    window.TeachingSession.ensure().then(ready => {
-      if (ready) load(location.href, 'replace');
-      else {
-        message('可选择绑定账号或一次性登录。');
-        region.innerHTML = '<div class="card empty"><h2>登录教学网后查看助教课程</h2><p>可绑定账号以便自动登录，或使用一次性登录。</p><button type="button" id="ta-teaching-login">选择登录方式</button></div>';
-        region.dataset.loading = 'false';
-        document.getElementById('ta-teaching-login').addEventListener('click', () => window.TeachingSession.choose());
-      }
-    }).catch(error => message(error.message, true));
-  }
+  if (region.dataset.loading === 'true') load(location.href, 'replace');
   else aiPoll();
 })();
 </script>"#;
@@ -549,10 +539,12 @@ mod tests {
     #[test]
     fn refresh_is_an_explicit_csrf_protected_post_and_keeps_selection() {
         let selection = Selection { course: "_c_1".into(), column: "_h_1".into(), attempt: "_a_1".into(), ..Default::default() };
-        let html = refresh(&selection, "csrf-value", "刷新提交");
-        assert!(html.contains("method=\"post\" action=\"/ta/action\""));
-        for value in ["csrf-value", "_c_1", "_h_1", "_a_1"] { assert!(html.contains(value)); }
-        assert!(html.contains("name=\"action\" value=\"refresh\""));
+        for (action, label) in [("refresh_courses", "刷新"), ("refresh", "刷新提交")] {
+            let html = refresh(&selection, "csrf-value", action, label);
+            assert!(html.contains("method=\"post\" action=\"/ta/action\""));
+            for value in ["csrf-value", "_c_1", "_h_1", "_a_1"] { assert!(html.contains(value)); }
+            assert!(html.contains(&format!("name=\"action\" value=\"{action}\"")));
+        }
         assert!(!selection.url().contains("refresh"));
     }
     pub(crate) fn fixture() -> (Selection, Workspace) {

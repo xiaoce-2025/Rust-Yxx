@@ -159,6 +159,9 @@ async fn load_workspace_with_client(
     bb: &Blackboard,
 ) -> Result<(), String> {
     workspace.courses = bb.courses().await?;
+    if workspace.courses.is_empty() {
+        return Ok(());
+    }
     if selection.course.is_empty() {
         selection.course = workspace
             .courses
@@ -359,12 +362,27 @@ async fn action(
     }
     let lock = state.ta_mutation(user.id).await;
     let _guard = lock.lock().await;
-    if field(&form, "action") == "refresh" {
+    let operation = field(&form, "action");
+    if matches!(operation, "refresh_courses" | "refresh") {
         let mut workspace = Workspace::default();
-        let bb = Blackboard::cached(&state, &user, true);
+        let bb = Blackboard::cached(&state, &user, operation == "refresh");
+        if operation == "refresh_courses" {
+            match bb.refresh_courses().await {
+                Ok(courses) => {
+                    if !courses.iter().any(|course| course.id == selection.course) {
+                        selection = Selection::default();
+                    }
+                    selection.notice = format!("已从教学网刷新助教课程，共 {} 门", courses.len());
+                }
+                Err(error) => workspace.error = Some(format!("刷新课程失败，已有本地缓存保留：{error}")),
+            }
+        }
         match load_workspace_with_client(&state, &user, &mut selection, &mut workspace, &bb).await {
-            Ok(()) => selection.notice = "已从教学网刷新当前课程、作业和提交，本地缓存已更新".into(),
-            Err(error) => workspace.error = Some(format!("刷新失败，已有本地缓存保留：{error}")),
+            Ok(()) if operation == "refresh" => {
+                selection.notice = "已从教学网刷新当前课程的作业和提交，本地缓存已更新".into();
+            }
+            Err(error) if workspace.error.is_none() => workspace.error = Some(error),
+            _ => {}
         }
         if headers.get("x-ta-partial").is_some_and(|v| v == "1") {
             return workspace_response(&selection, &workspace, expected.as_deref().unwrap_or(""), StatusCode::OK);

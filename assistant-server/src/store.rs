@@ -224,6 +224,7 @@ impl FileStore {
         migration::migrate(&db, &data_dir, &provider_keys).await?;
         provider_keys.validate(&db).await?;
         let store = Self { data_dir, db, provider_keys, tex_cache_lock: tokio::sync::Mutex::new(()) };
+        store.clear_raw_ta_course_cache().await?;
         store.init_note_billing().await?;
         store.init_tex_cache().await?;
         store.init_operations().await?;
@@ -305,6 +306,17 @@ impl FileStore {
         let mut connection = self.db.acquire().await.map_err(|error| error.to_string())?;
         write_document(&mut connection, &Self::sidecar_key(path), payload)
             .await.map_err(|error| error.to_string())
+    }
+
+    async fn clear_raw_ta_course_cache(&self) -> Result<(), sqlx::Error> {
+        let pattern = crate::services::ta::course_portal_cache_pattern();
+        sqlx::query(
+            "UPDATE store_documents SET payload=NULL
+             WHERE name GLOB ? AND json_type(payload, '$.body')='text'",
+        )
+        .bind(pattern)
+        .execute(&self.db).await?;
+        Ok(())
     }
 
     pub async fn sidecar_paths_under(&self, directory: &std::path::Path) -> Result<Vec<String>, String> {

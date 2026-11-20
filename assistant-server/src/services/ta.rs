@@ -10,6 +10,11 @@ const BASE: &str = "https://course.pku.edu.cn";
 const COURSE_PORTAL: &str = "/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1";
 const MAX_PAGES: usize = 100;
 
+pub(crate) fn course_portal_cache_pattern() -> String {
+    let hash = Sha256::digest(format!("{BASE}{COURSE_PORTAL}"));
+    format!("sidecar/ta_cache/*/{hash:x}.json")
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Course {
     pub id: String,
@@ -341,8 +346,24 @@ impl Blackboard {
     }
 
     pub async fn courses(&self) -> Result<Vec<Course>, String> {
-        let page = self.get(COURSE_PORTAL).await?;
-        let html = std::str::from_utf8(&page).map_err(|_| "教学网课程页面编码错误")?;
+        let Some(cache) = &self.cached else { return self.refresh_courses().await; };
+        let key = self.cache_path(COURSE_PORTAL)?;
+        Ok(cache.state.store.load_sidecar(&key).await?.unwrap_or_default())
+    }
+
+    pub async fn refresh_courses(&self) -> Result<Vec<Course>, String> {
+        let page = self.request(COURSE_PORTAL, Vec::new(), None).await?;
+        let courses = Self::parse_courses(&page)?;
+        if let Some(cache) = &self.cached {
+            let payload = serde_json::to_string(&courses).map_err(|error| error.to_string())?;
+            cache.state.store.save_sidecar(&self.cache_path(COURSE_PORTAL)?, &payload).await?;
+        }
+        tracing::info!(target: "teaching_ta", count=courses.len(), "已拉取助教课程列表");
+        Ok(courses)
+    }
+
+    fn parse_courses(page: &[u8]) -> Result<Vec<Course>, String> {
+        let html = std::str::from_utf8(page).map_err(|_| "教学网课程页面编码错误")?;
         if !super::pkulogin::is_teaching_portal(html) {
             return Err("教学网返回的内容不是可识别的课程页面".into());
         }
@@ -633,7 +654,9 @@ fn safe_route(url: &Url) -> String {
     if path.starts_with("/webapps/gradebook/controller/")
         || matches!(
             path,
-            "/webapps/assignment/gradeAssignmentRedirector" | "/webapps/assignment/inlineView"
+            "/webapps/portal/execute/tabs/tabAction"
+                | "/webapps/assignment/gradeAssignmentRedirector"
+                | "/webapps/assignment/inlineView"
         )
     {
         return path.into();
@@ -926,11 +949,23 @@ mod tests {
         use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
         let count = Arc::new(AtomicUsize::new(0));
         let calls = count.clone();
+        let portal_count = Arc::new(AtomicUsize::new(0));
+        let portal_calls = portal_count.clone();
         let app = Router::new().route("/resource", get(move || {
             let n = calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 if n >= 2 { (axum::http::StatusCode::SERVICE_UNAVAILABLE, vec![]) }
                 else { (axum::http::StatusCode::OK, vec![0, 255, n as u8]) }
+            }
+        }))
+        .route("/webapps/portal/execute/tabs/tabAction", get(move || {
+            let n = portal_calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                axum::response::Html(if n == 0 {
+                    r#"<a href=" /webapps/blackboard/execute/launcher?type=Course&amp;id=PkId{key=_ta_1, dataType=blackboard.data.course.Course}&amp;url=">编号: 助教课程</a>"#
+                } else {
+                    "<html>服务暂不可用</html>"
+                })
             }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -947,17 +982,34 @@ mod tests {
         let user = crate::auth::CurrentUser { id: uuid::Uuid::new_v4(), username: "test".into(), email: "test@pku.edu.cn".into() };
         let mut bb = Blackboard::test_client(&base);
         bb.cached = Blackboard::cached(&state, &user, false).cached;
+        assert!(bb.courses().await.unwrap().is_empty());
+        assert_eq!(portal_count.load(Ordering::SeqCst), 0);
+        assert_eq!(bb.refresh_courses().await.unwrap()[0].id, "_ta_1");
+        let key = bb.cache_path(COURSE_PORTAL).unwrap();
+        let payload = state.store.stored_sidecar(&key).await.unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&payload).unwrap(),
+            serde_json::json!([{"id":"_ta_1","name":"助教课程","term":""}]));
+        assert_eq!(bb.courses().await.unwrap()[0].id, "_ta_1");
+        assert_eq!(portal_count.load(Ordering::SeqCst), 1);
         assert_eq!(bb.get("/resource").await.unwrap(), vec![0, 255, 0]);
         assert_eq!(bb.get("/resource").await.unwrap(), vec![0, 255, 0]);
         assert_eq!(count.load(Ordering::SeqCst), 1);
 
         // A new store/client can read the persisted bytes without any teaching credentials.
+        let legacy_key = Blackboard::cached(&state, &user, false).cache_path(COURSE_PORTAL).unwrap();
+        let other = crate::auth::CurrentUser { id: uuid::Uuid::new_v4(), ..user.clone() };
+        let parsed_key = Blackboard::cached(&state, &other, false).cache_path(COURSE_PORTAL).unwrap();
+        state.store.save_sidecar(&legacy_key, r#"{"body":"旧门户缓存"}"#).await.unwrap();
+        state.store.save_sidecar(&parsed_key, &payload).await.unwrap();
         let restarted = crate::app_state::AppState::new(settings, Arc::new(crate::store::FileStore::new(tmp.path().into()).await.unwrap()));
+        assert_eq!(restarted.store.stored_sidecar(&legacy_key).await.unwrap(), None);
+        assert_eq!(restarted.store.stored_sidecar(&parsed_key).await.unwrap(), Some(payload));
+        assert!(Blackboard::cached(&restarted, &user, false).courses().await.unwrap().is_empty());
         let mut offline = Blackboard::cached(&restarted, &user, false);
         offline.base = Url::parse(&base).unwrap();
+        assert_eq!(offline.courses().await.unwrap()[0].id, "_ta_1");
         assert_eq!(offline.get("/resource").await.unwrap(), vec![0, 255, 0]);
         assert!(offline.cached.as_ref().unwrap().login.get().is_none());
-        let other = crate::auth::CurrentUser { id: uuid::Uuid::new_v4(), ..user.clone() };
         let mut isolated = Blackboard::cached(&restarted, &other, false);
         isolated.base = offline.base.clone();
         assert_ne!(offline.cache_path("/resource").unwrap(), isolated.cache_path("/resource").unwrap());
@@ -965,6 +1017,11 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
 
         bb.cached.as_mut().unwrap().fresh = true;
+        assert_eq!(bb.authorize("_ta_1").await.unwrap().id, "_ta_1");
+        assert_eq!(portal_count.load(Ordering::SeqCst), 1);
+        assert!(bb.refresh_courses().await.is_err());
+        assert_eq!(offline.courses().await.unwrap()[0].id, "_ta_1");
+        assert_eq!(portal_count.load(Ordering::SeqCst), 2);
         assert_eq!(bb.get("/resource").await.unwrap(), vec![0, 255, 1]);
         assert!(bb.get("/resource").await.is_err());
         assert_eq!(offline.get("/resource").await.unwrap(), vec![0, 255, 1]);

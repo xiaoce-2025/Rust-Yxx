@@ -8,7 +8,9 @@ pub struct CourseInfo {
 }
 
 pub fn parse_courses(html_content: &str) -> Vec<CourseInfo> {
-    parse_course_links(html_content, false)
+    let courses = parse_course_links(html_content, false);
+    tracing::info!("共解析出 {} 门课程", courses.len());
+    courses
 }
 
 pub fn parse_ta_courses(html_content: &str) -> Vec<CourseInfo> {
@@ -64,7 +66,6 @@ fn parse_course_links(html_content: &str, ta_only: bool) -> Vec<CourseInfo> {
         }
     }
     
-    tracing::info!("共解析出 {} 门课程", courses.len());
     courses
 }
 
