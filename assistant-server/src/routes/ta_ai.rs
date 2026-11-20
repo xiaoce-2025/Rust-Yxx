@@ -479,8 +479,9 @@ mod tests {
     async fn one_model_call_for_all_questions_pdf_cleanup_and_drafts_only() {
         let remote = Arc::new(Mutex::new(Remote::default()));
         let app=Router::new()
-            .route("/learn/api/public/v1/users/me",get(||async{Json(json!({"id":"_me_1"}))}))
-            .route("/learn/api/public/v1/users/_me_1/courses",get(||async{Json(json!({"results":[{"courseId":"_c_1","courseRoleId":"TeachingAssistant"}]}))}))
+            .route("/webapps/portal/execute/tabs/tabAction", get(|| async {
+                axum::response::Html(r#"<a href=" /webapps/blackboard/execute/launcher?type=Course&amp;id=PkId{key=_c_1, dataType=blackboard.data.course.Course}&amp;url=">编号: 测试课程</a>"#)
+            }))
             .route("/learn/api/public/v2/courses/_c_1/gradebook/columns",get(||async{Json(json!({"results":[{"id":"_h_1","name":"多题作业","score":{"possible":50}}]}))}))
             .route("/learn/api/public/v1/courses/_c_1/users",get(||async{Json(json!({"results":(1..=6).map(|i|json!({"id":format!("_m_{i}"),"userId":format!("_s_{i}"),"user":{"userName":format!("26000{i}"),"name":{"given":"学生"}}})).collect::<Vec<_>>()}))}))
             .route("/learn/api/public/v2/courses/_c_1/gradebook/columns/_h_1/attempts",get(|State(r):State<Arc<Mutex<Remote>>>|async move{

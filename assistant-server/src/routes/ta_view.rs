@@ -107,7 +107,7 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
             if c.id == s.course {" active"} else {""},e(&target),if c.id == s.course {" aria-current=\"page\""} else {""},e(&c.name),e(&c.term));
     }
     if w.courses.is_empty() {
-        html.push_str("<div class=\"empty compact\">暂无助教课程<br><small>仅显示教学网角色为助教的课程。</small></div>");
+        html.push_str("<div class=\"empty compact\">暂无助教课程<br><small>可点击刷新重新读取教学网课程。</small></div>");
     }
     html.push_str("</nav><div class=\"sidebar-note\"><strong>批改小提示</strong><p>先保存评分草稿，再核对并同步教学网。默认展示每位学生的最新提交，历史提交可单独查看。</p><a class=\"text-link\" href=\"/user-center\">管理现有教学网绑定 →</a></div></aside><section class=\"ta-content\" aria-label=\"批改工作区\">");
     if let Some(error) = &w.error {

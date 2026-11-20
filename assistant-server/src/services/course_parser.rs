@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CourseInfo {
@@ -9,10 +8,26 @@ pub struct CourseInfo {
 }
 
 pub fn parse_courses(html_content: &str) -> Vec<CourseInfo> {
+    parse_course_links(html_content, false)
+}
+
+pub fn parse_ta_courses(html_content: &str) -> Vec<CourseInfo> {
+    parse_course_links(html_content, true)
+}
+
+fn parse_course_links(html_content: &str, ta_only: bool) -> Vec<CourseInfo> {
     let mut courses = Vec::new();
     
-    // 查找所有课程链接
-    let re = regex::Regex::new(r#"<a\s+[^>]*href="/webapps/blackboard/execute/launcher\?type=Course&(?:amp;)?id=PkId\{key=([^,]+)[^>]*>\s*([^<]+)\s*</a>"#).unwrap();
+    // 教学网门户在助教课程的 href 值开头加空格。
+    let href_prefix = if ta_only {
+        r#"<a\s+(?:[^>]*\s)?href=" +"#
+    } else {
+        r#"<a\s+[^>]*href=""#
+    };
+    let re = regex::Regex::new(&format!(
+        r#"{href_prefix}/webapps/blackboard/execute/launcher\?type=Course&(?:amp;)?id=PkId\{{key=([^,]+)[^>]*>\s*([^<]+)\s*</a>"#
+    ))
+    .unwrap();
     
     for cap in re.captures_iter(html_content) {
         let key = cap[1].trim().to_string();

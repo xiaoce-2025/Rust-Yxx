@@ -1,5 +1,5 @@
 //! Native Blackboard TA client. Authentication is owned by the existing teaching login cache.
-use super::pkulogin::PkuLoginResult;
+use super::{course_parser, pkulogin::PkuLoginResult};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 const BASE: &str = "https://course.pku.edu.cn";
+const COURSE_PORTAL: &str = "/webapps/portal/execute/tabs/tabAction?tab_tab_group_id=_1_1";
 const MAX_PAGES: usize = 100;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -340,30 +341,19 @@ impl Blackboard {
     }
 
     pub async fn courses(&self) -> Result<Vec<Course>, String> {
-        let me = self.json("/learn/api/public/v1/users/me").await?;
-        let id = valid_id(string(&me, "id"))?;
-        let items = self
-            .list(&format!(
-                "/learn/api/public/v1/users/{id}/courses?expand=course&limit=100"
-            ))
-            .await?;
-        items
+        let page = self.get(COURSE_PORTAL).await?;
+        let html = std::str::from_utf8(&page).map_err(|_| "教学网课程页面编码错误")?;
+        if !super::pkulogin::is_teaching_portal(html) {
+            return Err("教学网返回的内容不是可识别的课程页面".into());
+        }
+        course_parser::parse_ta_courses(html)
             .into_iter()
-            .filter(|e| string(e, "courseRoleId") == "TeachingAssistant")
-            .map(|e| {
-                let id = valid_id(string(&e, "courseId"))?.to_string();
+            .map(|course| {
+                valid_id(&course.key)?;
                 Ok(Course {
-                    name: e
-                        .pointer("/course/name")
-                        .and_then(Value::as_str)
-                        .unwrap_or(&id)
-                        .into(),
-                    term: e
-                        .pointer("/course/term/name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .into(),
-                    id,
+                    id: course.key,
+                    name: course.name,
+                    term: course.term,
                 })
             })
             .collect()
@@ -987,20 +977,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follows_pagination_and_checks_role_against_actual_membership() {
+    async fn reads_ta_courses_from_the_portal_and_follows_api_pagination() {
         use axum::{routing::get, Json, Router};
         let app = Router::new()
-            .route("/learn/api/public/v1/users/me",get(||async {Json(serde_json::json!({"id":"_me_1"}))}))
-            .route("/learn/api/public/v1/users/_me_1/courses",get(||async {Json(serde_json::json!({"results":[{"courseId":"_student_1","courseRoleId":"Student"}],"paging":{"nextPage":"/second"}}))}))
-            .route("/second",get(||async {Json(serde_json::json!({"results":[{"courseId":"_ta_1","courseRoleId":"TeachingAssistant","course":{"name":"测试课程"}}]}))}));
+            .route("/webapps/portal/execute/tabs/tabAction", get(|| async {
+                axum::response::Html(r#"
+                    <a href="/webapps/blackboard/execute/launcher?type=Course&amp;id=PkId{key=_student_1, dataType=blackboard.data.course.Course}&amp;url=">编号: 学生课程(26-27学年第1学期)</a>
+                    <a href=" /webapps/blackboard/execute/launcher?type=Course&amp;id=PkId{key=_104104_1, dataType=blackboard.data.course.Course, container=blackboard.persist.DatabaseContainer@2c7c68e8}&amp;url=" target="_top">26271-00048-04833040-0006161023-00-1: 计算机系统导论(26-27学年第1学期)</a>
+                "#)
+            }))
+            .route("/first", get(|| async {
+                Json(serde_json::json!({"results":[1],"paging":{"nextPage":"/second"}}))
+            }))
+            .route("/second", get(|| async { Json(serde_json::json!({"results":[2]})) }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         let bb = Blackboard::test_client(base.as_str());
-        assert_eq!(bb.courses().await.unwrap()[0].id, "_ta_1");
+        let courses = bb.courses().await.unwrap();
+        assert_eq!(courses.len(), 1);
+        assert_eq!(courses[0].id, "_104104_1");
+        assert_eq!(courses[0].name, "计算机系统导论");
+        assert_eq!(courses[0].term, "26-27学年第1学期");
         assert!(bb.authorize("_student_1").await.is_err());
+        assert_eq!(bb.list("/first").await.unwrap(), vec![Value::from(1), Value::from(2)]);
         assert!(bb.list("https://evil.test/leak").await.is_err());
         server.abort();
     }
