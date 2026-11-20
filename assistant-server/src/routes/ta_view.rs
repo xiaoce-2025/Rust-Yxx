@@ -84,7 +84,7 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
     let mut html = String::new();
     html.push_str("<div class=\"ta-workspace\"><aside class=\"course-panel\"><div class=\"panel-heading\"><h2>我的助教课程</h2>");
     html.push_str(&refresh(s, csrf, "refresh_courses", "刷新"));
-    html.push_str("</div><p class=\"muted\">已拉取的数据保存在本地，点击刷新更新教学网数据。</p><nav class=\"course-list\" aria-label=\"助教课程\">");
+    html.push_str("</div><p class=\"muted\">左侧刷新课程列表。选中课程后，可在右侧刷新待评分作业。</p><nav class=\"course-list\" aria-label=\"助教课程\">");
     for c in &w.courses {
         let target = Selection {
             course: c.id.clone(),
@@ -97,7 +97,7 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
     if w.courses.is_empty() {
         html.push_str("<div class=\"empty compact\">暂无助教课程<br><small>可点击刷新重新读取教学网课程。</small></div>");
     }
-    html.push_str("</nav><div class=\"sidebar-note\"><strong>批改小提示</strong><p>先保存评分草稿，再核对并同步教学网。默认展示每位学生的最新提交，历史提交可单独查看。</p><a class=\"text-link\" href=\"/user-center\">管理现有教学网绑定 →</a></div></aside><section class=\"ta-content\" aria-label=\"批改工作区\">");
+    html.push_str("</nav><div class=\"sidebar-note\"><strong>批改小提示</strong><p>先保存评分草稿，再核对并同步教学网。</p><a class=\"text-link\" href=\"/user-center\">管理现有教学网绑定 →</a></div></aside><section class=\"ta-content\" aria-label=\"批改工作区\">");
     if let Some(error) = &w.error {
         let _ = write!(
             html,
@@ -126,7 +126,7 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
             .find(|c| c.id == s.course)
             .map(|c| c.name.as_str())
             .unwrap_or("课程");
-        let _ = write!(html,"<div class=\"section-header\"><div><div class=\"eyebrow\">作业批改工作台</div><h2>{}</h2></div>{}</div>",e(name),refresh(s, csrf, "refresh", "刷新提交"));
+        let _ = write!(html,"<div class=\"section-header\"><div><div class=\"eyebrow\">作业批改工作台</div><h2>{}</h2></div>{}</div>",e(name),refresh(s, csrf, "refresh", "刷新作业"));
         if !w.assignments.is_empty() {
             filters(&mut html, s, w);
         }
@@ -138,8 +138,13 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
                 ai_panel(&mut html, s, w, csrf);
             }
         }
+        if !w.queue_cached {
+            html.push_str("<div class=\"alert\">点击右上角「刷新作业」，从教学网读取这门课的待评分队列。</div>");
+        }
         if w.assignments.is_empty() {
-            html.push_str("<div class=\"empty card\"><h3>暂无可批改作业</h3><p>这门课程的教学网队列中暂无待评分作业。</p></div>");
+            if w.queue_cached {
+                html.push_str("<div class=\"empty card\"><h3>暂无可批改作业</h3><p>上次刷新时，这门课程没有待评分作业。</p></div>");
+            }
         } else if w.error.is_none() || !w.attempts.is_empty() || !w.drafts.is_empty() {
             let pending = w.drafts.iter().filter(|d| !d.synced).count();
             let _ = write!(html, r#"<div class="stats"><div><strong>{}</strong><span>待评分</span></div><div><strong>{pending}</strong><span>待同步草稿</span></div></div>"#, w.attempts.len());
@@ -314,13 +319,15 @@ fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
                 let path = format!("/ta/attachment?{}", url.query().unwrap_or(""));
                 let _=write!(html,"<div class=\"attachment\"><span>▧ {}</span><a class=\"text-link\" href=\"{}\">下载</a></div>",e(&file.name),e(&path));
                 if file.name.to_ascii_lowercase().ends_with(".pdf") {
-                    let _=write!(html,"<details class=\"pdf-details\"><summary>在线预览 PDF</summary><iframe title=\"{}\" src=\"{}&amp;preview=true\" loading=\"lazy\" referrerpolicy=\"same-origin\"></iframe><a class=\"text-link\" href=\"{}\">无法预览时下载附件</a></details>",e(&file.name),e(&path),e(&path));
+                    let _=write!(html,"<details class=\"pdf-details\"><summary>在线预览 PDF</summary><iframe title=\"{}\" data-src=\"{}&amp;preview=true\" loading=\"lazy\" referrerpolicy=\"same-origin\"></iframe><a class=\"text-link\" href=\"{}\">无法预览时下载附件</a></details>",e(&file.name),e(&path),e(&path));
                 }
             }
             if submission.files.is_empty() {
                 html.push_str("<p class=\"muted\">未识别到可下载附件。如页面内容不完整，请在教学网核对原始提交。</p>");
             }
             html.push_str("</div>");
+        } else {
+            html.push_str(&refresh(s, csrf, "load_submission", "加载提交内容"));
         }
         let _=write!(html,"<a class=\"text-link source-link\" href=\"https://course.pku.edu.cn/webapps/assignment/gradeAssignmentRedirector?course_id={}&amp;attempt_id={}\" target=\"_blank\" rel=\"noopener noreferrer\">在教学网查看原始提交 ↗</a>",e(&s.course),e(&a.id));
         if let Some(error) = draft.and_then(|d| d.error.as_ref()) {
@@ -475,6 +482,15 @@ const SCRIPT: &str = r#"<script>
       }
     }
   }
+  region.addEventListener('toggle', event => {
+    const details = event.target;
+    if (!details.matches('.pdf-details[open]')) return;
+    const frame = details.querySelector('iframe[data-src]');
+    if (frame) {
+      frame.src = frame.dataset.src;
+      delete frame.dataset.src;
+    }
+  }, true);
   region.addEventListener('click', event => {
     const link = event.target.closest('a[href]');
     if (!link || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || link.target || link.hasAttribute('download')) return;
@@ -515,7 +531,7 @@ mod tests {
     #[test]
     fn refresh_is_an_explicit_csrf_protected_post_and_keeps_selection() {
         let selection = Selection { course: "_c_1".into(), column: "_h_1".into(), attempt: "_a_1".into(), ..Default::default() };
-        for (action, label) in [("refresh_courses", "刷新"), ("refresh", "刷新提交")] {
+        for (action, label) in [("refresh_courses", "刷新"), ("refresh", "刷新作业"), ("load_submission", "加载提交内容")] {
             let html = refresh(&selection, "csrf-value", action, label);
             assert!(html.contains("method=\"post\" action=\"/ta/action\""));
             for value in ["csrf-value", "_c_1", "_h_1", "_a_1"] { assert!(html.contains(value)); }
@@ -541,6 +557,7 @@ mod tests {
             name: "作业一 · 基础练习".into(),
             attempts: Vec::new(),
         });
+        w.queue_cached = true;
         w.maximum = Some(100.0);
         w.attempts.push(Attempt {
             id: s.attempt.clone(),

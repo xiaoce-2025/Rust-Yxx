@@ -428,6 +428,27 @@ mod tests {
                 let refresh: serde_json::Value = refresh.json().await.unwrap();
                 assert!(refresh["html"].as_str().unwrap().contains("尚未绑定教学网"));
 
+                let ta_courses_key = crate::services::ta::course_portal_cache_pattern()
+                    .trim_start_matches("sidecar/").replace('*', &id.to_string());
+                state.store.save_sidecar(std::path::Path::new(&ta_courses_key), &json!([
+                    {"id":"_c_1","name":"已缓存的助教课一","term":""},
+                    {"id":"_c_2","name":"已缓存的助教课二","term":""}
+                ]).to_string()).await.unwrap();
+                for query in ["", "?course=_c_2"] {
+                    let data: serde_json::Value = client.get(format!("{base}/api/ta/workspace{query}"))
+                        .header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
+                    let fragment = data["html"].as_str().unwrap();
+                    assert!(fragment.contains("点击右上角「刷新作业」"));
+                    assert!(fragment.contains("value=\"refresh\""));
+                    assert!(!fragment.contains("尚未绑定教学网"));
+                }
+                let refresh: serde_json::Value = client.post(format!("{base}/ta/action"))
+                    .header("cookie", &cookie).header("x-ta-partial", "1")
+                    .form(&[("csrf", csrf.as_str()), ("action", "refresh"), ("course", "_c_2")])
+                    .send().await.unwrap().json().await.unwrap();
+                assert_eq!(refresh["url"], "/ta?course=_c_2");
+                assert!(refresh["html"].as_str().unwrap().contains("尚未绑定教学网"));
+
                 let submitter = Arc::new(HeldSubmission(tokio::sync::Notify::new()));
                 state.batch_submissions.start(
                     id, "course".into(), vec!["video".into()], submitter.clone(),

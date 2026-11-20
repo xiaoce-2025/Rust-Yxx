@@ -145,16 +145,29 @@ impl Blackboard {
         self.cached_get_version(path, fresh, "").await
     }
 
-    async fn cached_get_version(&self, path: &str, fresh: bool, version: &str) -> Result<Vec<u8>, String> {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        let Some(cache) = &self.cached else { return self.request(path, Vec::new(), None).await; };
+    fn response_cache_path(&self, path: &str, version: &str) -> Result<std::path::PathBuf, String> {
         let mut key = self.cache_path(path)?;
         if !version.is_empty() {
             key.set_extension(format!("{:x}.json", Sha256::digest(version)));
         }
+        Ok(key)
+    }
+
+    async fn stored_response(&self, key: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let Some(cache) = &self.cached else { return Ok(None); };
+        cache.state.store.load_sidecar::<CachedResponse>(key).await?
+            .map(|saved| STANDARD.decode(saved.body).map_err(|_| "教学网本地缓存损坏，请点击刷新".into()))
+            .transpose()
+    }
+
+    async fn cached_get_version(&self, path: &str, fresh: bool, version: &str) -> Result<Vec<u8>, String> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        let Some(cache) = &self.cached else { return self.request(path, Vec::new(), None).await; };
+        let key = self.response_cache_path(path, version)?;
         if !fresh {
-            if let Some(saved) = cache.state.store.load_sidecar::<CachedResponse>(&key).await? {
-                return STANDARD.decode(saved.body).map_err(|_| "教学网本地缓存损坏，请点击刷新".into());
+            if let Some(saved) = self.stored_response(&key).await? {
+                return Ok(saved);
             }
         }
         let body = self.request(path, Vec::new(), None).await?;
@@ -298,16 +311,19 @@ impl Blackboard {
             .find(|c| c.id == course)
             .ok_or("当前账号不是这门课程的助教".into())
     }
+    pub async fn stored_grading_queue(&self, course: &str) -> Result<Option<Vec<Assignment>>, String> {
+        valid_id(course)?;
+        let Some(cache) = &self.cached else { return Ok(None); };
+        let path = format!("{NEEDS_GRADING}?course_id={course}");
+        cache.state.store.load_sidecar(&self.cache_path(&path)?).await
+    }
+
     pub async fn grading_queue(&self, course: &str) -> Result<Vec<Assignment>, String> {
         valid_id(course)?;
-        let first = format!("{NEEDS_GRADING}?course_id={course}");
-        if let Some(cache) = &self.cached {
-            if !cache.fresh {
-                if let Some(queue) = cache.state.store.load_sidecar(&self.cache_path(&first)?).await? {
-                    return Ok(queue);
-                }
-            }
+        if self.cached.as_ref().is_some_and(|cache| !cache.fresh) {
+            return Ok(self.stored_grading_queue(course).await?.unwrap_or_default());
         }
+        let first = format!("{NEEDS_GRADING}?course_id={course}");
         let mut next = self.url(&first)?;
         let mut visited = HashSet::new();
         let mut attempts = HashSet::new();
@@ -344,13 +360,31 @@ impl Blackboard {
         Err("教学网待评分列表分页超过限制".into())
     }
 
+    pub async fn stored_submission(&self, course: &str, attempt: &Attempt) -> Result<Option<Submission>, String> {
+        self.read_submission(course, attempt, true).await
+    }
+
     pub async fn submission(&self, course: &str, attempt: &Attempt) -> Result<Submission, String> {
+        self.read_submission(course, attempt, false).await?.ok_or("无法读取教学网提交".into())
+    }
+
+    async fn submission_resource(&self, path: &str, version: &str, stored_only: bool) -> Result<Option<Vec<u8>>, String> {
+        if stored_only {
+            return self.stored_response(&self.response_cache_path(path, version)?).await;
+        }
+        let fresh = self.cached.as_ref().is_some_and(|c| c.refresh_submissions);
+        self.cached_get_version(path, fresh, version).await.map(Some)
+    }
+
+    async fn read_submission(&self, course: &str, attempt: &Attempt, stored_only: bool) -> Result<Option<Submission>, String> {
         for id in [course, &attempt.id] {
             valid_id(id)?;
         }
         let path = format!("/webapps/assignment/gradeAssignmentRedirector?course_id={course}&attempt_id={}", attempt.id);
-        let fresh = self.cached.as_ref().is_some_and(|c| c.refresh_submissions);
-        let html = String::from_utf8(self.cached_get_version(&path, fresh, &attempt.revision).await?).map_err(|_| "提交页面编码错误")?;
+        let Some(body) = self.submission_resource(&path, &attempt.revision, stored_only).await? else {
+            return Ok(None);
+        };
+        let html = String::from_utf8(body).map_err(|_| "提交页面编码错误")?;
         let (text, file_ids) = parse_submission(&html);
         let mut files = Vec::new();
         for id in file_ids {
@@ -359,8 +393,10 @@ impl Blackboard {
                 urlencoding::encode(&id),
                 attempt.id
             );
-            let info: Value = serde_json::from_slice(&self.cached_get_version(&path, fresh, &attempt.revision).await?)
-                .map_err(|_| "教学网附件信息格式不正确")?;
+            let Some(body) = self.submission_resource(&path, &attempt.revision, stored_only).await? else {
+                return Ok(None);
+            };
+            let info: Value = serde_json::from_slice(&body).map_err(|_| "教学网附件信息格式不正确")?;
             let url = string(&info, "downloadUrl");
             if url.is_empty() {
                 return Err("教学网未返回附件下载地址".into());
@@ -372,7 +408,7 @@ impl Blackboard {
                 url: url.into(),
             });
         }
-        Ok(Submission { text, files })
+        Ok(Some(Submission { text, files }))
     }
     pub async fn download(&self, file: &Attachment) -> Result<Vec<u8>, String> {
         self.cached_get(&file.url, false).await
@@ -812,6 +848,10 @@ mod tests {
         let calls = count.clone();
         let portal_count = Arc::new(AtomicUsize::new(0));
         let portal_calls = portal_count.clone();
+        let queue_count = Arc::new(AtomicUsize::new(0));
+        let queue_calls = queue_count.clone();
+        let submission_count = Arc::new(AtomicUsize::new(0));
+        let submission_calls = submission_count.clone();
         let app = Router::new().route("/resource", get(move || {
             let n = calls.fetch_add(1, Ordering::SeqCst);
             async move {
@@ -828,6 +868,17 @@ mod tests {
                     "<html>服务暂不可用</html>"
                 })
             }
+        }))
+        .route(NEEDS_GRADING, get(move || {
+            queue_calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                let row = grading_row("_ta_1", "_a_1", "作业一", "_s_1", "2026年11月11日");
+                axum::response::Html(format!("<table>{row}</table>"))
+            }
+        }))
+        .route("/webapps/assignment/gradeAssignmentRedirector", get(move || {
+            submission_calls.fetch_add(1, Ordering::SeqCst);
+            async { axum::response::Html("<div id='submissionText'>已提交的正文</div>") }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -883,6 +934,21 @@ mod tests {
         assert!(bb.refresh_courses().await.is_err());
         assert_eq!(offline.courses().await.unwrap()[0].id, "_ta_1");
         assert_eq!(portal_count.load(Ordering::SeqCst), 2);
+        assert!(offline.stored_grading_queue("_ta_1").await.unwrap().is_none());
+        assert!(offline.grading_queue("_ta_1").await.unwrap().is_empty());
+        assert_eq!(queue_count.load(Ordering::SeqCst), 0);
+        let queue = bb.grading_queue("_ta_1").await.unwrap();
+        assert_eq!(queue_count.load(Ordering::SeqCst), 1);
+        assert_eq!(offline.stored_grading_queue("_ta_1").await.unwrap().unwrap()[0].id, "_a_1");
+        assert_eq!(queue_count.load(Ordering::SeqCst), 1);
+        let attempt = &queue[0].attempts[0];
+        assert!(offline.stored_submission("_ta_1", attempt).await.unwrap().is_none());
+        assert_eq!(submission_count.load(Ordering::SeqCst), 0);
+        assert_eq!(bb.submission("_ta_1", attempt).await.unwrap().text, "已提交的正文");
+        assert_eq!(offline.stored_submission("_ta_1", attempt).await.unwrap().unwrap().text, "已提交的正文");
+        assert_eq!(submission_count.load(Ordering::SeqCst), 1);
+        assert!(offline.cached.as_ref().unwrap().login.get().is_none());
+
         assert_eq!(bb.get("/resource").await.unwrap(), vec![0, 255, 1]);
         assert!(bb.get("/resource").await.is_err());
         assert_eq!(offline.get("/resource").await.unwrap(), vec![0, 255, 1]);

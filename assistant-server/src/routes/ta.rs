@@ -70,6 +70,7 @@ pub(super) struct Workspace {
     pub ai_job: Option<crate::services::ta_ai::Job>,
     pub courses: Vec<ta::Course>,
     pub assignments: Vec<ta::Assignment>,
+    pub queue_cached: bool,
     pub maximum: Option<f64>,
     pub attempts: Vec<ta::Attempt>,
     pub drafts: Vec<Draft>,
@@ -134,6 +135,13 @@ fn workspace_response(
         .into_response()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkspaceLoad {
+    Cached,
+    RefreshCourse,
+    LoadSubmission,
+}
+
 async fn load_workspace(
     state: &AppState,
     user: &CurrentUser,
@@ -141,7 +149,7 @@ async fn load_workspace(
     workspace: &mut Workspace,
 ) -> Result<(), String> {
     let bb = client(state, user).await?;
-    load_workspace_with_client(state, user, selection, workspace, &bb).await
+    load_workspace_with_client(state, user, selection, workspace, &bb, WorkspaceLoad::Cached).await
 }
 
 async fn load_workspace_with_client(
@@ -150,6 +158,7 @@ async fn load_workspace_with_client(
     selection: &mut Selection,
     workspace: &mut Workspace,
     bb: &Blackboard,
+    load: WorkspaceLoad,
 ) -> Result<(), String> {
     workspace.courses = bb.courses().await?;
     if workspace.courses.is_empty() {
@@ -168,7 +177,13 @@ async fn load_workspace_with_client(
     if !workspace.courses.iter().any(|c| c.id == selection.course) {
         return Err("当前账号不是所选课程的助教".into());
     }
-    workspace.assignments = bb.grading_queue(&selection.course).await?;
+    let queue = if load == WorkspaceLoad::RefreshCourse {
+        Some(bb.grading_queue(&selection.course).await?)
+    } else {
+        bb.stored_grading_queue(&selection.course).await?
+    };
+    workspace.queue_cached = queue.is_some();
+    workspace.assignments = queue.unwrap_or_default();
     let pending_columns = state.store.pending_grading_columns(
         &PathBuf::from("ta_drafts").join(user.id.to_string()), &selection.course,
     ).await.map_err(|error| error.to_string())?;
@@ -202,7 +217,11 @@ async fn load_workspace_with_client(
     }
     if selection.review != "1" {
         if let Some(attempt) = visible.iter().find(|a| a.id == selection.attempt) {
-            workspace.submission = Some(bb.submission(&selection.course, attempt).await?);
+            workspace.submission = if load == WorkspaceLoad::Cached {
+                bb.stored_submission(&selection.course, attempt).await?
+            } else {
+                Some(bb.submission(&selection.course, attempt).await?)
+            };
         }
     }
     Ok(())
@@ -331,9 +350,14 @@ async fn action(
     let lock = state.ta_mutation(user.id).await;
     let _guard = lock.lock().await;
     let operation = field(&form, "action");
-    if matches!(operation, "refresh_courses" | "refresh") {
+    if matches!(operation, "refresh_courses" | "refresh" | "load_submission") {
+        let load = match operation {
+            "refresh" => WorkspaceLoad::RefreshCourse,
+            "load_submission" => WorkspaceLoad::LoadSubmission,
+            _ => WorkspaceLoad::Cached,
+        };
         let mut workspace = Workspace::default();
-        let bb = Blackboard::cached(&state, &user, operation == "refresh");
+        let bb = Blackboard::cached(&state, &user, load == WorkspaceLoad::RefreshCourse);
         if operation == "refresh_courses" {
             match bb.refresh_courses().await {
                 Ok(courses) => {
@@ -345,14 +369,14 @@ async fn action(
                 Err(error) => workspace.error = Some(format!("刷新课程失败，已有本地缓存保留：{error}")),
             }
         }
-        match load_workspace_with_client(&state, &user, &mut selection, &mut workspace, &bb).await {
+        match load_workspace_with_client(&state, &user, &mut selection, &mut workspace, &bb, load).await {
             Ok(()) if operation == "refresh" => {
                 selection.notice = "已从教学网刷新当前课程的待评分队列".into();
             }
-            Err(error) if operation == "refresh" => {
+            Err(error) if load == WorkspaceLoad::RefreshCourse => {
                 workspace = Workspace::default();
                 let _ = load_workspace(&state, &user, &mut selection, &mut workspace).await;
-                workspace.error = Some(format!("刷新待评分队列失败：{error}"));
+                workspace.error = Some(format!("刷新课程作业失败：{error}"));
             }
             Err(error) if workspace.error.is_none() => workspace.error = Some(error),
             _ => {}
