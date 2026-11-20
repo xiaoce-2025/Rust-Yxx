@@ -69,6 +69,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/pkuvideo_fw", get(pkuvideo_fw_page))
         .route("/pkuvideo_sequence", get(pkuvideo_sequence_page))
         .route("/ta", get(super::ta::page))
+        .route("/ta/grading", get(super::ta::page))
         .route("/settings", get(settings_page))
         .route("/user-center", get(user_center_page))
         .route("/recharge", get(super::recharge::page))
@@ -281,7 +282,7 @@ mod tests {
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
         assert_eq!(client.get(format!("{base}/api/ta/workspace")).send().await.unwrap().status(), 401);
         assert_eq!(client.get(format!("{base}/app")).send().await.unwrap().status(), 404);
-        for path in ["/", "/teaching-login?next=%2Fta", "/chat", "/user-center", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence", "/ta"] {
+        for path in ["/", "/teaching-login?next=%2Fta", "/chat", "/user-center", "/settings?theme=dark", "/pkuvideo", "/pkuvideofullclass", "/pkuvideo_fullclass", "/pkuvideo_fw", "/pkuvideo_sequence", "/ta", "/ta/grading"] {
             let response = client.get(format!("{base}{path}")).send().await.unwrap();
             assert_eq!(response.status(), 303);
             assert_eq!(response.headers()["location"], format!("/auth?next={}", urlencoding::encode(path)));
@@ -419,7 +420,7 @@ mod tests {
                 assert_eq!(failed_action.status(), 400);
                 let failure: serde_json::Value = failed_action.json().await.unwrap();
                 assert!(failure["html"].as_str().unwrap().contains("当前账号不是这门课程的助教"));
-                assert_eq!(failure["url"], "/ta?course=_c_1&column=_h_1");
+                assert_eq!(failure["url"], "/ta/grading?course=_c_1&column=_h_1");
                 let refresh = client.post(format!("{base}/ta/action"))
                     .header("cookie", format!("assistant_token={token}"))
                     .header("x-ta-partial", "1")
@@ -438,8 +439,8 @@ mod tests {
                     let data: serde_json::Value = client.get(format!("{base}/api/ta/workspace{query}"))
                         .header("cookie", &cookie).send().await.unwrap().json().await.unwrap();
                     let fragment = data["html"].as_str().unwrap();
-                    assert!(fragment.contains("点击右上角「刷新作业」"));
-                    assert!(fragment.contains("value=\"refresh\""));
+                    assert_eq!(fragment.contains("点击右上角「刷新作业」"), !query.is_empty());
+                    assert_eq!(fragment.contains("value=\"refresh\""), !query.is_empty());
                     assert!(!fragment.contains("尚未绑定教学网"));
                 }
                 let refresh: serde_json::Value = client.post(format!("{base}/ta/action"))

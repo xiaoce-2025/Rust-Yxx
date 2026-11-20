@@ -55,7 +55,7 @@ pub(super) fn render(s: &Selection, w: &Workspace, csrf: &str) -> String {
 }
 pub(super) fn shell() -> String {
     wrap(
-        r#"<div class="ta-workspace"><aside class="course-panel"><h2>我的助教课程</h2><p class="muted">使用已绑定账号或一次性登录会话</p><div class="ta-skeleton"></div><div class="ta-skeleton"></div></aside><section class="ta-content"><div class="card ta-loading"><h2>正在加载助教工作台</h2><p>正在后台获取课程和作业，请稍候……</p><div class="ta-skeleton"></div><div class="ta-skeleton"></div></div></section></div>"#,
+        r#"<div class="ta-workspace"><aside class="course-panel"><h1>助教作业批改</h1><p class="muted">正在加载助教工作台</p><div class="ta-skeleton"></div></aside><section class="ta-content" aria-label="作业选择"></section></div>"#,
         true,
     )
 }
@@ -65,14 +65,6 @@ fn wrap(content: &str, loading: bool) -> String {
     html.push_str(CSS);
     html.push_str(ASYNC_CSS);
     html.push_str("</style></head><body><main>");
-    html.push_str(
-        &include_str!("../../templates/replay-hero.html")
-            .replace("{{replay_title}}", "助教作业批改")
-            .replace(
-                "{{replay_description}}",
-                "按作业整理学生提交，专注逐份批改，也能快速完成整组评分。",
-            ),
-    );
     html.push_str("<div id=\"ta-load-status\" class=\"ta-load-status\" role=\"status\" aria-live=\"polite\"></div>");
     let _ = write!(html, "<div id=\"ta-workspace-region\" data-loading=\"{loading}\" aria-busy=\"{loading}\">{content}</div>");
     html.push_str("<noscript>请启用 JavaScript，以在页面内加载课程和批改作业。</noscript></main>");
@@ -82,9 +74,27 @@ fn wrap(content: &str, loading: bool) -> String {
 }
 pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
     let mut html = String::new();
-    html.push_str("<div class=\"ta-workspace\"><aside class=\"course-panel\"><div class=\"panel-heading\"><h2>我的助教课程</h2>");
+    if s.column.is_empty() {
+        course_picker(&mut html, s, w, csrf);
+    } else {
+        assignment_workspace(&mut html, s, w, csrf);
+    }
+    html
+}
+
+fn workspace_messages(html: &mut String, s: &Selection, w: &Workspace) {
+    if let Some(error) = &w.error {
+        let _ = write!(html, r#"<div class="alert error" role="alert">{}</div>"#, e(error));
+    }
+    if !s.notice.is_empty() {
+        let _ = write!(html, r#"<div class="alert success" role="status">{}</div>"#, e(&s.notice));
+    }
+}
+
+fn course_picker(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
+    html.push_str(r#"<div class="ta-workspace"><aside class="course-panel"><div class="panel-heading"><h2>我的助教课程</h2>"#);
     html.push_str(&refresh(s, csrf, "refresh_courses", "刷新"));
-    html.push_str("</div><p class=\"muted\">左侧刷新课程列表。选中课程后，可在右侧刷新待评分作业。</p><nav class=\"course-list\" aria-label=\"助教课程\">");
+    html.push_str(r#"</div><nav class="course-list" aria-label="助教课程">"#);
     for c in &w.courses {
         let target = Selection {
             course: c.id.clone(),
@@ -97,73 +107,73 @@ pub(super) fn fragment(s: &Selection, w: &Workspace, csrf: &str) -> String {
     if w.courses.is_empty() {
         html.push_str("<div class=\"empty compact\">暂无助教课程<br><small>可点击刷新重新读取教学网课程。</small></div>");
     }
-    html.push_str("</nav><div class=\"sidebar-note\"><strong>批改小提示</strong><p>先保存评分草稿，再核对并同步教学网。</p><a class=\"text-link\" href=\"/user-center\">管理现有教学网绑定 →</a></div></aside><section class=\"ta-content\" aria-label=\"批改工作区\">");
-    if let Some(error) = &w.error {
-        let _ = write!(
-            html,
-            "<div class=\"alert error\" role=\"alert\">{} <a href=\"{}\">重新加载</a></div>",
-            e(error),
-            e(&Selection {
-                notice: String::new(),
-                ..s.clone()
-            }
-            .url())
-        );
-    }
-    if !s.notice.is_empty() {
-        let _ = write!(
-            html,
-            "<div class=\"alert success\" role=\"status\">{}</div>",
-            e(&s.notice)
-        );
-    }
     if w.courses.is_empty() {
-        html.push_str("<div class=\"empty card welcome\"><span class=\"empty-mark\" aria-hidden=\"true\">▤</span><h2>从一门助教课程开始</h2><p>点击侧栏的「刷新」从教学网获取助教课程。可使用已绑定账号或一次性登录教学网。</p><a class=\"button\" href=\"/user-center\">前往用户中心</a></div>");
-    } else {
-        let name = w
-            .courses
-            .iter()
-            .find(|c| c.id == s.course)
-            .map(|c| c.name.as_str())
-            .unwrap_or("课程");
-        let _ = write!(html,"<div class=\"section-header\"><div><div class=\"eyebrow\">作业批改工作台</div><h2>{}</h2></div>{}</div>",e(name),refresh(s, csrf, "refresh", "刷新作业"));
-        if !w.assignments.is_empty() {
-            filters(&mut html, s, w);
-        }
-        if !w.attempts.is_empty() {
-            let maximum = w.maximum.map(|value| value.to_string()).unwrap_or_default();
-            let _ = write!(html, r#"<form class="filters card" method="post" action="/ta/action">{}{}<label>本作业满分（严小希）<input type="number" name="maximum" min="0.01" step="0.01" value="{}" required></label><button name="action" value="save_maximum">保存满分</button></form>"#,
-                context(s, csrf), hidden("attempt", &s.attempt), e(&maximum));
-            if w.maximum.is_some() {
-                ai_panel(&mut html, s, w, csrf);
+        html.push_str(r#"<p class="muted">暂无助教课程</p>"#);
+    }
+    html.push_str("</nav>");
+    if s.course.is_empty() {
+        workspace_messages(html, s, w);
+    }
+    html.push_str(r#"</aside><section class="ta-content" aria-label="作业选择">"#);
+    if !s.course.is_empty() {
+        workspace_messages(html, s, w);
+        if let Some(course) = w.courses.iter().find(|c| c.id == s.course) {
+            let _ = write!(html, r#"<div class="section-header"><h2>{}</h2>{}</div>"#,
+                e(&course.name), refresh(s, csrf, "refresh", "刷新作业"));
+            if !w.queue_cached {
+                html.push_str(r#"<p class="muted">点击右上角「刷新作业」，从教学网读取这门课的待评分队列。</p>"#);
+            } else if w.assignments.is_empty() {
+                html.push_str(r#"<p class="muted">上次刷新时，这门课程没有待评分作业。</p>"#);
             }
-        }
-        if !w.queue_cached {
-            html.push_str("<div class=\"alert\">点击右上角「刷新作业」，从教学网读取这门课的待评分队列。</div>");
-        }
-        if w.assignments.is_empty() {
-            if w.queue_cached {
-                html.push_str("<div class=\"empty card\"><h3>暂无可批改作业</h3><p>上次刷新时，这门课程没有待评分作业。</p></div>");
-            }
-        } else if w.error.is_none() || !w.attempts.is_empty() || !w.drafts.is_empty() {
-            let pending = w.drafts.iter().filter(|d| !d.synced).count();
-            let _ = write!(html, r#"<div class="stats"><div><strong>{}</strong><span>待评分</span></div><div><strong>{pending}</strong><span>待同步草稿</span></div></div>"#, w.attempts.len());
-            let mut review = s.clone();
-            review.review = "1".into();
-            review.notice.clear();
-            let mut work = s.clone();
-            work.review.clear();
-            work.notice.clear();
-            let _ = write!(html,"<nav class=\"workspace-tabs\" aria-label=\"批改步骤\"><a href=\"{}\"{}>① 批改与草稿</a><a href=\"{}\"{}>② 核对并同步 <span class=\"badge\">{pending}</span></a></nav>",e(&work.url()),if s.review.is_empty(){" aria-current=\"page\""}else{""},e(&review.url()),if !s.review.is_empty(){" aria-current=\"page\""}else{""});
-            if s.review == "1" {
-                review_panel(&mut html, s, w, csrf);
-            } else {
-                grading_panel(&mut html, s, w, csrf);
+            if !w.assignments.is_empty() {
+                html.push_str(r#"<div class="assignment-list">"#);
+                for assignment in &w.assignments {
+                    let target = Selection {
+                        course: s.course.clone(), column: assignment.id.clone(), ..Default::default()
+                    };
+                    let (count, label) = if assignment.attempts.is_empty() {
+                        (String::new(), "核对草稿")
+                    } else {
+                        (format!("{} 份待评分", assignment.attempts.len()), "进入批改")
+                    };
+                    let _ = write!(html, r#"<div class="assignment-row card"><div><h3>{}</h3><small>{}</small></div>{}</div>"#,
+                        e(&assignment.name), e(&count), refresh(&target, csrf, "enter_assignment", label));
+                }
+                html.push_str("</div>");
             }
         }
     }
     html.push_str("</section></div>");
-    html
+}
+
+fn assignment_workspace(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
+    let course = Selection { course: s.course.clone(), ..Default::default() };
+    let course_name = w.courses.iter().find(|c| c.id == s.course).map(|c| c.name.as_str()).unwrap_or("助教课程");
+    let assignment = w.assignments.iter().find(|a| a.id == s.column);
+    let name = assignment.map(|a| a.name.as_str()).unwrap_or("作业批改");
+    let pending = w.drafts.iter().filter(|d| !d.synced).count();
+    let _ = write!(html, r#"<section class="assignment-workspace"><header class="assignment-header"><a class="button ghost" href="{}">← 作业选择</a><div><h1>{}</h1><p>{}</p></div><div class="assignment-counts"><span class="badge">{} 待评分</span><span class="badge">{pending} 待同步</span>{}</div></header>"#,
+        e(&course.url()), e(course_name), e(name), w.attempts.len(), refresh(s, csrf, "refresh", "刷新"));
+    workspace_messages(html, s, w);
+    if assignment.is_none() {
+        html.push_str(r#"<p class="muted">这项作业当前没有待评分提交或待核对草稿。</p></section>"#);
+        return;
+    }
+    let mut review = s.clone();
+    review.review = "1".into();
+    review.notice.clear();
+    let mut work = s.clone();
+    work.review.clear();
+    work.notice.clear();
+    let _ = write!(html, r#"<nav class="workspace-tabs" aria-label="批改步骤"><a href="{}"{}>批改与草稿</a><a href="{}"{}>核对并同步</a></nav>"#,
+        e(&work.url()), if s.review.is_empty() { r#" aria-current="page""# } else { "" },
+        e(&review.url()), if s.review == "1" { r#" aria-current="page""# } else { "" });
+    if s.review == "1" {
+        review_panel(html, s, w, csrf);
+    } else {
+        grading_panel(html, s, w, csrf);
+    }
+    html.push_str("</section>");
 }
 
 pub(super) fn ai_status(job: Option<&crate::services::ta_ai::Job>, s: &Selection) -> String {
@@ -212,18 +222,9 @@ fn ai_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
 <form action="/ta/action" method="post" data-ai-cancel {}>{}<input type="hidden" name="job_id" value="{}"><button class="ghost small" name="action" value="ai_cancel">取消后台批改</button></form>
 </details>"#,if active{"open"}else{""},context(s,csrf),e(question),e(rubric),if symbolic{""}else{" selected"},if symbolic{" selected"}else{""},if active{" disabled"}else{""},e(&s.course),e(&s.column),active,ai_status(job,s),if active{""}else{"hidden"},context(s,csrf),job.map(|j|j.id.to_string()).unwrap_or_default());
 }
-fn filters(html: &mut String, s: &Selection, w: &Workspace) {
-    let _ = write!(html,"<form class=\"filters card\" method=\"get\" action=\"/ta\">{}<label>作业<select name=\"column\">",hidden("course",&s.course));
-    for a in &w.assignments {
-        let _ = write!(
-            html,
-            "<option value=\"{}\"{}>{}</option>",
-            e(&a.id),
-            selected(&s.column, &a.id),
-            e(&a.name)
-        );
-    }
-    html.push_str("</select></label><label>评分状态<select name=\"filter\">");
+fn filters(html: &mut String, s: &Selection) {
+    let _ = write!(html, r#"<form class="filters student-filters" method="get" action="/ta/grading">{}{}<label>评分状态<select name="filter">"#,
+        hidden("course", &s.course), hidden("column", &s.column));
     for (value, label) in [
         ("", "全部待评分提交"),
         ("draft", "有待同步草稿"),
@@ -245,10 +246,10 @@ fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
             let _ = write!(html, r#"<input type="hidden" name="visible" value="{}:{}" form="bulk-form">"#,
                 e(&a.id), e(&a.revision));
         }
-    } else {
-        html.push_str("<p class=\"muted\">请先设置本作业满分，再保存评分或启动 AI 批改。</p>");
     }
-    html.push_str("<div class=\"grading-layout\"><section class=\"submission-list card\"><div class=\"list-heading\"><h3>学生提交</h3><span class=\"muted\">勾选可快速批改</span></div><div class=\"student-scroll\">");
+    html.push_str(r#"<div class="grading-layout"><section class="submission-list card"><div class="list-heading"><h3>学生提交</h3></div>"#);
+    filters(html, s);
+    html.push_str(r#"<div class="student-scroll">"#);
     for a in &visible {
         let mut target = s.clone();
         target.attempt = a.id.clone();
@@ -330,6 +331,9 @@ fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
             html.push_str(&refresh(s, csrf, "load_submission", "加载提交内容"));
         }
         let _=write!(html,"<a class=\"text-link source-link\" href=\"https://course.pku.edu.cn/webapps/assignment/gradeAssignmentRedirector?course_id={}&amp;attempt_id={}\" target=\"_blank\" rel=\"noopener noreferrer\">在教学网查看原始提交 ↗</a>",e(&s.course),e(&a.id));
+        html.push_str(r#"</section><section class="reviewer grading-editor card" aria-label="批改与评分"><h3>批改与评分</h3>"#);
+        let _ = write!(html, r#"<p class="muted">{} · {}</p>"#, e(&a.student_name), e(&date(&a.date)));
+        grading_settings(html, s, w, csrf);
         if let Some(error) = draft.and_then(|d| d.error.as_ref()) {
             let _ = write!(
                 html,
@@ -350,9 +354,18 @@ fn grading_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
             let _=write!(html,"<div class=\"form-bottom\"><button class=\"ghost\" name=\"action\" value=\"save_single\"{}>保存草稿</button><button name=\"action\" value=\"save_single_next\"{}>{}</button></div><p class=\"muted\">草稿仅自己可见。同步时会把此分数和评语写入教学网当前这一次提交。</p></form>",if blocked{" disabled"}else{""},if blocked{" disabled"}else{""},if next.is_empty(){"保存本份草稿"}else{"保存并批改下一份 →"});
         }
     } else {
-        html.push_str("<div class=\"empty\"><h3>暂时没有可查看的提交</h3><p>可切换作业或调整筛选条件。</p></div>");
+        html.push_str(r#"<p class="muted">暂时没有可查看的提交。</p>"#);
     }
     html.push_str("</section></div>");
+}
+
+fn grading_settings(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
+    let maximum = w.maximum.map(|value| value.to_string()).unwrap_or_default();
+    let _ = write!(html, r#"<form class="maximum-form" method="post" action="/ta/action">{}{}<label>本作业满分<input type="number" name="maximum" min="0.01" step="0.01" value="{}" required></label><button class="ghost" name="action" value="save_maximum">保存满分</button></form>"#,
+        context(s, csrf), hidden("attempt", &s.attempt), e(&maximum));
+    if w.maximum.is_some() {
+        ai_panel(html, s, w, csrf);
+    }
 }
 
 fn review_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
@@ -394,6 +407,9 @@ fn review_panel(html: &mut String, s: &Selection, w: &Workspace, csrf: &str) {
 }
 
 const ASYNC_CSS: &str = r#"
+.assignment-workspace{padding:16px var(--replay-gutter) 40px}.assignment-header,.assignment-counts,.assignment-row,.maximum-form{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.assignment-header{padding-bottom:12px;border-bottom:1px solid var(--line)}.assignment-header h1,.assignment-header p{margin:0}.assignment-header h1{font-size:clamp(20px,2vw,27px)}.assignment-counts{margin-left:auto}.assignment-list{display:grid;gap:10px}.assignment-row{justify-content:space-between;padding:14px 16px}.assignment-row h3{margin:0 0 4px}.grading-layout{grid-template-columns:minmax(200px,23%) minmax(0,1fr) minmax(260px,29%)}.student-filters{padding:12px;margin:0}.student-filters select,.student-filters label{min-width:0;width:100%}.grading-editor .quick{margin:12px 0}.grading-editor input[type=number]{width:100%}.maximum-form{align-items:end}.maximum-form label{flex:1;min-width:90px}.course-panel .course-list{margin-top:12px}.workspace-tabs a[aria-current=page]{border-bottom:2px solid var(--accent)}
+@media(max-width:1100px){.grading-layout{grid-template-columns:minmax(190px,26%) minmax(0,1fr)}.grading-editor{grid-column:2}}@media(max-width:720px){.grading-layout{grid-template-columns:minmax(0,1fr)}.grading-editor{grid-column:auto}.assignment-counts{margin-left:0}.assignment-header>div{width:100%}}
+
 .ta-load-status{min-height:24px;margin:12px 0;color:#64748b;font-size:14px}.ta-load-status.error{color:#b91c1c}.ta-load-status button{margin-left:12px}.ta-loading{padding:28px}.ta-skeleton{height:22px;border-radius:8px;margin:18px 0;background:#e9eef5;animation:ta-pulse 1.5s ease-in-out infinite}.ta-skeleton:nth-child(even){width:72%}#ta-workspace-region[aria-busy=true]{opacity:.65;transition:opacity .15s}@keyframes ta-pulse{50%{opacity:.4}}@media(prefers-reduced-motion:reduce){.ta-skeleton{animation:none}}
 "#;
 
@@ -433,17 +449,19 @@ const SCRIPT: &str = r#"<script>
     status.classList.toggle('error', error);
     status.textContent = text;
   }
+  const workspacePaths = ['/ta', '/ta/grading'];
   async function load(target, mode = 'push', form = null) {
     if (writing) { message('操作正在处理，请等待结果，勿重复提交。'); return; }
     const url = new URL(target, location.href);
-    if (url.origin !== location.origin || url.pathname !== '/ta') return;
+    if (url.origin !== location.origin || !workspacePaths.includes(url.pathname)) return;
     if (controller) controller.abort();
     controller = new AbortController();
     const current = ++generation;
     writing = !!form; reading = !form;
     region.inert = writing;
     region.setAttribute('aria-busy', 'true');
-    message(form ? '正在处理，请稍候；请勿重复提交……' : '正在后台加载课程和作业……');
+    message(form?.get('action') === 'enter_assignment' ? '正在加载这项作业的待评分提交……' :
+      form ? '正在处理，请稍候；请勿重复提交……' : '正在读取本地课程和作业……');
     try {
       const options = {credentials:'same-origin', cache:'no-store', signal:controller.signal,
         headers:{'Accept':'application/json', 'X-TA-Partial':'1'}};
@@ -460,7 +478,7 @@ const SCRIPT: &str = r#"<script>
         throw new Error(payload.error || '加载失败（HTTP ' + response.status + '）');
       }
       const destination = new URL(payload.url, location.origin);
-      if (destination.origin !== location.origin || destination.pathname !== '/ta') throw new Error('页面地址无效');
+      if (destination.origin !== location.origin || !workspacePaths.includes(destination.pathname)) throw new Error('页面地址无效');
       region.innerHTML = payload.html;
       void window.TeachingSession.handleError(region.textContent);
       region.dataset.loading = 'false';
@@ -495,14 +513,14 @@ const SCRIPT: &str = r#"<script>
     const link = event.target.closest('a[href]');
     if (!link || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || link.target || link.hasAttribute('download')) return;
     const url = new URL(link.href, location.href);
-    if (url.origin === location.origin && url.pathname === '/ta') {
+    if (url.origin === location.origin && workspacePaths.includes(url.pathname)) {
       event.preventDefault(); load(url.href);
     }
   });
   region.addEventListener('submit', event => {
     // Buttons named "action" shadow HTMLFormElement.action; read the attribute.
     const form = event.target, url = new URL(form.getAttribute('action') || location.href, location.href);
-    if (url.origin !== location.origin || !['/ta', '/ta/action'].includes(url.pathname)) return;
+    if (url.origin !== location.origin || !workspacePaths.includes(url.pathname) && url.pathname !== '/ta/action') return;
     event.preventDefault();
     if (writing || (reading && form.method.toLowerCase() === 'post')) {
       message('数据正在更新，请等待完成后再操作。'); return;
@@ -576,10 +594,27 @@ mod tests {
         (s, w)
     }
     #[test]
+    fn course_selection_keeps_the_right_side_empty_until_a_course_is_selected() {
+        let (mut selection, mut workspace) = fixture();
+        selection.column.clear();
+        workspace.assignments[0].attempts = workspace.attempts.clone();
+        let blank = fragment(&Selection::default(), &workspace, "csrf");
+        assert!(blank.contains(r#"<section class="ta-content" aria-label="作业选择"></section>"#));
+        assert!(!blank.contains("作业一 · 基础练习"));
+        let course = fragment(&selection, &workspace, "csrf");
+        assert!(course.contains("作业一 · 基础练习"));
+        assert!(course.contains("进入批改"));
+        assert!(!course.contains(r#"class="grading-layout""#));
+    }
+
+    #[test]
     fn renders_real_forms_and_escapes_untrusted_submission() {
         let (s, w) = fixture();
         let html = render(&s, &w, "csrf");
         assert!(html.contains("&lt;script&gt;") && !html.contains("<script>alert"));
+        assert!(html.contains("aria-label=\"批改与评分\""));
+        assert!(html.contains("href=\"/ta?course=_c_1\""));
+        assert!(html.contains("/ta/grading?course=_c_1"));
         assert!(html.contains("form=\"bulk-form\"") && html.contains("name=\"revision\""));
         assert!(html.contains("/ta/action") && !html.contains("type=\"password\""));
         assert!(html.contains("value=\"strict\"") && html.contains("value=\"symbolic\""));

@@ -60,7 +60,8 @@ impl Selection {
             }
         }
         format!(
-            "/ta{}",
+            "{}{}",
+            if self.column.is_empty() { "/ta" } else { "/ta/grading" },
             url.query().map(|q| format!("?{q}")).unwrap_or_default()
         )
     }
@@ -140,6 +141,7 @@ enum WorkspaceLoad {
     Cached,
     RefreshCourse,
     LoadSubmission,
+    EnterAssignment,
 }
 
 async fn load_workspace(
@@ -161,17 +163,7 @@ async fn load_workspace_with_client(
     load: WorkspaceLoad,
 ) -> Result<(), String> {
     workspace.courses = bb.courses().await?;
-    if workspace.courses.is_empty() {
-        return Ok(());
-    }
-    if selection.course.is_empty() {
-        selection.course = workspace
-            .courses
-            .first()
-            .map(|c| c.id.clone())
-            .unwrap_or_default();
-    }
-    if selection.course.is_empty() {
+    if selection.course.is_empty() || workspace.courses.is_empty() {
         return Ok(());
     }
     if !workspace.courses.iter().any(|c| c.id == selection.course) {
@@ -194,16 +186,12 @@ async fn load_workspace_with_client(
             });
         }
     }
-    let selected = workspace.assignments.iter().position(|a| a.id == selection.column).unwrap_or_default();
-    let Some(assignment) = workspace.assignments.get_mut(selected) else {
-        selection.column.clear();
-        selection.attempt.clear();
+    if selection.column.is_empty() {
+        return Ok(());
+    }
+    let Some(assignment) = workspace.assignments.iter_mut().find(|a| a.id == selection.column) else {
         return Ok(());
     };
-    if selection.column != assignment.id {
-        selection.column.clone_from(&assignment.id);
-        selection.attempt.clear();
-    }
     workspace.maximum = load_maximum(state, user.id, &selection.course, &selection.column).await?;
     workspace.ai_job = ai::snapshot(state, user.id, &selection.course, &selection.column).await?;
     workspace.drafts = load_drafts(state, user.id, &selection.course, &selection.column).await?;
@@ -211,20 +199,45 @@ async fn load_workspace_with_client(
     if workspace.attempts.is_empty() {
         selection.review = "1".into();
     }
+    if matches!(load, WorkspaceLoad::EnterAssignment | WorkspaceLoad::RefreshCourse)
+        && selection.review != "1"
+    {
+        load_assignment_submissions(bb, &selection.course, workspace).await;
+    }
     let visible = visible_attempts(selection, workspace);
     if selection.attempt.is_empty() {
         selection.attempt = visible.first().map(|a| a.id.clone()).unwrap_or_default();
     }
     if selection.review != "1" {
         if let Some(attempt) = visible.iter().find(|a| a.id == selection.attempt) {
-            workspace.submission = if load == WorkspaceLoad::Cached {
-                bb.stored_submission(&selection.course, attempt).await?
-            } else {
+            workspace.submission = if load == WorkspaceLoad::LoadSubmission {
                 Some(bb.submission(&selection.course, attempt).await?)
+            } else {
+                bb.stored_submission(&selection.course, attempt).await?
             };
         }
     }
     Ok(())
+}
+
+async fn load_assignment_submissions(bb: &Blackboard, course: &str, workspace: &mut Workspace) {
+    let mut failed = 0;
+    let mut first_error = None;
+    for attempt in &workspace.attempts {
+        if let Err(error) = bb.submission(course, attempt).await {
+            failed += 1;
+            if crate::services::pkulogin::is_auth_error(&error)
+                || error.contains("尚未绑定教学网")
+            {
+                workspace.error = Some(error);
+                return;
+            }
+            first_error.get_or_insert(error);
+        }
+    }
+    if let Some(error) = first_error {
+        workspace.error = Some(format!("有 {failed} 份提交内容未能加载，可打开对应提交单独重试。{error}"));
+    }
 }
 
 pub(super) fn visible_attempts<'a>(
@@ -350,14 +363,19 @@ async fn action(
     let lock = state.ta_mutation(user.id).await;
     let _guard = lock.lock().await;
     let operation = field(&form, "action");
-    if matches!(operation, "refresh_courses" | "refresh" | "load_submission") {
+    if matches!(operation, "refresh_courses" | "refresh" | "load_submission" | "enter_assignment") {
         let load = match operation {
             "refresh" => WorkspaceLoad::RefreshCourse,
             "load_submission" => WorkspaceLoad::LoadSubmission,
+            "enter_assignment" => WorkspaceLoad::EnterAssignment,
             _ => WorkspaceLoad::Cached,
         };
         let mut workspace = Workspace::default();
-        let bb = Blackboard::cached(&state, &user, load == WorkspaceLoad::RefreshCourse);
+        let bb = if load == WorkspaceLoad::RefreshCourse {
+            Blackboard::live_checks(&state, &user)
+        } else {
+            Blackboard::cached(&state, &user, false)
+        };
         if operation == "refresh_courses" {
             match bb.refresh_courses().await {
                 Ok(courses) => {
@@ -370,7 +388,7 @@ async fn action(
             }
         }
         match load_workspace_with_client(&state, &user, &mut selection, &mut workspace, &bb, load).await {
-            Ok(()) if operation == "refresh" => {
+            Ok(()) if operation == "refresh" && workspace.error.is_none() => {
                 selection.notice = "已从教学网刷新当前课程的待评分队列".into();
             }
             Err(error) if load == WorkspaceLoad::RefreshCourse => {
@@ -825,6 +843,7 @@ mod tests {
             score: Option<f64>,
             writes: Vec<(String, String)>,
             uncertain: bool,
+            submission_reads: Vec<String>,
         }
         let remote = Arc::new(Mutex::new(Remote::default()));
         let app = Router::new()
@@ -837,6 +856,10 @@ mod tests {
                     rows.push_str(&ta::grading_row("_c_1", "_h_1", "作业", "_a_1", "2026年11月12日"));
                 }
                 Html(format!("<table>{rows}</table>"))
+            }))
+            .route("/webapps/assignment/gradeAssignmentRedirector", get(|State(r): State<Arc<Mutex<Remote>>>, Query(query): Query<HashMap<String, String>>| async move {
+                r.lock().unwrap().submission_reads.push(query["attempt_id"].clone());
+                Html("<div id='submissionText'>待评分正文</div>")
             }))
             .route("/webapps/gradebook/controller/reconcileGrades",get(||async {Html("<input name='blackboard.platform.security.NonceUtil.nonce.ajax' value='nonce'>")}))
             .route("/webapps/gradebook/controller/saveReconcileGrade",post(|State(r):State<Arc<Mutex<Remote>>>,Form(f):Form<HashMap<String,String>>|async move {
@@ -886,6 +909,10 @@ mod tests {
         assert_eq!(load_maximum(&state, uuid::Uuid::new_v4(), &s.course, &s.column).await.unwrap(), None);
         let queue = bb.grading_queue(&s.course).await.unwrap();
         let attempts = &queue[0].attempts;
+        let mut workspace = Workspace { attempts: attempts.clone(), ..Default::default() };
+        load_assignment_submissions(&bb, &s.course, &mut workspace).await;
+        assert!(workspace.error.is_none());
+        assert_eq!(remote.lock().unwrap().submission_reads, ["_a_old", "_a_1"]);
         let revision = attempts
             .iter()
             .find(|a| a.id == "_a_1")
